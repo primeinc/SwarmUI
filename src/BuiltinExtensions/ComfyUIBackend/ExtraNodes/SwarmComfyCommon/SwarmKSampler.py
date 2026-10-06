@@ -16,11 +16,31 @@ _preview_lock = threading.Lock()
 _preview_sampler_active = False
 _last_preview_step_sent = -1
 
+# preview_to_image is process-global, so its activation state must also be
+# process-global. Keeping this state module-local breaks if SwarmComfyCommon is
+# loaded more than once: the first module owns the monkeypatch while a later
+# module owns the active sampler.
+if not hasattr(latent_preview, "_swarm_preview_state"):
+    latent_preview._swarm_preview_state = {"active_count": 0, "lock": threading.Lock()}
+_preview_state = latent_preview._swarm_preview_state
+
+def _swarm_preview_active():
+    with _preview_state["lock"]:
+        return _preview_state["active_count"] > 0
+
+def _swarm_preview_begin():
+    with _preview_state["lock"]:
+        _preview_state["active_count"] += 1
+
+def _swarm_preview_end():
+    with _preview_state["lock"]:
+        _preview_state["active_count"] = max(0, _preview_state["active_count"] - 1)
+
 if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
     _original_preview_to_image = latent_preview.preview_to_image
     # Copy/paste of preview_to_image but with the Image.fromarray on unloaded data removed
     def _swarm_preview_to_image(latent_image, do_scale=True):
-        if not _preview_sampler_active:
+        if not _swarm_preview_active():
             return _original_preview_to_image(latent_image, do_scale)
         if do_scale:
             latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1).mul(0xFF))
@@ -160,6 +180,17 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_ma
         return None
 
 
+def _swarm_preview_frame_to_image(frame):
+    # Normal Comfy previewers return PIL.Image. Swarm's async preview monkeypatch
+    # returns a CPU uint8 tensor. Accept both so a bypassed/replaced monkeypatch
+    # cannot crash the preview sender.
+    if isinstance(frame, Image.Image):
+        return frame
+    if torch.is_tensor(frame):
+        return Image.fromarray(frame.numpy())
+    raise TypeError(f"Unsupported Swarm preview frame type: {type(frame).__name__}")
+
+
 def make_swarm_sampler_callback(steps, device, model, previews):
     previewer = latent_preview.get_previewer(device, model.model.latent_format) if previews != "none" else None
     pbar = comfy.utils.ProgressBar(steps)
@@ -202,10 +233,10 @@ def make_swarm_sampler_callback(steps, device, model, previews):
                     if not _preview_sampler_active or step < _last_preview_step_sent:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [Image.fromarray(tensor.numpy()) for tensor in frames])
+                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames])
                     else:
-                        for id, tensor in frames:
-                            swarm_send_extra_preview(id, Image.fromarray(tensor.numpy()))
+                        for id, frame in frames:
+                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame))
                     _last_preview_step_sent = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
@@ -466,6 +497,7 @@ class SwarmKSampler:
             with _preview_lock:
                 _preview_sampler_active = True
                 _last_preview_step_sent = -1
+            _swarm_preview_begin()
             try:
                 callback = make_swarm_sampler_callback(steps, device, model, previews)
 
@@ -476,6 +508,7 @@ class SwarmKSampler:
             finally:
                 with _preview_lock:
                     _preview_sampler_active = False
+                _swarm_preview_end()
         return (out, )
 
     # tiled sample version of sample function
