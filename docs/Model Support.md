@@ -23,6 +23,8 @@
 [Boogu](#boogu) | MMDiT | 2026 | Boogu | 10B | Minimal | Modern, fast |
 [Qwen Image 2.1](#qwen-image-21) | MMDiT | 2026 | Alibaba-Qwen | 7B | No | Modern, creative, slow |
 [Ming Image](#ming-image) | DiT | 2026 | InclusionAI | 6B | Minimal | Modern, intelligent but ugly |
+[Flux 3 Image](#flux-3-image) | DiT | 2026 | Black Forest Labs | 5.6B | Yes | Modern, intelligent but poor details |
+[MOSS Image](#moss-image) | DiT | 2026 | OpenMOSS | 5B | No | Modern, extremely capable |
 
 Old or bad options also tracked listed via [Obscure Model Support](/docs/Obscure%20Model%20Support.md):
 
@@ -93,12 +95,21 @@ Image model(s) most worth using, as of September 2026:
 
 # Image Models
 
-- Image demos included below are mini-grids of seeds `1, 2, 3` of the prompt `wide shot, photo of a cat with mixed black and white fur, sitting in the middle of an open roadway, holding a cardboard sign that says "Meow I'm a Cat". In the distance behind is a green road sign that says "Model Testing Street".` ran on each model.
+- The early image demos included below are mini-grids of seeds `1, 2, 3` res 1:1 of the prompt `wide shot, photo of a cat with mixed black and white fur, sitting in the middle of an open roadway, holding a cardboard sign that says "Meow I'm a Cat". In the distance behind is a green road sign that says "Model Testing Street".` ran on each model.
+    - This prompt is designed to require (1) multiple complex components (2) photorealism (3) text (4) impossible actions (cat holding a sign - Most models get very confused how to do this).
+- In 2026, models became sufficiently capable as to irrelevantize this test. Therefore, a tougher prompt is used for later prompts: a single 21:9 run of seed `1` with this prompt:
+    ```
+    Four panels in horizontal parallel.
+    Panel one (leftmost): wide shot, photo of a cat with mixed black and white fur, sitting in the middle of an open roadway, holding a cardboard sign that says "Meow I'm a Cat". In the distance behind is a green road sign that says "Model Testing Street".
+    Panel two: anime art, Frieren art style, 1girl, a 21 year old magical princess. Her face resembles Hatsune Miku. She wears a purple hat, a large flowing white dress, with black and purple accents detailing her arm bracers, leggings, and other bits n bobs. Green forest background.
+    Panel three: Spongebob Squarepants art style, showing Patrick Star shaking hands with Homer Simpson (still in the Spongebob style)
+    Panel four (rightmost): real photo, close up, Ben Affleck's face. He is a grizzled soldier, with a tough expression, staring dead at the camera.
+    Across the whole bottom of the image: Simple white text with black dropshadow, reads clearly: "This prompt is intended to test the model's range, capabilities, and intelligence."  The second line reads "This text should be readable, and the characters and styles in each panel should match the prompt."
+    ```
 - For all models, "standard parameters" are used.
-    - Steps is set to 20 except for Turbo models. Turbo models are ran at their standard fast steps (usually 4).
+    - Steps is set to 20 except for Turbo models. Turbo models are ran at their standard fast steps (usually 4 or 8).
     - CFG is set appropriate to the model.
-    - Resolution is model default.
-- This prompt is designed to require (1) multiple complex components (2) photorealism (3) text (4) impossible actions (cat holding a sign - Most models get very confused how to do this).
+    - Any separated prompt upsampler LLMs are *not* run.
 - All generations are done on the base model of the relevant class, not on any finetune/lora/etc. Finetunes are likely to significantly change the qualitative capabilities, but unlikely to significantly change general ability to understand and follow prompts.
 - This is not a magic perfect test prompt, just a decent coverage of range to showcase approximately what you can expect from the model in terms of understanding and handling challenges.
     - You could make a point that maybe I should have set CFG different or used a sigma value or changed up prompt phrasing or etc. and get better quality - this test intentionally uses very bland parameters to maximize identical comparison. Keep in mind that you can get better results out of a model by fiddling parameters.
@@ -456,13 +467,15 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 
 # Qwen Image 2.1
 
-![img](/docs/images/models/qwenimage21.jpg)
+![img](/docs/images/models2/qwenimage21.jpg)
 
 - [Qwen Image 2.1](<https://huggingface.co/Qwen/Qwen-Image-2.1>) is supported in SwarmUI
     - This models specific claim to fame is being the first proper model that supports alpha - meaning, it can generate images with transparency
     - It can also do image editing & referencing at relatively high quality
     - They have a blog post that demonstrates main use cases here: [Qwen AI Blog: Qwen Image 2.1](<https://qwen.ai/blog?id=qwen-image-2.1>)
 - Main model downloads are here: [Comfy-Org/Qwen-Image-2.1](<https://huggingface.co/Comfy-Org/Qwen-Image-2.1/tree/main/diffusion_models>)
+    - There is a regular and turbo version
+    - For the Turbo version, use Steps=8 and Scheduler=AlignYourSteps
 - It has a ch=64 scale=16 RGBA VAE, it will be downloaded automatically
     - Note that many models are scale=8, this is scale=16, meaning it has a larger 'snap' in resolution range, and needs to be set to 2048x2048 to generate the equivalent quality of what most models do at 1024x1024
     - There is an unofficial 'texture fix' VAE that looks a bit better, download here [madebyollin/texture-fix-vae](<https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1/blob/main/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors>). If you prefer it, select it in User Settings -> DefaultQwen21VAE.
@@ -473,6 +486,10 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
     - **Prompt Images:** add up to 10 images to the prompt for editing or referencing
     - **CFG Scale:** Use `1`
     - **Steps:** Normal step ranges (like `20`, official Qwen reference is `40`, can still produce coherent images with lower step counts like 12)
+        - For Turbo version, use 8
+    - **Sampler:** Default is fine
+    - **Scheduler:** Default is fine
+        - For Turbo version, AlignYourSteps is recommended
     - **Resolution:** The model is built for SideLength=2048 (at a 16x downscale, equivalent to 1024x1024 on most other models), but you may wish to lower this for speed (and sometimes quality, 2048 may be a bit undertrained), eg SideLength=1024 is more comfortable for quick gens
         - Consider trying 1024 base res and a Refiner Upscale 2x
 
@@ -506,9 +523,7 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 
 # Z-Image
 
-![img](/docs/images/models/zimage.jpg)
-
-*(Steps=9, Z-Image Turbo)*
+![img](/docs/images/models2/zimage.jpg)
 
 - [Z-Image](<https://huggingface.co/Tongyi-MAI/Z-Image>) and [Z-Image Turbo](<https://huggingface.co/Tongyi-MAI/Z-Image-Turbo>) are supported in SwarmUI!
     - It is a 6B scaled model, with both a strong base and an official turbo designed to run extremely fast while competing at the top level of image models
@@ -588,7 +603,7 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 
 # HiDream-O1
 
-![img](/docs/images/models/hidreamo1.jpg)
+![img](/docs/images/models2/hidreamo1.jpg)
 
 *(HiDream-o1 Dev FP8, Steps=20, CFG=1, SideLength=2048)*
 
@@ -640,7 +655,7 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 
 # Krea 2
 
-![img](/docs/images/models/krea2.jpg)
+![img](/docs/images/models2/krea2.jpg)
 
 - Krea 2 is supported in SwarmUI!
 - It is a 13B model (reported officially as 12B) with a Base ('Raw') and Turbo variant.
@@ -668,6 +683,8 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
     - **Sigma Shift:** Defaults to `1.15`
 
 # Boogu
+
+![img](/docs/images/models2/boogu.jpg)
 
 - [Boogu](<https://huggingface.co/Boogu>) is supported in SwarmUI!
 - It is a 10B model, derived from OmniGen, that comes in three separate variants - **Base**, **Edit**, and **Turbo**:
@@ -699,6 +716,52 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
     - **Prompt:** Likes JSON blocks, similar to ideogram
     - **CFG Scale:** `1`
     - **Steps:** They recommend `12`
+
+# Flux 3 Image
+
+![img](/docs/images/models2/flux3klein.jpg)
+
+*(Flux 3 Klein SD, 16 steps, 1024)*
+
+- [FLUX 3 Image Klein](<https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy>) is supported in SwarmUI!
+- It is a 5.6B image model intended as a direct partial upgrade to the Flux 2 Klein models
+    - Download here: [Black-Forest-Labs/Flux-3-Image-Klein](<https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/tree/main/diffusion_models>)
+    - They have a "base" and "sd" version - "sd" means distilled (CFG=1, Steps=8 or 16)
+    - They have bf16, int8, and nvfp4 versions - the int8 version is strongly recommended for most users
+    - Initial community opinion is low regarding quality as compared to current leading image models, but it is a very *fast* model at least
+- Supports text-to-image, and image editing with prompt image references
+- VAE and text encoder will be automatically downloaded
+    - The VAE is still the Flux 2 image VAE
+- **Parameters:**
+    - **Prompt:** They recommend using an LLM to rewrite your prompts to be much longer
+        - They allow JSON bounding box prompt in this example format:
+            `Minimalist graphic illustration featuring a black silhouette of a person <silhouette_1> centered against a solid, vibrant chartreuse background <background_1>. The figure is captured in a dynamic, mid-stride running pose, facing toward the left side of the frame. [{"id": "background_1", "bbox": [0, 0, 1000, 1000], "desc": "A flat field of neon yellow-green with a subtle paper texture and fine, organic grain."}, {"id": "silhouette_1", "bbox": [150, 150, 850, 850], "desc": "A black silhouette of a person in motion, made of dense stippled ink."}]`
+        - They have LLM system prompts available here [Black-Forest-Labs/system_prompts](<https://huggingface.co/black-forest-labs/flux-3-image-klein-pup/blob/main/system_prompts.json>)
+        - Also, prompting guide [bfl.ai](<https://docs.bfl.ai/guides/prompting_summary>)
+    - **Prompt Images:** You can add up to 10 images to the prompt to use as references or editing
+    - **CFG Scale:** `1` for 'sd' Distilled, regular ranges (eg `3.5`) for Base
+    - **Steps:** `16` for 'sd' Distilled (can go down to `4` at some quality loss), regular ranges (`20` or more) for Base
+    - **Resolution:** `1024` is default but anywhere from `128` up to `3072` can work
+    - **Sampler:** Defaults to `er_sde`
+
+# MOSS Image
+
+![img](/docs/images/models2/mossimage.jpg)
+
+- [MOSS Image](<https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base>) is supported in SwarmUI!
+- It is a 5B image model
+    - Download here [Comfy-Org/MOSS-Image](<https://huggingface.co/Comfy-Org/MOSS-Image/tree/main/diffusion_models>)
+    - There are bf16 and int8 variants, the int8 is recommended
+    - There is a 'Base' and 'SFT' version - the 'SFT' is quality tuned, whereas the base is less trained and more variable
+- The VAE (Flux 2) and Text Encoder (Qwen 3.5 9B) will be automatically downloaded
+- **Parameters:**
+    - **Prompt:** They have an official prompt enhancer LLM skill file [OpenMOSS/prompt-enhancer](<https://github.com/OpenMOSS/MOSS-Image/blob/main/skills/moss-image-prompt-enhancer/SKILL.md>)
+        - Supports JSON Bounding Boxes in captions, see [their example JSON prompt](<https://github.com/OpenMOSS/MOSS-Image/blob/main/skills/moss-image-prompt-enhancer/references/layout.md#example>)
+    - **Prompt Images:** The model does not natively do image editing or references, but you can toss in prompt images anyway and the textencoder will see them, just not retain all details
+    - **CFG Scale:** normal ranges, they officially use `3` but higher may be better - `7` is used for the sample image
+    - **Steps:** normal ranges like `20` though higher may be needed for the raw models
+    - **Resolution:** `1024`, lower values down to 256 work as expected, higher values are quite variable
+    - **SkipLayerGuidance:** The OpenMOSS team recommends skip layer guidance with Layer Target set to `22`, but the benefit is questionable. This is available in Swarm's extension list if you'd like to try it.
 
 # Video Models
 
