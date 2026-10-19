@@ -160,6 +160,13 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_ma
         return None
 
 
+def _swarm_preview_pil_image(image):
+    """Normalize PIL and deferred tensor previews before sending them."""
+    if isinstance(image, Image.Image):
+        return image
+    return Image.fromarray(image.numpy())
+
+
 def make_swarm_sampler_callback(steps, device, model, previews):
     previewer = latent_preview.get_previewer(device, model.model.latent_format) if previews != "none" else None
     pbar = comfy.utils.ProgressBar(steps)
@@ -202,10 +209,10 @@ def make_swarm_sampler_callback(steps, device, model, previews):
                     if not _preview_sampler_active or step < _last_preview_step_sent:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [Image.fromarray(tensor.numpy()) for tensor in frames])
+                        swarm_send_animated_preview(0, [_swarm_preview_pil_image(frame) for frame in frames])
                     else:
-                        for id, tensor in frames:
-                            swarm_send_extra_preview(id, Image.fromarray(tensor.numpy()))
+                        for id, frame in frames:
+                            swarm_send_extra_preview(id, _swarm_preview_pil_image(frame))
                     _last_preview_step_sent = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
