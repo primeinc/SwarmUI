@@ -19,7 +19,7 @@ public class ComfyWorkflowGeneratorTests : SwarmUITest
     {
         return new WorkflowGenerator()
         {
-            UserInput = new T2IParamInput(),
+            UserInput = new T2IParamInput(null),
             Workflow = new JObject()
         };
     }
