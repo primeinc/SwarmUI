@@ -673,8 +673,18 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Recomposites a masked image edit, after <see cref="CreateImageMaskCrop(JArray, JArray, int)"/> was used.</summary>
-    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage)
+    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false)
     {
+        // Segment masks govern where an edit is applied. Qwen Image 2.1 can return RGBA pixels,
+        // and the compositor otherwise multiplies the segment mask by the generated alpha.
+        if (stripSourceAlpha)
+        {
+            string rgbOnly = CreateNode("SplitImageWithAlpha", new JObject()
+            {
+                ["image"] = newImage
+            });
+            newImage = [rgbOnly, 0];
+        }
         string scaledBack = CreateNode("ImageScale", new JObject()
         {
             ["image"] = newImage,

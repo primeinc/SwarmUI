@@ -1944,7 +1944,8 @@ public class WorkflowGeneratorSteps
                     string sampler = g.CreateKSampler(model.Path, prompt, negPrompt, [g.MaskShrunkInfo.MaskedLatent, 0], cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID);
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
-                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path);
+                    g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
+                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: g.IsQwenImage21());
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }
