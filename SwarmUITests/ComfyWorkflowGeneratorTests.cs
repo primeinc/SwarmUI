@@ -17,6 +17,7 @@ public class ComfyWorkflowGeneratorTests : SwarmUITest
         {
             T2IParamTypes.RegisterDefaults();
         }
+        ComfyUIBackendExtension.EnableReferenceLatents ??= new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents"));
     }
 
     private static WorkflowGenerator NewGenerator()
@@ -70,7 +71,7 @@ public class ComfyWorkflowGeneratorTests : SwarmUITest
         WorkflowGenerator generator = NewGenerator();
         generator.CurrentVae = new WGNodeData(["base-vae", 0], generator, WGNodeData.DT_VAE, null);
         WGNodeData segmentVae = new(["segment-vae", 0], generator, WGNodeData.DT_VAE, null);
-        Assert.Throws<System.InvalidOperationException>(() => generator.WithCurrentVae(segmentVae, () => throw new System.InvalidOperationException("test")));
+        Assert.Throws<System.InvalidOperationException>(() => generator.WithCurrentVae<int>(segmentVae, () => throw new System.InvalidOperationException("test")));
         Assert.That(generator.CurrentVae.Path[0].ToString(), Is.EqualTo("base-vae"));
     }
 
