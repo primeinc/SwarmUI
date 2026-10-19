@@ -169,6 +169,9 @@ public partial class WorkflowGenerator
     /// <summary>If true, the generator is currently working on the refiner stage.</summary>
     public bool IsRefinerStage = false;
 
+    /// <summary>If true, we are building a segment sampler, so the model may need segment-specific conditioning.</summary>
+    public bool IsSegmentSamplerStage = false;
+
     /// <summary>If true, the generator is currently working on the pixel-decoder stage.</summary>
     public bool IsPixelDecoderStage = false;
 
@@ -841,19 +844,28 @@ public partial class WorkflowGenerator
         return result;
     }
 
-    /// <summary>Temporarily uses a stage-specific VAE for operations that read CurrentVae, such as Qwen Image 2.1 reference-latent encoding.</summary>
-    public T WithCurrentVae<T>(WGNodeData vae, Func<T> action)
+    /// <summary>Temporarily scopes the segment VAE and model-specific reference behavior to one sampler, restoring both afterward.</summary>
+    public T WithSegmentSamplingVae<T>(WGNodeData vae, Func<T> action)
     {
         WGNodeData previousVae = CurrentVae;
+        bool previousStage = IsSegmentSamplerStage;
         try
         {
             CurrentVae = vae;
+            IsSegmentSamplerStage = true;
             return action();
         }
         finally
         {
             CurrentVae = previousVae;
+            IsSegmentSamplerStage = previousStage;
         }
+    }
+
+    /// <summary>Whether Qwen Image 2.1 should receive the automatically inferred original-image reference during sampling.</summary>
+    public bool ShouldUseQwen21AutomaticReference()
+    {
+        return IsQwenImage21() && (!IsSegmentSamplerStage || UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true));
     }
 
     public (JArray, JArray, JArray, JArray) BuildInputImageHandling(List<JArray> images, JArray pos, JArray neg, JArray latent)
@@ -1198,7 +1210,7 @@ public partial class WorkflowGenerator
         }
         else
         {
-            if (IsKontext() || (IsQwenImage() && IsQwenImageEdit()) || IsQwenImage21())
+            if (IsKontext() || (IsQwenImage() && IsQwenImageEdit()) || ShouldUseQwen21AutomaticReference())
             {
                 if (MaskShrunkInfo is not null && MaskShrunkInfo.ScaledImage is not null)
                 {

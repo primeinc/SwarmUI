@@ -41,12 +41,30 @@ public class ComfyWorkflowGeneratorTests : SwarmUITest
         generator.CurrentVae = new WGNodeData(["base-vae", 0], generator, WGNodeData.DT_VAE, compat);
         WGNodeData segmentVae = new(["segment-vae", 0], generator, WGNodeData.DT_VAE, compat);
 
-        generator.WithCurrentVae(segmentVae, () => generator.BuildInputImageHandling([["cropped-segment", 0]], ["positive", 0], ["negative", 0], ["latent", 0]));
+        generator.WithSegmentSamplingVae(segmentVae, () => generator.BuildInputImageHandling([["cropped-segment", 0]], ["positive", 0], ["negative", 0], ["latent", 0]));
 
         JProperty encoded = generator.Workflow.Properties().Single(p => p.Value["class_type"]?.ToString() == "VAEEncode");
         Assert.That(encoded.Value["inputs"]["vae"][0].ToString(), Is.EqualTo("segment-vae"));
         Assert.That(generator.CurrentVae.Path[0].ToString(), Is.EqualTo("base-vae"));
         Assert.That(generator.Workflow.Properties().Count(p => p.Value["class_type"]?.ToString() == "ReferenceLatent"), Is.EqualTo(2));
+    }
+
+    [Test]
+    public static void TestQwenSegmentCanDisableAutomaticOriginalReference()
+    {
+        WorkflowGenerator generator = NewGenerator();
+        T2IModelCompatClass compat = T2IModelClassSorter.CompatQwenImage21;
+        generator.FinalLoadedModel = new T2IModel(null, "/models/diffusion_models", null, "qwen-21")
+        {
+            ModelClass = new T2IModelClass() { ID = "qwen-image-2.1", CompatClass = compat }
+        };
+        WGNodeData segmentVae = new(["segment-vae", 0], generator, WGNodeData.DT_VAE, compat);
+
+        Assert.That(generator.WithSegmentSamplingVae(segmentVae, () => generator.ShouldUseQwen21AutomaticReference()), Is.True);
+        generator.UserInput.Set(T2IParamTypes.SegmentQwenUseOriginalReference, false);
+        Assert.That(generator.WithSegmentSamplingVae(segmentVae, () => generator.ShouldUseQwen21AutomaticReference()), Is.False);
+        Assert.That(generator.ShouldUseQwen21AutomaticReference(), Is.True, "The segment option must not change ordinary Qwen sampling.");
+        Assert.That(generator.IsSegmentSamplerStage, Is.False, "Segment scope must be restored.");
     }
 
     [Test]
@@ -71,7 +89,7 @@ public class ComfyWorkflowGeneratorTests : SwarmUITest
         WorkflowGenerator generator = NewGenerator();
         generator.CurrentVae = new WGNodeData(["base-vae", 0], generator, WGNodeData.DT_VAE, null);
         WGNodeData segmentVae = new(["segment-vae", 0], generator, WGNodeData.DT_VAE, null);
-        Assert.Throws<System.InvalidOperationException>(() => generator.WithCurrentVae<int>(segmentVae, () => throw new System.InvalidOperationException("test")));
+        Assert.Throws<System.InvalidOperationException>(() => generator.WithSegmentSamplingVae<int>(segmentVae, () => throw new System.InvalidOperationException("test")));
         Assert.That(generator.CurrentVae.Path[0].ToString(), Is.EqualTo("base-vae"));
     }
 
