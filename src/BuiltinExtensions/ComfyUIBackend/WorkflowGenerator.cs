@@ -841,6 +841,21 @@ public partial class WorkflowGenerator
         return result;
     }
 
+    /// <summary>Temporarily uses a stage-specific VAE for operations that read CurrentVae, such as Qwen Image 2.1 reference-latent encoding.</summary>
+    public T WithCurrentVae<T>(WGNodeData vae, Func<T> action)
+    {
+        WGNodeData previousVae = CurrentVae;
+        try
+        {
+            CurrentVae = vae;
+            return action();
+        }
+        finally
+        {
+            CurrentVae = previousVae;
+        }
+    }
+
     public (JArray, JArray, JArray, JArray) BuildInputImageHandling(List<JArray> images, JArray pos, JArray neg, JArray latent)
     {
         JArray imgNeg = null;

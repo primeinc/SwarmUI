@@ -1811,6 +1811,7 @@ public class WorkflowGeneratorSteps
                     g.FinalLoadedModel = t2iModel;
                     g.CurrentModel = model;
                 }
+                WGNodeData segmentBaseClip = clip;
                 PromptRegion negativeRegion = new(g.UserInput.Get(T2IParamTypes.NegativePrompt, ""));
                 PromptRegion.Part[] negativeParts = [.. negativeRegion.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
                 for (int i = 0; i < parts.Length; i++)
@@ -1927,9 +1928,13 @@ public class WorkflowGeneratorSteps
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
                     g.EnableDifferential();
+                    // Always start each segment from its own selected model and unmodified text encoder.
+                    // EnableDifferential may replace CurrentModel; the sampler must use that replacement.
+                    model = g.CurrentModel;
+                    clip = segmentBaseClip;
                     if (part.ContextID > 0)
                     {
-                        (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, g.CurrentModel.Path, clip.Path);
+                        (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
                         model = model.WithPath(newModel);
                         clip = clip.WithPath(newClip);
                     }
@@ -1941,7 +1946,9 @@ public class WorkflowGeneratorSteps
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     WGNodeData beforeImage = g.CurrentMedia;
-                    string sampler = g.CreateKSampler(model.Path, prompt, negPrompt, [g.MaskShrunkInfo.MaskedLatent, 0], cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID);
+                    // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
+                    // When Segment Model differs from the base model, that must be the segment VAE.
+                    string sampler = g.WithCurrentVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, [g.MaskShrunkInfo.MaskedLatent, 0], cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID));
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
