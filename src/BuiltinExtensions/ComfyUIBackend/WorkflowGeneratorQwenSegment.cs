@@ -55,7 +55,34 @@ public partial class WorkflowGenerator
             latent = NodePath(crop.MaskedLatent, 0);
         }
 
+        JArray positive = NodePath(encoder, 0);
+        JArray negative = NodePath(encoder, 1);
+        // Match the standard CreateConditioningDirect / CreateConditioning post-processing.
+        if (UserInput.TryGet(T2IParamTypes.ConditioningMultiplier, out double positiveMultiplier) && positiveMultiplier != 1)
+        {
+            positive = NodePath(CreateNode("ConditioningMultiply", new JObject()
+            {
+                ["conditioning"] = positive,
+                ["multiplier"] = positiveMultiplier
+            }), 0);
+        }
+        if (UserInput.TryGet(T2IParamTypes.NegativeConditioningMultiplier, out double negativeMultiplier) && negativeMultiplier != 1)
+        {
+            negative = NodePath(CreateNode("ConditioningMultiply", new JObject()
+            {
+                ["conditioning"] = negative,
+                ["multiplier"] = negativeMultiplier
+            }), 0);
+        }
+        if (string.IsNullOrWhiteSpace(negativePrompt) && ShouldZeroNegative())
+        {
+            negative = NodePath(CreateNode("ConditioningZeroOut", new JObject()
+            {
+                ["conditioning"] = negative
+            }), 0);
+        }
+
         Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} original_reference={useOriginalReference} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
-        return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
+        return (positive, negative, latent, startStep);
     }
 }
