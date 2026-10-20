@@ -177,15 +177,10 @@ public partial class WorkflowGenerator
         // Follow ordinary SwarmUI's image-batch and prompt-tag handling.
         // This uses the actual cropped source image as vision reference #1,
         // not the generated base frame. No reference is silently duplicated.
-        JArray textImages = null;
-        foreach (JArray image in referenceImages)
-        {
-            textImages = textImages is null ? image : NodePath(CreateNode("ImageBatch", new JObject()
-            {
-                ["image1"] = textImages,
-                ["image2"] = image
-            }), 0);
-        }
+        // The legacy images IMAGE batch is correct for one reference. Two
+        // differently sized images must use separate Swarm encoder inputs:
+        // Comfy ImageBatch resizes the second image to the first geometry.
+        JArray textImages = referenceImages.Count == 1 ? referenceImages[0] : null;
         string cropSize = CreateNode("GetImageSize", new JObject()
         {
             ["image"] = croppedImage
@@ -194,7 +189,7 @@ public partial class WorkflowGenerator
         JArray dynamicHooks = CreateDynamicLoraHooks();
         JArray encodeSwarmText(string text)
         {
-            string node = CreateNode("SwarmTextEncodeAdvanced", new JObject()
+            JObject textInputs = new()
             {
                 ["clip"] = clip.Path,
                 ["lora_hooks"] = dynamicHooks,
@@ -205,7 +200,15 @@ public partial class WorkflowGenerator
                 ["target_width"] = width,
                 ["target_height"] = height,
                 ["images"] = textImages
-            });
+            };
+            if (referenceImages.Count > 1)
+            {
+                for (int i = 0; i < referenceImages.Count; i++)
+                {
+                    textInputs[$"image_{i + 1}"] = referenceImages[i];
+                }
+            }
+            string node = CreateNode("SwarmTextEncodeAdvanced", textInputs);
             return NodePath(node, 0);
         }
         JArray positive = encodeSwarmText(prompt);
