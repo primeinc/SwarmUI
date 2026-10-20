@@ -416,6 +416,20 @@ public class QwenSegmentOriginalSourceTests
         var encoder = positiveEncoders.Single();
         var stitch = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved");
         var mask = nodes.Single(x => x.Node["class_type"]?.ToString() == "ThresholdMask");
+        // CLIPSeg already applied the explicit <segment:...threshold> cutoff.
+        // The Qwen compositor may binarize its selected pixels, but it must not
+        // silently impose a second 0.5 confidence threshold and discard them.
+        var requireMask = nodes.Single(x => x.Node["class_type"]?.ToString() == "SwarmRequireNonEmptyMask");
+        double requestedThreshold = System.Math.Abs(new PromptRegion(input.Get(T2IParamTypes.Prompt))
+            .Parts.Single(p => p.Type == PromptRegion.PartType.Segment).Strength);
+        Assert.That(detector.Node["inputs"]?["threshold"]?.ToObject<double>(),
+            Is.EqualTo(requestedThreshold).Within(0.00001));
+        Assert.That(requireMask.Node["inputs"]?["minimum_confidence"]?.ToObject<double>(),
+            Is.Zero, "Do not erase detector-selected pixels with a second post-detection cutoff");
+        Assert.That(mask.Node["inputs"]?["value"]?.ToObject<double>(),
+            Is.Zero, "Binarize every positive pixel after the author's detector threshold");
+        Assert.That(crop.Node["inputs"]?["mask_hipass_filter"]?.ToObject<double>(),
+            Is.EqualTo(0.5), "The upstream crop sees a binary mask so its native hipass stays unchanged");
         string sourceId = crop.Node["inputs"]?["image"]?[0]?.ToString();
         Assert.That(sourceId, Is.Not.Null);
         Assert.That(graph[sourceId]?["class_type"]?.ToString(),
