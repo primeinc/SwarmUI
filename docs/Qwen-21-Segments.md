@@ -1,110 +1,137 @@
-# Qwen Image 2.1 segments: upstream node contract
+# Qwen Image 2.1 segments: upstream node composition
 
-Qwen segment editing in SwarmUI now depends on the **native ComfyUI
-`TextEncodeQwenImage21` and `KSampler` nodes**, not an independent Python
-implementation of Qwen encoding, latents, or denoise scheduling.
+## The runnable node stack
 
-SwarmUI ships the **unaltered** `Comfy-Org/ComfyUI` source file
-`comfy_extras/nodes_qwen.py` at revision
-`e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`, as
-`src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py`.
-Its original GPL-3.0 license is included as `ComfyQwenNodes_Upstream.LICENSE`.
-The bundled Comfy custom-node path is supplied in
-`ComfyUISelfStartBackend.cs`. ComfyUI does not override an already-loaded
-built-in node with the same node ID.
+SwarmUI's Qwen 2.1 `<segment:...>` Reference Edit path uses existing ComfyUI
+nodes and the **unchanged Inpaint Crop & Stitch plugin**:
 
-**Important:** This is source/deployment wiring verification, not a claim
-that a particular running Comfy process has loaded that file. The current
-runtime must list `TextEncodeQwenImage21` in `/object_info`.
+```
+SwarmClipSeg(text, source frame) -> detected MASK
+   |
+   +--> InpaintCropImproved(image=source frame, mask=detected MASK)
+           0: STITCHER ----------------------------> InpaintStitchImproved.stitcher
+           1: IMAGE --> TextEncodeQwenImage21.image_1
+                            outputs 0: positive --> KSampler.positive
+                                    1: negative --> KSampler.negative
+                                    2: latent   --> KSampler.latent_image
+                                                   KSampler(steps=4, denoise=0.8)
+                                                           |
+                                                        VAEDecode
+                                                           |
+                                                  SplitImageWithAlpha
+                                                           |
+                                             InpaintStitchImproved.inpainted_image
+                                                           |
+                                                       final IMAGE
+           2: MASK --> diagnostics or masked-img2img conditioning
+```
 
-## Existing node composition
+The *same* crop adapter produces the Qwen reference and the opaque stitch
+metadata. Nothing recomputes crop coordinates for the final composite. The
+native Qwen text encoder also owns the vision resize, reference latents and
+matching empty edit latent. Native ComfyUI `KSampler` determines the denoise
+sigma schedule; 4 requested steps means 4 model evaluations.
 
-The Qwen-only path consists of:
+### Copied, licensed, and pinned upstream packages
 
-1. The existing Swarm `SwarmClipSeg` detector selects the named region. This
-   is retained because the segment syntax depends on text-selected masks,
-   and replacing it with SAM3 would add an unrequested detector dependency.
-2. Existing `SwarmMaskBounds` determines tight crop bounds on the **raw
-   detection before blur/grow**, using native `ThresholdMask(0.5)`. Bounds
-   are not determined from barely-nonzero blurred-mask pixels.
-3. Native `ImageCrop` extracts the image at those bounds and native
-   `ImageScaleToTotalPixels` scales it to the configured megapixel count,
-   preserving its aspect ratio. Only existing Swarm `SwarmMaskBounds`
-   remains to calculate dynamic coordinates for both the image and mask.
-4. Native `TextEncodeQwenImage21` receives the selected crop as
-   `images.image_1`; it performs all Qwen vision-token preprocessing, image
-   reference VAE encoding, positive/negative conditioning, and outputs its
-   native empty edit latent.
-5. Native `KSampler` receives the segment-scoped, LoRA-patched model and
-   the native encoder's latent; the sampler itself owns denoising.
-   **Steps=4 means 4 sampling evaluations**; creativity 0.8 becomes
-   `denoise=0.8`, not `start_at_step=1`.
-6. Native `ImageScale`, `ThresholdMask`, and `ImageCompositeMasked`
-   resize and apply the result at the original crop coordinates.
-   Where requested, mask blur uses native `MaskToImage` + `ImageBlur` +
-   `ImageToMask` instead of a Qwen-specific Python mask transform.
-   Native `PreviewImage` nodes added by the live integration test inspect
-   the crop before and after, the mask fed to the compositor, and the final
-   full image. The regular `SaveOptionalIntermediate` path saves the
-   actual segment result before compositing.
+- ComfyUI `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`,
+  `comfy_extras/nodes_qwen.py`, copied **unchanged** into
+  `ExtraNodes/ComfyQwenNodes_Upstream.py`. Original GPL-3.0 license alongside.
+- Luis Quesada's `lquesada/ComfyUI-Inpaint-CropAndStitch@348a8bbaad1a9000523e42dd3eaf6ab34a8fe62f`,
+  version **3.0.18**, copied **unchanged** into
+  `ExtraNodes/ComfyInpaintCropAndStitch/`, including Python node
+  implementation, registration, JS, license, metadata and original README.
+  The crop/stitch plugin is a **separately GPL-3.0-licensed component**;
+  SwarmUI's own MIT license is not a relicense of that upstream code.
 
-Swarm-specific C# **glue** remains for reading the `<segment:...>` region,
-choosing masks/bounds and the LoRA-scoped model stage, and retaining the
-pre-existing `CreateImageMaskCrop` / `RecompositeCropped` operations.
-No standalone Qwen encoder, scheduler, or Qwen diagnostic Python nodes
-remain registered.
+Swarm's managed Comfy backend adds its shipped `ExtraNodes` directory to
+ComfyUI's custom-node search path. A real backend must expose
+`TextEncodeQwenImage21`, `InpaintCropImproved` and
+`InpaintStitchImproved` from `/object_info` before inference. The live test
+checks all three. No additional ComfyUI-Manager installation is required for a
+Swarm-managed backend. An external backend must have equivalent registered
+nodes; shipping a file does not alter that external process.
 
-## Reference images and supported options
+### Swarm-specific glue that remains
 
-For the user's one-image InitEdit, the detected crop **replaces** the whole
-source photo, `Prompt Images[0]`. Do not include both the crop and original
-full-frame photo as image references. Additional `Prompt Images[1..]` remain
-separate native reference slots, limited to 16 inputs in total.
+Swarm still interprets `<segment:...>`, uses the already-established
+`SwarmClipSeg` or selected YOLO detector and routes static LoRAs to the
+segment's model. This is the application-specific orchestration. It does NOT
+implement its own Qwen tokenizer, patch sampler steps, invent new reference
+latents, compute Qwen crop bounds, or paste Qwen pixels back by hand.
 
-`Segment Qwen 2.1 Original Reference` disables or enables automatic
-inclusion of the selected crop. In Reference Edit mode the sampler uses
-ComfyUI's native empty latent; Masked Img2Img continues to use the masked
-crop latent and the existing DifferentialDiffusion option.
+The intact crop plugin handles:
+- mask high-pass filtering (0.5), hole filling, optional expansion and blending;
+- crop context and target-resolution resizing;
+- stitch geometry, resampling and blending into the original frame.
 
-The native Qwen node does **not** implement Swarm's dynamic prompt LoRA
-hooks or tiled reference-image VAE encoding. These options currently produce
-an explicit error rather than pretending to work. Static global/segment
-LoRAs are patched on the model-loader path, independently from conditioning.
-This is a documented capability gap, not certified equivalent behavior.
+Swarm maps `Segment Mask Grow` to the upstream crop node's
+`mask_expand_pixels`, `Segment Mask Blur` to `mask_blend_pixels`, and
+`Segment Mask Oversize` to an optional ComfyUI `GrowMask` context mask.
+The upstream `context_from_mask_extend_factor` stays at 1.2.
+`Segment Target Resolution` supplies target crop width/height, otherwise the
+model's preferred dimensions are used. The adapter uses its upstream
+`cpu (compatible)` mode by default.
 
-For non-Qwen models, the original sampler and compositing paths are unchanged.
+For an InitEdit with one Prompt Image, the detected crop replaces the original
+whole frame in Qwen's `images.image_1` slot. The original full frame is
+**not duplicated** as image 2. Additional explicit Prompt Images are preserved.
 
-## Verification and acceptance
+Reference Edit samples the native Qwen empty latent. Masked Img2Img uses
+Swarm's existing `DoMaskedVAEEncode` on the exact crop and mask returned by
+the plugin. The legacy non-Qwen segmentation pipeline is unchanged.
 
-The exact user-reported acceptance case is:
+### Always-on Qwen segment diagnostics
+
+Until runtime acceptance passes, every Qwen segment produces intermediate
+captures through SwarmUI's existing output path, without new Comfy Python nodes:
+
+- `00_source_full_frame`
+- `01_raw_detector_mask`
+- `02_actual_qwen_reference_crop`
+- `03_adapter_crop_mask`
+- `04_sampler_decoded_crop`
+- `05_exact_stitch_input`
+- `06_stitched_full_frame`
+
+The backend logs `[QWEN21-SEG] DIAG` with a stage label, output ID and
+precise Comfy node ID/output index. The crop plugin's output 2 is the
+**cropped mask**, not necessarily the internal final softened blend mask
+inside its opaque `STITCHER` state. Do not mislabel it as the final applied
+alpha. Captures are real graph outputs, not post-hoc simulated images.
+
+### Evidence and acceptance
+
+The reproduced failure was:
 
 ```
 <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes
 ```
 
-Ordinary editing worked immediately; old segmented editing failed 10/10
-times and returned ghosted/incorrect results. The live graph inspection in
-`tests/integration/qwen_segment_text_replacement.py` now rejects an
-obsolete `SwarmQwenImage21SegmentEncode`, requires the native encoder,
-native four-step sampler, crop input and final native compositor, and
-captures real before/crop/mask/after image outputs.
+Normal non-segmented Qwen editing had succeeded while segmented edits had
+failed ten times and generated subject ghosting and birds instead of the
+requested replacement. A correct mask or a graph that executes is NOT visual
+acceptance.
 
-`tests/live/test_qwen_segment_lora.py` performs real on/off/on-adjacent
-LoRA negative controls against a running Comfy backend, using the actual
-model and user-provided exported workflows. It is not executed by ordinary
-CPU CI. Source checks and build checks do not prove subject replacement;
-real GPU output from the current branch must show the requested boy, the
-correct source crop/preview and no unwanted background replacement.
+`tests/test_qwen_native_bundle.py` checks immutable upstream Git blob
+digests, registrations and source routing. The build and Python compilation
+gates are source-level. `tests/integration/qwen_segment_text_replacement.py`
+requires the actual backend's three registered nodes, validates the direct
+Crop -> Qwen -> Sampler -> Stitch references in an exported real workflow,
+then queues and captures actual GPU output. `tests/live/test_qwen_segment_lora.py`
+exercises real off/on/off LoRA effects through ordinary and segmented samplers.
 
-## Inspected references
+**The semantic replacement remains UNVERIFIED until real GPU output visibly
+replaces the girl with the boy and the background remains intact.** CI passing
+does not certify pixel or semantic correctness.
 
-- ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
-  `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute`
-  (three native outputs, same resized reference for CLIP and VAE);
-  `nodes.py#KSampler.sample` (denoise/sigma-step handling);
-  `comfy_extras/nodes_images.py#ImageCrop`;
-  `comfy_extras/nodes_mask.py#ImageCompositeMasked,ThresholdMask`.
-- SwarmUI current branch:
-  `WorkflowGeneratorQwenSegment.cs#CreateQwen21SegmentConditioning`;
-  `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`;
-  `WorkflowGenerator.cs#CreateImageMaskCrop,RecompositeCropped`.
+## Exact sources
+
+- `lquesada/ComfyUI-Inpaint-CropAndStitch@348a8bba...`,
+  `inpaint_cropandstitch.py::InpaintCropImproved.inpaint_crop` and
+  `InpaintStitchImproved.inpaint_stitch`, plus upstream test suite.
+- `Comfy-Org/ComfyUI@e3bee7ff...`,
+  `comfy_extras/nodes_qwen.py::TextEncodeQwenImage21.execute`,
+  `nodes.py::KSampler.sample`.
+- SwarmUI `WorkflowGeneratorSteps.cs::RunSegmentationProcessing`,
+  `WorkflowGeneratorQwenSegment.cs::CreateQwen21SegmentConditioning`.
