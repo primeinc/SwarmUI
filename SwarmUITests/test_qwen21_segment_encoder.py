@@ -49,10 +49,16 @@ class FakeTensor:
 class FakeVae:
     def __init__(self):
         self.calls = 0
+        self.tiled_calls = []
 
     def encode(self, image):
         assert image.shape == (1, 64, 64, 4)
         self.calls += 1
+        return FakeTensor((1, 64, 4, 4))
+
+    def encode_tiled(self, image, **kwargs):
+        assert image.shape == (1, 64, 64, 4)
+        self.tiled_calls.append(kwargs)
         return FakeTensor((1, 64, 4, 4))
 
 
@@ -158,6 +164,26 @@ class Qwen21SegmentEncoderTests(unittest.TestCase):
         )
         self.assertEqual(self.vae.calls, 2)
         self.assertTrue(all(len(call["images"]) == 2 for call in self.clip.calls))
+        self.assertEqual(len(positive["reference_latents"]), 2)
+        self.assertEqual(len(negative["reference_latents"]), 2)
+
+    def test_tiled_reference_encoder_uses_configured_options_for_all_references(self):
+        encoder = self.Encoder()
+        positive, negative, _ = encoder.encode(
+            self.clip, self.vae, self.image, "person", "negative",
+            image_1=FakeTensor((1, 64, 64, 4)),
+            reference_tile_size=512,
+            reference_tile_overlap=64,
+            reference_temporal_tile_size=32,
+            reference_temporal_tile_overlap=4,
+        )
+        self.assertEqual(self.vae.calls, 0)
+        self.assertEqual(len(self.vae.tiled_calls), 2)
+        for call in self.vae.tiled_calls:
+            self.assertEqual(call, {
+                "tile_x": 512, "tile_y": 512,
+                "overlap": 64, "tile_t": 32, "overlap_t": 4,
+            })
         self.assertEqual(len(positive["reference_latents"]), 2)
         self.assertEqual(len(negative["reference_latents"]), 2)
 
