@@ -52,6 +52,7 @@ NODE_IDS = {
     "mask_used_image": "__swarm_text_probe_mask_used_image",
     "mask_used": "__swarm_text_probe_mask_used",
     "after": "__swarm_text_probe_after",
+    "final_input": "__swarm_text_probe_final_input",
 }
 OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "mask_used", "after")
 _HTTP = build_opener(ProxyHandler({}))
@@ -277,6 +278,13 @@ def inspect_and_instrument(original):
     }
     preview("mask_used", [NODE_IDS["mask_used_image"], 0])
     preview("after", [stitch_id, 0])
+    # SwarmSaveImageWS writes its output straight over WebSocket and returns
+    # {}, so /history does NOT expose its images. Observe the exact IMAGE
+    # tensor feeding the ORIGINAL save sink via an explicit diagnostic node.
+    final_sink_input = graph[final_outputs[0]].get("inputs", {}).get("images")
+    if not isinstance(final_sink_input, list) or len(final_sink_input) != 2:
+        raise AssertionError("Final output sink has no valid IMAGE tensor input")
+    preview("final_input", final_sink_input)
     return graph, {
         "final_output_sink": final_outputs[0],
         "detector": detector_id, "validated_mask": guard_id,
@@ -291,17 +299,21 @@ def inspect_and_instrument(original):
         "mask_used_definition": "adapter output 2 (cropped mask), not inaccessible private stitcher blend",
     }
 
-def require_single_final_image(outputs, save_node_id):
+def require_single_final_image(outputs, save_node_id, final_input_probe_id=None):
     # A single SaveImage/SwarmSaveImageWS node may consume a batch. If
     # this backend does not expose output metadata, do not manufacture
     # one-image acceptance from merely having one output node.
     saved = outputs.get(save_node_id, {})
     images = saved.get("images")
+    if not isinstance(images, list) and final_input_probe_id:
+        # The WebSocket sink intentionally yields no history metadata.
+        # PreviewImage observes the exact same input tensor, not a parallel
+        # approximation of the compositor.
+        images = outputs.get(final_input_probe_id, {}).get("images")
     if not isinstance(images, list):
         raise AssertionError(
-            f"Single final image UNVERIFIED: output sink {save_node_id} "
-            "has no Comfy history.outputs[save_id].images list; "
-            "use Swarm's surfaced-output count as separate evidence")
+            f"Single final IMAGE batch UNVERIFIED: neither sink {save_node_id} "
+            "nor its input-tensor probe has an images list")
     if len(images) != 1:
         raise AssertionError(
             f"Expected one final saved image, got {len(images)} in sink {save_node_id}")
@@ -343,7 +355,7 @@ def read_result(base, prompt_id, timeout_seconds, final_output_sink):
         if status.get("completed") and all(
             outputs.get(NODE_IDS[kind], {}).get("images") for kind in OUTPUT_KINDS
         ):
-            require_single_final_image(outputs, final_output_sink)
+            require_single_final_image(outputs, final_output_sink, NODE_IDS["final_input"])
             result = {}
             for kind in OUTPUT_KINDS:
                 images = outputs[NODE_IDS[kind]]["images"]
