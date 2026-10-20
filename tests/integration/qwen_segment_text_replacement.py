@@ -123,16 +123,17 @@ def inspect_and_instrument(original):
     if "images.image_2" in encoder:
         raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
 
-    masked_encoder_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "LanPaint_ImageEncode"
-         and v["inputs"].get("image") == masked_reference
-         and v["inputs"].get("mask") == [crop_id, 2]],
-        "upstream LanPaint mask+image latent encoder",
-    )
+    # This is the user's "Reference Edit" reproduction, not LanPaint's
+    # separate "Masked Img2Img" mode. The native Comfy Qwen encoder returns the
+    # edit latent from output 2; the stock sampler must consume EXACTLY that.
+    if any(v["class_type"] == "LanPaint_ImageEncode" and
+           v["inputs"].get("image") == masked_reference
+           for v in graph.values()):
+        raise AssertionError("Reference Edit wrongly encodes the original image as a masked latent")
     sampler_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "LanPaint_KSampler"
-         and v["inputs"].get("latent_image") == [masked_encoder_id, 0]],
-        "upstream LanPaint masked sampler",
+        [k for k, v in graph.items() if v["class_type"] == "KSampler"
+         and v["inputs"].get("latent_image") == [enc_id, 2]],
+        "upstream native KSampler on Qwen edit latent",
     )
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", -1))
@@ -156,7 +157,7 @@ def inspect_and_instrument(original):
          and v["inputs"].get("samples") == [sampler_id, 0]
          and v["inputs"].get("image") == masked_reference
          and v["inputs"].get("mask") == [crop_id, 2]],
-        "upstream LanPaint masked image decoder",
+        "upstream LanPaint image-space blend decoder fed by stock Qwen sampler",
     )
     if decoder_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
         raise AssertionError("Stitch image must originate from the LanPaint masked decoder")
@@ -191,6 +192,8 @@ def inspect_and_instrument(original):
         "detector": detector_id, "crop_adapter": crop_id,
         "source_reference": crop_id,
         "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
+        "mode": "Reference Edit", "sampler_class": "KSampler",
+        "sampler_latent_source": [enc_id, 2],
         "steps": steps, "native_denoise": denoise, "effective_steps": steps,
         "expected_iterations": 4, "creativity": denoise,
         "clipseg_threshold": 0.1,
@@ -261,8 +264,7 @@ def main(argv=None):
     # A checked-in plugin does not prove Comfy loaded or registered it.
     for expected_node in (
         "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
-        "LanPaint_ImageEncode", "LanPaint_KSampler", "LanPaint_ImageDecode",
-
+        "KSampler", "LanPaint_ImageDecode",
     ):
         registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
         if expected_node not in registered:
