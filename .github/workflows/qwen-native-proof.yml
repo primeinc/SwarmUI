@@ -1,0 +1,53 @@
+name: Qwen native segment proof
+on:
+  push:
+    branches: [fix/qwen21-native-segment]
+permissions:
+  contents: write
+jobs:
+  prove:
+    if: github.repository == 'primeinc/SwarmUI'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '8.x'
+      - name: Baseline regression must fail at the missing native encoder
+        shell: bash
+        run: |
+          set +e
+          dotnet test SwarmUITests/SwarmUITests.csproj --filter 'FullyQualifiedName~QwenSegmentPipelineTests' --logger 'trx;LogFileName=red.trx' --results-directory /tmp/qwen-red
+          result=$?
+          set -e
+          test "$result" -ne 0
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          p = Path('/tmp/qwen-red/red.trx')
+          assert p.is_file(), 'Test suite did not compile or execute; this is not a valid red control'
+          root = ET.parse(p).getroot()
+          failed = [r for r in root.iter() if r.tag.endswith('UnitTestResult') and r.get('outcome') == 'Failed']
+          expected = [r for r in failed if 'NativeSegmentUsesCropPairedConditioningAndFreshLatent' in r.get('testName', '') and 'QWEN_NATIVE_SEGMENT_MISSING' in ''.join(r.itertext())]
+          assert expected, 'Baseline failure did not reach the native-conditioning assertion'
+          print('RED: actual registered segment step lacks native paired crop conditioning.')
+          PY
+      - name: Apply revision-checked native segment patch
+        run: python3 launchtools/apply_native_segment.py
+      - name: Compile and run all NUnit tests after patch
+        run: dotnet test SwarmUITests/SwarmUITests.csproj --logger 'trx;LogFileName=green.trx' --results-directory /tmp/qwen-green
+      - name: Verify preserved preview and commit only tested source
+        shell: bash
+        run: |
+          git diff --check
+          test "$(git hash-object src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py)" = e19e98bf42c8740d65ea5ba42a514e179154b15c
+          rm launchtools/apply_native_segment.py .github/workflows/qwen-native-proof.yml
+          git add src/BuiltinExtensions/ComfyUIBackend/WorkflowGenerator.cs src/BuiltinExtensions/ComfyUIBackend/WorkflowGeneratorSteps.cs src/BuiltinExtensions/ComfyUIBackend/WorkflowGeneratorQwenSegment.cs src/BuiltinExtensions/ComfyUIBackend/ComfyUIBackendExtension.cs src/Text2Image/T2IParamTypes.cs launchtools/apply_native_segment.py launchtools/qwen-native-helper.cs.txt .github/workflows/qwen-native-proof.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(qwen21): condition segment crops natively and sample the paired edit latent'
+          git push origin HEAD:fix/qwen21-native-segment
+          git log -1 --format='%H %s'
