@@ -1,24 +1,56 @@
-# Capture a Qwen segment failure without changing the generation
+# Capture a real Qwen segmented-generation failure
 
-The Qwen segment-only LoRA issue is NOT FIXED. This tool captures evidence; it does not claim to repair image generation.
+The read-only `capture-qwen-segment.bat` tool records actual ComfyUI graphs
+and node connections, not a success certificate or a synthetic GPU test.
 
-From the SwarmUI directory on Windows, run `capture-qwen-segment.bat`, then repeat the failing generation once. Keep SwarmUI and its Comfy backend running. The tool reads the active queue because Swarm normally deletes completed Comfy history. It prints the path of a ZIP in the Windows temporary directory. It does not queue a generation, alter settings, switch branches, install packages, or send the ZIP anywhere.
+On Windows with SwarmUI and its backend running, invoke
+`capture-qwen-segment.bat` and repeat the observed generation once.
+The default source is `http://127.0.0.1:7801/ComfyBackendDirect`;
+an explicit direct backend URL is also accepted. The tool reads queue
+and history without starting another generation, changing configuration,
+installing software, switching Git branches, or contacting an agent.
 
-The default endpoint is `http://127.0.0.1:7801/ComfyBackendDirect`. For a non-default server use `capture-qwen-segment.bat --url http://127.0.0.1:YOUR_PORT/ComfyBackendDirect`. An explicit direct Comfy backend URL also works. Authentication failures are reported, not bypassed. The tool uses the backend reached by the supplied URL; it does not discover or scan other backends.
+The archive contains the actual sampler inputs, adapter model chain,
+conditioning nodes, mask/composite lineage, and version/queue evidence,
+with credentials and embedded images redacted. Review the bundle before
+sharing because prompts and model filenames may remain.
 
-The capture reports actual sampler inputs, model-path LoRA loaders and strengths, loader nodes not shared with base sampling, latent masks, reference-latent connections, and compositors. A disconnected LoRA node elsewhere in the graph does not count. The original graph is included with embedded media and common credential fields redacted. Prompts and model/LoRA filenames remain: review the bundle before sharing.
+## Current source and runtime distinction
 
-## Verification scope
+The current Qwen segment workflow generates native `TextEncodeQwenImage21`,
+`KSampler`, and `ImageCompositeMasked` nodes, and ships the unchanged
+upstream `nodes_qwen.py` module as `ComfyQwenNodes_Upstream.py`
+(GPL-3.0 license included). The prior
+`SwarmQwenImage21SegmentEncode` and Qwen Python diagnostics are removed.
 
-Run `python -m unittest discover -s tests -p test_qwen_segment_capture.py -v`.
+The live, opt-in `tests/integration/qwen_segment_text_replacement.py`
+preflights **real exported Comfy API graphs** and the running backend's
+`object_info/TextEncodeQwenImage21` before allowing GPU inference.
+It rejects a disconnected detector, wrong full-frame reference, obsolete
+custom encoder, non-native sampler, missing crop, blurred-mask-driven
+crop bounds, empty-mask fallthrough, and non-native compositor.
+It saves actual full-frame before/after, crop before/after and mask results.
 
-18 tests passed locally on Python 3.13.5/Linux: graph traversal, missing/disconnected LoRA negative controls, conditioning isolation, zero effective steps, empty/deleted history with active queue, GET-only HTTP integration, redaction, and CLI ZIP output. The Windows batch launcher has not been executed in this environment. No GPU inference or user-visible Qwen fix is certified by these tests.
+The exact previously failing prompt remains:
 
-## Evidence and unresolved questions
+```
+<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes
+```
 
-- Source: `primeinc/SwarmUI@57c12b9a2455c0b777291edf67e27559f838f13d`, `src/BuiltinExtensions/ComfyUIBackend/ComfyUIAPIAbstractBackend.cs#AwaitJobLive`: completed prompt history is deleted unless NoInternalSpecialHandling is enabled. Capture therefore includes `/queue`, not just `/history`.
-- Source: `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`, `server.py#get_history,#get_queue,#system_stats`: GET API routes and response shapes used by the capture. Runtime version is captured separately; equivalence to the inspected revision is not assumed.
-- Source: the same ComfyUI revision, `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute` and `comfy/text_encoders/qwen_image21.py#QwenImage21TEModel.encode_token_weights`: reference pixels are encoded for text/vision and VAE, with image-slot metadata. A reference with no image supplied to its conditioning encoder is flagged for investigation, not declared the root cause.
-- A progress counter of four steps does not prove that the configured total was four: the sampler may start partway through a larger schedule. The capture reports total, start, end and effective steps separately.
+Source-level tests and successful CI do **not** establish semantic identity
+replacement. A pixel delta, a LoRA loader on the model path, and four
+denoising callbacks are necessary but insufficient evidence. Closure
+requires actual generated results that replace the child as requested
+with correct crop and final composite, plus positive/negative LoRA controls.
 
-End-to-end acceptance still requires the user's exact Qwen model, LoRA, prompt, graph, and before/after image result. A graph connection alone cannot establish that LoRA weights were applied effectively inside the model.
+## References
+
+- SwarmUI: `WorkflowGeneratorQwenSegment.cs`,
+  `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`,
+  `WorkflowGenerator.cs#CreateImageMaskCrop,RecompositeCropped`.
+- ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
+  `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute`,
+  `nodes.py#KSampler.sample`,
+  `comfy_extras/nodes_mask.py#ImageCompositeMasked`.
+- SwarmUI `launchtools/qwen_segment_capture.py`: backend GET API capture,
+  diagnostic connection analysis, no image-generation execution.
