@@ -133,6 +133,11 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, oldBackend))
             .Message, Does.Contain("image_2"));
 
+        optional["image_2"] = new JArray("MASK");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, oldBackend))
+            .Message, Does.Contain("IMAGE"),
+            "A name-matching but MASK-typed image socket must not pass preflight");
         optional["image_2"] = new JArray("IMAGE");
         Assert.DoesNotThrow(() =>
             ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, oldBackend));
@@ -218,6 +223,12 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend))
             .Message, Does.Contain("qwen21_prevent_empty_text"));
 
+        ((JObject)backend["SwarmTextEncodeAdvanced"]["input"]["optional"])
+            ["qwen21_prevent_empty_text"] = new JArray("IMAGE");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend))
+            .Message, Does.Contain("BOOLEAN"),
+            "A socket advertised as IMAGE cannot accept Qwen's boolean tokenizer flag");
         ((JObject)backend["SwarmTextEncodeAdvanced"]["input"]["optional"])
             ["qwen21_prevent_empty_text"] = new JArray("BOOLEAN");
         Assert.DoesNotThrow(() =>
