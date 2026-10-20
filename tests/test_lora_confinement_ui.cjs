@@ -106,3 +106,34 @@ test('existing browser LoRA row renders selected segment and refreshes without c
     assert.equal(select.value, '11');
     assert.match(select.options.find(option => option.value === '11').text, /not in current prompt/);
 });
+
+
+test('segment selection reaches hidden LoRA section confinement request parameter', () => {
+    const loraInput = {
+        selectedOptions: [{ value: 'face' }],
+        options: [{ value: 'face' }]
+    };
+    const weightsInput = { value: '0.8' };
+    const confinementInput = { value: '' };
+    const prompt = { value: '<segment:face> portrait' };
+    const elements = {
+        input_loras: loraInput,
+        input_loraweights: weightsInput,
+        input_lorasectionconfinement: confinementInput,
+        input_prompt: prompt
+    };
+    sandbox.document = {
+        activeElement: prompt,
+        getElementById: id => elements[id] ?? null
+    };
+    sandbox.arraysEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    sandbox.triggerChangeFor = () => {};
+    helper.selected = [{ name: 'face', weight: 0.8, confinement: '11' }];
+    helper.rebuildParams();
+    assert.equal(confinementInput.value, '11',
+        'The selected section must be serialized into the parameter sent by getGenInput.');
+    helper.selected[0].confinement = '0';
+    helper.rebuildParams();
+    assert.equal(confinementInput.value, '',
+        'Only globally scoped adapters should use the legacy empty confinement field.');
+});
