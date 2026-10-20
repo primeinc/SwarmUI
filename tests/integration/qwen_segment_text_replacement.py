@@ -94,6 +94,24 @@ def inspect_and_instrument(original):
         "upstream InpaintCropImproved",
     )
     crop = graph[crop_id]["inputs"]
+    # This reproduction is segment-only. The cropped subject must be the
+    # ORIGINAL photograph; a base sampler on the crop input path would mean
+    # Qwen changed the entire image before segmentation even started.
+    # Check the real exported graph, not a fixture or a code string.
+    source_nodes = capture.upstream(graph, capture.roots(crop.get("image"), graph))
+    pre_segment_samplers = [
+        node for node in sorted(source_nodes)
+        if graph[node]["class_type"] in {
+            "KSampler", "KSamplerAdvanced", "SwarmKSampler",
+            "LanPaint_KSampler", "LanPaint_KSamplerAdvanced",
+            "SamplerCustomAdvanced",
+        }
+    ]
+    if pre_segment_samplers:
+        raise AssertionError(
+            "Segment-only crop source depends on a base sampler instead of the "
+            f"original photograph: {pre_segment_samplers}"
+        )
     if crop.get("mask") != [detector_id, 0]:
         raise AssertionError("Crop adapter isn't consuming the real detector mask")
     if abs(float(crop.get("mask_hipass_filter", -1)) - 0.5) > 1e-6:

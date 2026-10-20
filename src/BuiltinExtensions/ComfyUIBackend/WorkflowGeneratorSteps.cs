@@ -1798,9 +1798,63 @@ public class WorkflowGeneratorSteps
         #region Segmentation Processing
         void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner, bool isSingleImage = false)
         {
-            PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
+            PromptRegion parsedPrompt = new(g.UserInput.Get(T2IParamTypes.Prompt, ""));
+            PromptRegion.Part[] parts = [.. parsedPrompt.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
+                // A segment-only Qwen edit is an instruction to modify the supplied
+                // source image, NOT a request to generate an unrelated base frame.
+                // The ordinary main sampler has no global/base prompt in this case:
+                // using its output as the crop source destroys the original subject
+                // before CLIPSeg even runs. Use the real original image instead.
+                // Other prompts retain the existing generated-frame segment behavior.
+                bool segmentOnlyQwenEdit = g.IsQwenImage21() && !isSingleImage
+                    && parsedPrompt.Parts.All(p => p.Type == PromptRegion.PartType.Segment)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.GlobalPrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.BasePrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.RefinerPrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.BackgroundPrompt);
+                if (segmentOnlyQwenEdit)
+                {
+                    WGNodeData originalSource = null;
+                    string sourceKind = null;
+                    if (g.UserInput.TryGet(T2IParamTypes.InitImage, out Image originalInit))
+                    {
+                        // Reload the original pixels, not BasicInputImage which
+                        // can have init-image noise or other modifications.
+                        originalSource = g.LoadImage(originalInit, "${initimage}", true);
+                        sourceKind = "InitImage";
+                    }
+                    else
+                    {
+                        JArray promptSource = g.GetPromptImage(false, false, 0);
+                        if (promptSource is not null)
+                        {
+                            originalSource = new WGNodeData(promptSource, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
+                            sourceKind = "PromptImages[0]";
+                        }
+                    }
+                    if (originalSource is null)
+                    {
+                        throw new SwarmUserErrorException("Qwen Image 2.1 segment-only editing needs an Init Image or at least one Prompt Image. No source image was supplied.");
+                    }
+                    // If the caller requested a batch, replicate the original
+                    // before the existing per-image segment isolation below.
+                    // ImageBatch is a native Comfy node.
+                    int sourceBatchSize = g.UserInput.Get(T2IParamTypes.BatchSize, 1);
+                    JArray originalBatch = originalSource.Path;
+                    for (int repeat = 1; repeat < sourceBatchSize; repeat++)
+                    {
+                        string batchNode = g.CreateNode("ImageBatch", new JObject()
+                        {
+                            ["image1"] = originalBatch,
+                            ["image2"] = originalSource.Path
+                        });
+                        originalBatch = NodePath(batchNode, 0);
+                    }
+                    g.CurrentMedia = originalSource.WithPath(originalBatch);
+                    Logs.Info($"[QWEN21-SEG] segment-only original source={sourceKind} node={g.CurrentMedia.Path[0]} base_sampler_bypassed=true batch={sourceBatchSize}");
+                }
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
                 // Native Qwen image references represent a single source image per conditioning.
                 // Split the source batch before detection so no item can inherit another's crop.
