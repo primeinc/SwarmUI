@@ -51,6 +51,8 @@ jobs:
           run: python3 -m unittest discover -s tests -p test_qwen_swarm_prompt_parser_cpu.py -v
         - name: Run offline exported-Qwen-graph preflight negative controls
           run: python3 -m unittest discover -s tests -p test_qwen_segment_preflight_offline.py -v
+        - name: Prove LoRA inside-mask effect metric rejects outside leaks (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_segment_lora_confinement_cpu.py -v
         - name: Run CPU-tensor segment detection guard controls
           run: python3 -m unittest discover -s tests -p test_qwen_segment_mask_guard.py -v
         - name: Test real-tensor replacement without old-subject ghosting
