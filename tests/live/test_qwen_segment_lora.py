@@ -25,7 +25,7 @@ import pytest
 pytestmark = pytest.mark.inference
 _OUTPUT = "swarm_lora_live_capture"
 _LORAS = {"LoraLoader", "LoraLoaderModelOnly"}
-_SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced"}
+_SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced", "LanPaint_KSampler", "LanPaint_KSamplerAdvanced"}
 _IMAGE_OUTPUTS = {"SaveImage", "PreviewImage", "SwarmSaveImageWS"}
 
 
@@ -163,13 +163,43 @@ def graph_variant(original, case, stage, strength):
                    n["inputs"].get("image") == [crops[0], 1] and
                    n["inputs"].get("alpha") == [crops[0], 2] for n in graph.values()):
             raise AssertionError("Inpaint target mask was misused as input source alpha")
-        encoders = [n for n in graph.values() if n["class_type"] == "TextEncodeQwenImage21"]
-        if len(encoders) != 1 or encoders[0]["inputs"].get("images.image_1") != [crops[0], 1]:
+        encoders = [(key, n) for key, n in graph.items()
+                    if n["class_type"] == "TextEncodeQwenImage21"]
+        if len(encoders) != 1 or encoders[0][1]["inputs"].get("images.image_1") != [crops[0], 1]:
             raise AssertionError("Native Qwen must see the upstream cropped source image")
-        if not any(n["class_type"] == "LanPaint_ImageEncode" and
-                   n["inputs"].get("image") == [crops[0], 1] and
-                   n["inputs"].get("mask") == [crops[0], 2] for n in graph.values()):
-            raise AssertionError("LanPaint encode must reuse exactly the same source crop and distinct inpaint mask")
+        encoder_id = encoders[0][0]
+        sampler_id = case["segment_sampler_node"]
+        sampler = graph[sampler_id]
+        # Swarm's two supported native modes are not interchangeable.
+        # Reference Edit: native Qwen empty edit latent + native KSampler.
+        # Masked Img2Img: upstream LanPaint encoded source + masked sampler.
+        if sampler["class_type"] == "KSampler":
+            if sampler["inputs"].get("latent_image") != [encoder_id, 2]:
+                raise AssertionError("Reference Edit must sample Qwen's native edit latent")
+            if any(n["class_type"] == "LanPaint_ImageEncode"
+                   for n in graph.values() if n is not sampler):
+                raise AssertionError("Reference Edit must not encode the original crop as LanPaint latent")
+        elif sampler["class_type"] == "LanPaint_KSampler":
+            encoded = [(key, n) for key, n in graph.items()
+                       if n["class_type"] == "LanPaint_ImageEncode"
+                       and n["inputs"].get("image") == [crops[0], 1]
+                       and n["inputs"].get("mask") == [crops[0], 2]]
+            if len(encoded) != 1 or sampler["inputs"].get("latent_image") != [encoded[0][0], 0]:
+                raise AssertionError("Masked Img2Img must sample LanPaint's exact masked crop")
+        else:
+            raise AssertionError(f"Unexpected native Qwen segment sampler: {sampler['class_type']}")
+        decoded = [(key, n) for key, n in graph.items()
+                   if n["class_type"] == "LanPaint_ImageDecode"
+                   and n["inputs"].get("samples") == [sampler_id, 0]
+                   and n["inputs"].get("image") == [crops[0], 1]
+                   and n["inputs"].get("mask") == [crops[0], 2]]
+        if len(decoded) != 1:
+            raise AssertionError("Native Qwen sampler must decode against the real mask and source crop")
+        split = [(key, n) for key, n in graph.items()
+                 if n["class_type"] == "SplitImageWithAlpha"
+                 and n["inputs"].get("image") == [decoded[0][0], 0]]
+        if len(split) != 1 or graph[stitches[0]]["inputs"].get("inpainted_image") != [split[0][0], 0]:
+            raise AssertionError("Original native decoder result must reach the exact stitch adapter")
     ref = case.get(f"{stage}_output_image_ref")
     if ref is None:
         outputs = [n["inputs"]["images"] for n in graph.values()
