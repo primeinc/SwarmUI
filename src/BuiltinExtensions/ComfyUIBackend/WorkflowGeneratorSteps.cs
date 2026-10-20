@@ -138,7 +138,9 @@ public class WorkflowGeneratorSteps
         Logs.Info($"[QWEN21-SEG] sampler-LoRA-chain section={sectionId} refiner={isRefiner} model_node={modelPath[0]} actual=[{chain}] expected=[{requested}]");
         // Exact adapter path identity and multiplicity matter. No basename
         // aliases or foreign section's cached LoRA loader may count as proof.
-        List<(string Name, double Weight)> remaining = [.. actual];
+        // A deliberately zero-strength loader is inert and valid in OFF
+        // control workflows, so do not mistake it for cross-section leakage.
+        List<(string Name, double Weight)> remaining = [.. actual.Where(x => x.Weight != 0)];
         foreach ((string name, double weight, int _) in expected)
         {
             int match = remaining.FindIndex(x =>
