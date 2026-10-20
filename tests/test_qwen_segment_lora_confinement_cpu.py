@@ -70,6 +70,67 @@ class LiveLoRAModelChainContractTests(unittest.TestCase):
             self.check(graph, "sampler")
 
 
+def load_actual_live_output_gate():
+    """Exercise the real live acceptance gate without importing GPU pytest."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent / "live/test_qwen_segment_lora.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    funcs = [node for node in tree.body
+             if isinstance(node, ast.FunctionDef)
+             and node.name == "assert_segment_final_output_path"]
+    if len(funcs) != 1:
+        raise AssertionError("Missing actual live final output gate")
+    scope = {"_IMAGE_OUTPUTS": {"SwarmSaveImageWS", "SaveImage", "PreviewImage"}}
+    exec(compile(ast.Module(body=funcs, type_ignores=[]), str(source), "exec"), scope)
+    return scope["assert_segment_final_output_path"]
+
+
+class LiveLoRAFinalOutputContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.check = staticmethod(load_actual_live_output_gate())
+
+    @staticmethod
+    def graph():
+        return {
+            "original": {"class_type": "LoadImage", "inputs": {"image": "original.png"}},
+            "metadata": {"class_type": "InpaintCropImproved", "inputs": {"image": ["original", 0]}},
+            "crop": {"class_type": "LanPaint_ImageDecode", "inputs": {}},
+            "stitch": {"class_type": "InpaintStitchImproved",
+                       "inputs": {"stitcher": ["metadata", 0], "inpainted_image": ["crop", 0]}},
+            "saved": {"class_type": "SwarmSaveImageWS", "inputs": {"images": ["stitch", 0]}},
+        }
+
+    def test_comparison_uses_single_real_stitched_output(self):
+        self.assertIsNone(self.check(self.graph(), ["stitch", 0], "stitch"))
+
+    def test_comparison_must_not_use_unrelated_image_even_when_stitch_exists(self):
+        g = self.graph()
+        g["saved"]["inputs"]["images"] = ["original", 0]
+        with self.assertRaisesRegex(AssertionError, "not the actual saved result"):
+            self.check(g, ["stitch", 0], "stitch")
+
+    def test_saved_base_frame_not_accepted_as_stitched_segment(self):
+        g = self.graph()
+        g["saved"]["inputs"]["images"] = ["original", 0]
+        with self.assertRaisesRegex(AssertionError, "does not depend"):
+            self.check(g, ["original", 0], "stitch")
+
+    def test_gallery_of_multiple_save_sinks_is_not_one_result(self):
+        g = self.graph()
+        g["debug"] = {"class_type": "PreviewImage", "inputs": {"images": ["crop", 0]}}
+        with self.assertRaisesRegex(AssertionError, "one user-visible final output"):
+            self.check(g, ["stitch", 0], "stitch")
+
+    def test_legitimate_final_image_scale_still_reaches_stitch(self):
+        g = self.graph()
+        g["scaled"] = {"class_type": "ImageScale", "inputs": {"image": ["stitch", 0]}}
+        g["saved"]["inputs"]["images"] = ["scaled", 0]
+        self.assertIsNone(self.check(g, ["scaled", 0], "stitch"))
+
+
 class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
     @staticmethod
     def sample():
