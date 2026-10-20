@@ -1,0 +1,32 @@
+name: One-time upstream tag seed
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+jobs:
+  seed-upstream-tags:
+    if: github.repository == 'primeinc/SwarmUI' && github.event.head_commit.message == 'maintenance: seed upstream release tags'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Copy original release tags from canonical upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -n "$(git tag -l)"; then
+            echo "Refusing one-time seed: this fork already has release tags"
+            exit 1
+          fi
+          git fetch --no-tags https://github.com/mcmonkeyprojects/SwarmUI.git 'refs/tags/*:refs/tags/*'
+          count=$(git tag -l | wc -l)
+          if test "$count" -ne 26; then
+            echo "Expected 26 previously verified upstream release tags, received $count"
+            exit 1
+          fi
+          git push origin 'refs/tags/*:refs/tags/*'
