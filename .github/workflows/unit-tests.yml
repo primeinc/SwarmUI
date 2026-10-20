@@ -26,3 +26,21 @@ jobs:
           run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py
         - name: Validate browser JS syntax (NOT browser execution)
           run: node --check src/wwwroot/js/genpage/gentab/loras.js
+
+    crop-stitch-cpu:
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v6
+        - uses: actions/setup-python@v6
+          with:
+            python-version: '3.12'
+        # Exercise upstream real-tensor crop/stitch behavior, not mocks or
+        # handrolled imitations. This does not imply a Qwen GPU acceptance pass.
+        - name: Install CPU tensor dependencies for upstream CropAndStitch tests
+          run: |
+            python3 -m pip install 'numpy<3' pillow scipy
+            python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - name: Run unmodified upstream CropAndStitch round-trip and mask tests
+          env:
+            PYTHONPATH: src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch
+          run: python3 -m unittest discover -s src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/tests -p 'test_*.py' -v
