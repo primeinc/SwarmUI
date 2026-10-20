@@ -9,6 +9,74 @@ namespace SwarmUITests;
 /// <summary>Exercises the same source selector used by the production graph.</summary>
 public class QwenSegmentOriginalSourceTests
 {
+    // Tests create placeholder model catalog entries for graph construction.
+    // Restore the process-global catalogs after EACH test, including failures,
+    // so other NUnit fixtures cannot mistake synthetic VAE/LoRA files for real
+    // registered models. A passing Qwen test must not contaminate the next one.
+    private bool hadVaeHandler, hadLoraHandler, hadCommonQwenVae;
+    private T2IModelHandler originalVaeHandler, originalLoraHandler;
+    private T2IModel originalVaeModel, originalLoraModel;
+    private bool hadVaeModel, hadLoraModel;
+    private CommonModels.ModelInfo originalCommonQwenVae;
+
+    [SetUp]
+    public void SnapshotModelCatalogs()
+    {
+        hadVaeHandler = SwarmUI.Core.Program.T2IModelSets.TryGetValue("VAE", out originalVaeHandler);
+        hadLoraHandler = SwarmUI.Core.Program.T2IModelSets.TryGetValue("LoRA", out originalLoraHandler);
+        hadVaeModel = hadVaeHandler && originalVaeHandler.Models.TryGetValue(
+            "qwen-vae.safetensors", out originalVaeModel);
+        hadLoraModel = hadLoraHandler && originalLoraHandler.Models.TryGetValue(
+            "Audit/HannahLynn.safetensors", out originalLoraModel);
+        hadCommonQwenVae = CommonModels.Known.TryGetValue(
+            "qwen-image-2.1-vae", out originalCommonQwenVae);
+    }
+
+    [TearDown]
+    public void RestoreModelCatalogs()
+    {
+        if (hadVaeHandler)
+        {
+            SwarmUI.Core.Program.T2IModelSets["VAE"] = originalVaeHandler;
+            if (hadVaeModel)
+            {
+                originalVaeHandler.Models["qwen-vae.safetensors"] = originalVaeModel;
+            }
+            else
+            {
+                originalVaeHandler.Models.TryRemove("qwen-vae.safetensors", out _);
+            }
+        }
+        else
+        {
+            SwarmUI.Core.Program.T2IModelSets.Remove("VAE");
+        }
+
+        if (hadLoraHandler)
+        {
+            SwarmUI.Core.Program.T2IModelSets["LoRA"] = originalLoraHandler;
+            if (hadLoraModel)
+            {
+                originalLoraHandler.Models["Audit/HannahLynn.safetensors"] = originalLoraModel;
+            }
+            else
+            {
+                originalLoraHandler.Models.TryRemove("Audit/HannahLynn.safetensors", out _);
+            }
+        }
+        else
+        {
+            SwarmUI.Core.Program.T2IModelSets.Remove("LoRA");
+        }
+        if (hadCommonQwenVae)
+        {
+            CommonModels.Known["qwen-image-2.1-vae"] = originalCommonQwenVae;
+        }
+        else
+        {
+            CommonModels.Known.TryRemove("qwen-image-2.1-vae", out _);
+        }
+    }
     [Test]
     public void SegmentOverrideUsesConfiguredModelNotEarlierBaseModel()
     {
