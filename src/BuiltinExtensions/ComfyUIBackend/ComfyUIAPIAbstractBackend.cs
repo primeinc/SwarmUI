@@ -1067,9 +1067,12 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 && !user_input.Get(T2IParamTypes.ControlNetPreviewOnly);
             if (hasRawWorkflow)
             {
-                // Raw custom workflows expand placeholders in CreateWorkflow.
-                // Keep its established upload/placeholder ordering, with the
-                // cleanup scope also covering validation on failure.
+                // /object_info registration depends on class_type, not the
+                // expanded input placeholders. Parse and preflight the raw
+                // JSON BEFORE initImageFixer can upload any remote images.
+                // Invalid JSON must fail before side effects as well.
+                string rawGraph = GetRawWorkflowFrom(user_input);
+                ValidateNativeQwenSegmentNodes(JObject.Parse(rawGraph), NodeTypes);
                 workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
                 ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
             }
