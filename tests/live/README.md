@@ -16,7 +16,7 @@ The tag means: use CLIPSeg to find \`girl\`, sample the cropped edit with 0.8 se
       --outdir /path/to/local-qwen-probe \
       --attempts 1
 
-The script does not generate or install model assets. It only operates against an explicitly selected backend, and running it **queues real inference**. It requires the exported workflow to contain a CLIPSeg detector matching \`girl\` at \`0.1\`, the exact replacement instruction in \`SwarmQwenImage21SegmentEncode\`, and the Qwen segment diagnostic and compositor nodes. Otherwise it fails before inference.
+The script does not generate or install model assets. It only operates against an explicitly selected backend, and running it **queues real inference**. It requires the exported workflow to contain a CLIPSeg detector matching \`girl\` at \`0.1\`, the exact replacement instruction in native \`TextEncodeQwenImage21\`, a non-empty detector-mask guard, and the upstream CropAndStitch and LanPaint nodes. Otherwise it fails before inference.
 
 It adds real Comfy \`PreviewImage\` output nodes to save: the original full-size image, CLIPSeg mask, source crop, edited crop, and final composite. It measures whether the mask is empty/broad and whether sampler output and final composite differ from their actual inputs. These measurements distinguish detector, sampler, and compositor failures. **Pixel changes do not prove that the intended boy with blue eyes replaced the girl.** The script always reports \`NOT_CLOSED\` until the saved images have been semantically reviewed. For the exact reported ten-attempt failure, use \`--attempts 10\` after an initial one-attempt diagnosis.
 
