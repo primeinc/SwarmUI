@@ -77,6 +77,19 @@ def inspect_and_instrument(original):
     if not capture.graph_or_none(graph):
         raise AssertionError("Not an actual SwarmUI-exported Comfy API workflow")
 
+    # A production export without optional diagnostics must have exactly
+    # one user-visible saved result, not a gallery of internal crops/masks.
+    # Check before adding the intentional evidence PreviewImage probes below.
+    final_outputs = [
+        k for k, v in graph.items()
+        if v["class_type"] in ("SwarmSaveImageWS", "SaveImage", "PreviewImage")
+    ]
+    if len(final_outputs) != 1:
+        raise AssertionError(
+            f"Expected exactly one user-visible output in the original graph, "
+            f"got {len(final_outputs)}: {final_outputs}"
+        )
+
     detector_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "SwarmClipSeg"],
         "real SwarmClipSeg detector",
