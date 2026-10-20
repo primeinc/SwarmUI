@@ -148,6 +148,30 @@ public class WorkflowGeneratorSteps
         }
     }
 
+    /// <summary>
+    /// Preserve a supplied edit photograph as the Qwen segmentation canvas.
+    /// With no supplied image, an instruction-only segment must still fail;
+    /// ordinary text-to-image scenes can segment the generated base frame.
+    /// </summary>
+    public static bool ShouldQwenSegmentUseOriginalSource(
+        PromptRegion parsedPrompt, bool isQwen21, bool isSingleImage, bool hasExplicitSourceImage)
+    {
+        if (!isQwen21 || isSingleImage ||
+            !parsedPrompt.Parts.Any(p => p.Type == PromptRegion.PartType.Segment))
+        {
+            return false;
+        }
+        if (hasExplicitSourceImage)
+        {
+            return true;
+        }
+        return parsedPrompt.Parts.All(p => p.Type == PromptRegion.PartType.Segment)
+            && string.IsNullOrWhiteSpace(parsedPrompt.GlobalPrompt)
+            && string.IsNullOrWhiteSpace(parsedPrompt.BasePrompt)
+            && string.IsNullOrWhiteSpace(parsedPrompt.RefinerPrompt)
+            && string.IsNullOrWhiteSpace(parsedPrompt.BackgroundPrompt);
+    }
+
     public static void Register()
     {
         #region Model Loader
@@ -1900,19 +1924,17 @@ public class WorkflowGeneratorSteps
             PromptRegion.Part[] parts = [.. parsedPrompt.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
-                // A segment-only Qwen edit is an instruction to modify the supplied
-                // source image, NOT a request to generate an unrelated base frame.
-                // The ordinary main sampler has no global/base prompt in this case:
-                // using its output as the crop source destroys the original subject
-                // before CLIPSeg even runs. Use the real original image instead.
-                // Other prompts retain the existing generated-frame segment behavior.
-                bool segmentOnlyQwenEdit = g.IsQwenImage21() && !isSingleImage
-                    && parsedPrompt.Parts.All(p => p.Type == PromptRegion.PartType.Segment)
-                    && string.IsNullOrWhiteSpace(parsedPrompt.GlobalPrompt)
-                    && string.IsNullOrWhiteSpace(parsedPrompt.BasePrompt)
-                    && string.IsNullOrWhiteSpace(parsedPrompt.RefinerPrompt)
-                    && string.IsNullOrWhiteSpace(parsedPrompt.BackgroundPrompt);
-                if (segmentOnlyQwenEdit)
+                // A global scene description must not replace the user's
+                // supplied photograph with a sampled base frame.
+                bool hasExplicitSource = g.UserInput.TryGet(T2IParamTypes.InitImage, out Image suppliedInit)
+                    && suppliedInit is not null;
+                if (!hasExplicitSource && g.UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> suppliedRefs))
+                {
+                    hasExplicitSource = suppliedRefs is { Count: > 0 };
+                }
+                bool useOriginalQwenSource = ShouldQwenSegmentUseOriginalSource(
+                    parsedPrompt, g.IsQwenImage21(), isSingleImage, hasExplicitSource);
+                if (useOriginalQwenSource)
                 {
                     WGNodeData originalSource = null;
                     string sourceKind = null;
@@ -1956,7 +1978,7 @@ public class WorkflowGeneratorSteps
                         originalBatch = NodePath(batchNode, 0);
                     }
                     g.CurrentMedia = originalSource.WithPath(originalBatch);
-                    Logs.Info($"[QWEN21-SEG] segment-only original source={sourceKind} node={g.CurrentMedia.Path[0]} base_sampler_bypassed=true batch={sourceBatchSize}");
+                    Logs.Info($"[QWEN21-SEG] original edit source={sourceKind} node={g.CurrentMedia.Path[0]} base_sampler_bypassed=true batch={sourceBatchSize}");
                 }
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
                 // Native Qwen image references represent a single source image per conditioning.
@@ -2223,6 +2245,14 @@ public class WorkflowGeneratorSteps
                             });
                             cropInputs["optional_context_mask"] = NodePath(context, 0);
                         }
+                        // The upstream crop adapter falls back to a full-frame
+                        // crop on empty detection. Reject that dangerous fallback
+                        // while preserving the native crop-and-stitch adapter.
+                        string requiredMask = g.CreateNode("SwarmRequireNonEmptyMask", new JObject()
+                        {
+                            ["mask"] = NodePath(detectedMaskNode, 0)
+                        });
+                        cropInputs["mask"] = NodePath(requiredMask, 0);
                         string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
                         cropStitcher = NodePath(cropNode, 0);
                         qwenCrop = NodePath(cropNode, 1);
@@ -2292,7 +2322,7 @@ public class WorkflowGeneratorSteps
                     if (nativeQwenSegment)
                     {
                         (prompt, negPrompt, segmentLatent) = g.CreateQwen21SegmentConditioning(
-                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID);
+                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID, part.DataText);
                     }
                     else
                     {

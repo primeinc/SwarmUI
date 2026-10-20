@@ -14,9 +14,33 @@ public partial class WorkflowGenerator
     /// Upstream owns Qwen vision tokens, reference VAE latents, and the starting
     /// edit latent. No Qwen-specific encoding or sampling is reimplemented here.
     /// </summary>
+    /// <summary>
+    /// Qwen edits consume instructions, not SD-style noun-only trigger
+    /// prompts. Leave an explicit edit instruction intact; otherwise explain
+    /// what the requested LoRA-triggered replacement targets.
+    /// </summary>
+    public static string BuildQwen21SegmentEditInstruction(string prompt, string target)
+    {
+        string text = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            throw new SwarmUserErrorException("Qwen segment edit requires an instruction or replacement description.");
+        }
+        string[] commands = ["Edit ", "Replace ", "Change ", "Transform ", "Turn ", "Make ",
+            "Remove ", "Swap ", "Repaint ", "Redraw ", "Convert "];
+        if (Array.Exists(commands, command => text.StartsWith(command, StringComparison.OrdinalIgnoreCase)))
+        {
+            return text;
+        }
+        string subject = string.IsNullOrWhiteSpace(target) ||
+            target.StartsWith("yolo-", StringComparison.OrdinalIgnoreCase) || target.Contains('|')
+                ? "selected subject" : target.Trim();
+        return $"Replace the {subject} in <image1> with {text}. Keep the rest of the image unchanged.";
+    }
+
     public (JArray Positive, JArray Negative, JArray Latent) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
-        JArray croppedImage, JArray croppedMask, int sectionId)
+        JArray croppedImage, JArray croppedMask, int sectionId, string segmentTarget = null)
     {
         if (croppedImage is null || croppedMask is null || clip is null || vae is null)
         {
@@ -48,7 +72,7 @@ public partial class WorkflowGenerator
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "").Trim(),
+            ["prompt"] = BuildQwen21SegmentEditInstruction(prompt, segmentTarget),
             ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? "").Trim(),
             ["resolution"] = 0
         };

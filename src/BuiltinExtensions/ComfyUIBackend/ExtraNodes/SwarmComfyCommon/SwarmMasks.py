@@ -131,6 +131,26 @@ class SwarmExcludeFromMask:
         return (main_mask,)
 
 
+class SwarmRequireNonEmptyMask:
+    """Require a real region before the upstream crop adapter.
+
+    InpaintCropImproved treats an empty detection as a request to crop the
+    whole frame. That is not an acceptable fallback for an explicit edit.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"mask": ("MASK",)}}
+
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "validate"
+    CATEGORY = "SwarmUI/masks"
+
+    def validate(self, mask):
+        if not torch.any(mask > 0).item():
+            raise ValueError("Qwen segment: no subject detected by the mask; refusing full-frame fallback")
+        return (mask,)
+
+
 class SwarmMaskBounds:
     @classmethod
     def INPUT_TYPES(s):
@@ -281,6 +301,7 @@ class SwarmMaskThreshold:
 
 
 NODE_CLASS_MAPPINGS = {
+    "SwarmRequireNonEmptyMask": SwarmRequireNonEmptyMask,
     "SwarmSquareMaskFromPercent": SwarmSquareMaskFromPercent,
     "SwarmCleanOverlapMasks": SwarmCleanOverlapMasks,
     "SwarmCleanOverlapMasksExceptSelf": SwarmCleanOverlapMasksExceptSelf,

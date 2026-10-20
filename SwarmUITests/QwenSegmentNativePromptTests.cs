@@ -42,15 +42,32 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         WGNodeData vae = new(new JArray("vae", 0), g, WGNodeData.DT_VAE, null);
         g.CreateQwen21SegmentConditioning(
             part.Prompt, "<weight[0.5]:blurry>", clip, vae,
-            new JArray("crop", 1), new JArray("crop", 2), part.ContextID);
+            new JArray("crop", 1), new JArray("crop", 2), part.ContextID, part.DataText);
 
         JObject encoder = g.Workflow.Properties()
             .Select(p => p.Value as JObject)
             .Single(node => node["class_type"]?.ToString() == "TextEncodeQwenImage21");
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo("HannahLynn"));
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(
+            "Replace the girl in <image1> with HannahLynn. Keep the rest of the image unchanged."));
         Assert.That(encoder["inputs"]?["negative_prompt"]?.ToString(), Is.EqualTo("blurry"));
         Assert.That(encoder["inputs"]?["images.image_1"]?.ToString(),
             Is.EqualTo(new JArray("crop", 1).ToString()));
+    }
+
+    [Test]
+    public static void NativeQwenPreservesExplicitReplacementInstructions()
+    {
+        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
+            "Edit the image, replace the girl with a black boy with blue eyes", "girl"),
+            Is.EqualTo("Edit the image, replace the girl with a black boy with blue eyes"));
+    }
+
+    [Test]
+    public static void NativeQwenMustNotSendStandaloneLoRATriggerAsEditInstruction()
+    {
+        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
+            "<weight[1.2]:HannahLynn>", "girl"),
+            Is.EqualTo("Replace the girl in <image1> with HannahLynn. Keep the rest of the image unchanged."));
     }
 
     [Test]
