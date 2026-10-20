@@ -144,6 +144,18 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
+    public void ReferenceEditUsesCreativityAsEditControl()
+    {
+        WorkflowGenerator g = Prepare(creativity: 0.8);
+        RunSegment(g);
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.EqualTo(4));
+        Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty);
+        Assert.That(Nodes(g, "SetLatentNoiseMask"), Has.Length.EqualTo(1), "The crop helper may build its legacy masked latent, but Reference Edit must not sample it.");
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
+    }
+
+    [Test]
     public void ReferenceEditDoesNotRequireNativeComfyEncoderFeature()
     {
         WorkflowGenerator g = Prepare();
