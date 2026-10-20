@@ -32,16 +32,22 @@ def native_contract_fixture():
         "crop": node("InpaintCropImproved", image=["source", 0],
                      mask=["binary", 0], mask_hipass_filter=0.5,
                      output_resize_to_target_size=True),
-        "condition": node("TextEncodeQwenImage21", clip=["clip", 0],
-                          prompt=probe.PROMPT, negative_prompt="",
-                          **{"images.image_1": ["crop", 1]}),
+        "condition": node("SwarmTextEncodeAdvanced", clip=["clip", 0],
+                          prompt=probe.PROMPT, images=["crop", 1], steps=4),
+        "negative": node("SwarmTextEncodeAdvanced", clip=["clip", 0],
+                         prompt="", images=["crop", 1], steps=4),
+        "vae_ref": node("VAEEncode", pixels=["crop", 1], vae=["vae", 0]),
+        "positive_ref": node("ReferenceLatent", conditioning=["condition", 0],
+                             latent=["vae_ref", 0]),
+        "negative_ref": node("ReferenceLatent", conditioning=["negative", 0],
+                             latent=["vae_ref", 0]),
         "masked": node("LanPaint_ImageEncode", image=["crop", 1],
                        mask=["crop", 2], vae=["vae", 0]),
         "raw_model": node("UNETLoader", unet_name="fixture.safetensors"),
         "sampler": node("LanPaint_KSampler", model=["raw_model", 0],
                         seed=3, steps=4, cfg=1.0, denoise=0.8,
                         sampler_name="euler", scheduler="simple",
-                        positive=["condition", 0], negative=["condition", 1],
+                        positive=["positive_ref", 0], negative=["negative_ref", 0],
                         latent_image=["masked", 0], LanPaint_NumSteps=5,
                         LanPaint_PromptMode="Image First",
                         LanPaint_Info="LanPaint KSampler.",
@@ -92,6 +98,16 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         graph = native_contract_fixture()
         graph["sampler"]["inputs"]["latent_image"] = ["condition", 2]
         with self.assertRaises(AssertionError):
+            probe.inspect_and_instrument(graph)
+
+    def test_wrong_or_missing_reference_latent_fails(self):
+        graph = native_contract_fixture()
+        graph["positive_ref"]["inputs"]["latent"] = ["masked", 0]
+        with self.assertRaisesRegex(AssertionError, "reference"):
+            probe.inspect_and_instrument(graph)
+        graph = native_contract_fixture()
+        graph["sampler"]["inputs"]["negative"] = ["negative", 0]
+        with self.assertRaisesRegex(AssertionError, "conditioning"):
             probe.inspect_and_instrument(graph)
 
     def test_double_outputs_are_not_accepted_as_one_generation(self):
