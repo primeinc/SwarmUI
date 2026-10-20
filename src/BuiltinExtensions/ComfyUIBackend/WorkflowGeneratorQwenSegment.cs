@@ -64,7 +64,7 @@ public partial class WorkflowGenerator
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21LoraImg2ImgConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
-        ImageMaskCropData crop, int steps, double creativity, int sectionId)
+        ImageMaskCropData crop, int steps, double creativity, int sectionId, bool maskedLatent = false)
     {
         if (crop?.ScaledImage is null || vae is null || clip is null)
         {
@@ -92,11 +92,20 @@ public partial class WorkflowGenerator
 
         string positive = encodeText(prompt);
         string negative = encodeText(negativePrompt);
-        string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
+        JArray latent;
+        if (maskedLatent)
+        {
+            latent = NodePath(crop.MaskedLatent, 0);
+        }
+        else
+        {
+            string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
+            latent = NodePath(encodedCrop, 0);
+        }
         int startStep = (int)Math.Round(steps * (1 - creativity));
 
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='LoRA Img2Img' steps={steps} start={startStep} creativity={creativity:0.###} conditioning=text-only latent=plain-crop-vae reference=cut");
-        return (NodePath(positive, 0), NodePath(negative, 0), NodePath(encodedCrop, 0), startStep);
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='LoRA Img2Img' steps={steps} start={startStep} creativity={creativity:0.###} conditioning=text-only latent={(maskedLatent ? "masked-crop-vae" : "plain-crop-vae")} reference=cut");
+        return (NodePath(positive, 0), NodePath(negative, 0), latent, startStep);
     }
 
 
