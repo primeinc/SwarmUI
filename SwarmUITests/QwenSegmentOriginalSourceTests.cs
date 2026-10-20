@@ -49,11 +49,13 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -120,7 +122,10 @@ public class QwenSegmentOriginalSourceTests
         input.Set(T2IParamTypes.Model, model);
         input.Set(T2IParamTypes.VAE, vae);
         input.Set(T2IParamTypes.QwenModel, clip);
-        input.Set(T2IParamTypes.InitImage, image);
+        if (hasInitImage)
+        {
+            input.Set(T2IParamTypes.InitImage, image);
+        }
         using var independentPixels = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(80, 96);
         if (independentPromptImage)
         {
@@ -154,9 +159,10 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(encoder.Node["inputs"]?["images.image_1"]?.ToString(),
             Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()),
             "The original crop occupies the first native Qwen reference slot");
-        Assert.That(encoder.Node["inputs"]?["images.image_2"] is not null, Is.EqualTo(independentPromptImage),
+        Assert.That(encoder.Node["inputs"]?["images.image_2"] is not null,
+            Is.EqualTo(hasInitImage && independentPromptImage),
             "An independent PromptImages[0] must not be discarded or substituted for the source");
-        if (independentPromptImage)
+        if (hasInitImage && independentPromptImage)
         {
             Assert.That(encoder.Node["inputs"]?["images.image_2"]?[0]?.ToString(), Is.Not.EqualTo(sourceId));
         }
