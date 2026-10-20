@@ -92,6 +92,20 @@ def inspect_and_instrument(original):
     encoder = graph[enc_id]["inputs"]
     if encoder.get("prompt", "").strip() != PROMPT:
         raise AssertionError(f"Expected exact segment instruction {PROMPT!r}, got {encoder.get('prompt')!r}")
+    # This specific reported InitEdit case supplies ONE Prompt Image: the
+    # original photo. That image must be replaced by the detected crop in
+    # Qwen's vision references, never sent as a duplicate full-frame image.
+    if not encoder.get("use_original_reference", True):
+        raise AssertionError("The reported reference-edit reproduction requires its crop reference")
+    source_crop_id = capture.link(encoder.get("image"), graph)
+    if source_crop_id is None or graph[source_crop_id]["class_type"] != "SwarmImageScaleForMP":
+        raise AssertionError("Segment Qwen source must be the actual resized detected crop")
+    if "image_1" in encoder:
+        raise AssertionError(
+            "DUPLICATE EDIT SOURCE: Qwen segment encoder includes both the crop "
+            "and the one full-frame Prompt Image; the original subject is "
+            "conditioned twice. Refusing GPU inference on this known-bad graph."
+        )
     diagnostics_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "SwarmQwen21SegmentDiagnostics"],
         "Qwen segment diagnostics node",
