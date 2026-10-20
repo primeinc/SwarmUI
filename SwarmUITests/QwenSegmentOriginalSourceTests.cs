@@ -276,7 +276,16 @@ public class QwenSegmentOriginalSourceTests
         input.Set(T2IParamTypes.Prompt, prompt);
         input.Set(T2IParamTypes.Seed, 20261020L);
         input.Set(T2IParamTypes.BatchSize, batchSize);
-        input.Set(T2IParamTypes.Steps, 12);
+        // CI proves the Python acceptance preflight against the ACTUAL C#
+        // workflow emitted for the precise, previously failing segment prompt.
+        // This is graph/source evidence without GPU/model inference.
+        const string reproduction = "<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes";
+        string exportPath = System.Environment.GetEnvironmentVariable("SWARM_QWEN_EXPORT_GRAPH");
+        bool exportThisCase = !string.IsNullOrWhiteSpace(exportPath)
+            && prompt == reproduction && !independentPromptImage && hasInitImage
+            && sectionLoraWeight < 0 && !useBase64Images && batchSize == 1
+            && !useSegmentOverride && !referenceEdit;
+        input.Set(T2IParamTypes.Steps, exportThisCase ? 4 : 12);
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
         input.PreparsePromptLikes();
@@ -314,6 +323,10 @@ public class QwenSegmentOriginalSourceTests
             Features = useBase64Images ? new() { "comfy_loadimage_b64" } : new()
         };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
+        if (exportThisCase)
+        {
+            System.IO.File.WriteAllText(exportPath, graph.ToString());
+        }
         Assert.That(ComfyUIAPIAbstractBackend.ShouldPreserveQwenOriginalInitUpload(graph, input),
             Is.EqualTo(hasInitImage), "Native Qwen Init Image must bypass external canvas resampling");
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
