@@ -130,8 +130,10 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(diagnostic.Value["inputs"]!["prompt"]!.Value<string>()!.Trim(), Is.EqualTo("make the face blue"));
         Assert.That(diagnostic.Value["inputs"]!["mode"]!.Value<string>(), Is.EqualTo("Reference Edit"));
 
+        JProperty splitAlpha = Nodes(g, "SplitImageWithAlpha").Single();
+        Assert.That(splitAlpha.Value["inputs"]!["image"], Is.EqualTo(new JArray(diagnostic.Name, 0)));
         JProperty composite = Nodes(g, "SwarmImageCompositeMaskedColorCorrecting").Single();
-        Assert.That(composite.Value["inputs"]!["source"], Is.EqualTo(new JArray(diagnostic.Name, 0)));
+        Assert.That(composite.Value["inputs"]!["source"], Is.EqualTo(new JArray(splitAlpha.Name, 0)));
         Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(composite.Name, 0)));
     }
 
