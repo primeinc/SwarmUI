@@ -37,7 +37,9 @@ public partial class WorkflowGenerator
             ["image"] = NodePath(crop.ScaledImage, 0),
             ["prompt"] = prompt ?? "",
             ["negative_prompt"] = negativePrompt ?? "",
-            ["use_original_reference"] = useOriginalReference
+            ["use_original_reference"] = useOriginalReference,
+            ["steps"] = steps,
+            ["lora_hooks"] = CreateDynamicLoraHooks()
         };
         // Match WGNodeData.EncodeToLatent's VAE tiling contract for reference images.
         // The source crop and each optional reference use the same encoding mode.
