@@ -28,6 +28,9 @@ public class QwenSegmentPipelineTests : SwarmUITest
         }
         ComfyUIBackendExtension.SamplerParam ??= new(new T2IParamType("Sampler", "", "euler", ID: "sampler"));
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
+        ComfyUIBackendExtension.RefinerUpscaleMethod ??= new(new T2IParamType("Refiner Upscale Method", "", "None", ID: "refinerupscalemethod"));
+        ComfyUIBackendExtension.RefinerSamplerParam ??= new(new T2IParamType("Refiner Sampler", "", "euler", ID: "refinersampler"));
+        ComfyUIBackendExtension.RefinerSchedulerParam ??= new(new T2IParamType("Refiner Scheduler", "", "simple", ID: "refinerscheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
         // Scoped-Qwen tests reload the model through the full Comfy model-generation pipeline.
