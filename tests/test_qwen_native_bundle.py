@@ -191,5 +191,22 @@ class NativeQwenBundleTest(unittest.TestCase):
         self.assertFalse((BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmQwen.py").exists())
 
 
+    def test_qwen_independent_references_do_not_use_resizing_image_batch(self):
+        """Multi-image Qwen conditioning preserves independent input geometry."""
+        helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
+        encoder = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmText.py").read_text()
+        segment_body = helper.split("CreateQwen21SegmentConditioning(", 1)[1]
+        self.assertIn("referenceImages.Count == 1", segment_body)
+        self.assertIn('GetPromptImage(false, false, i)', segment_body)
+        self.assertIn('textInputs[$"image_{i + 1}"] = referenceImages[i]', segment_body)
+        self.assertNotIn('CreateNode("ImageBatch"', segment_body)
+        self.assertIn('for i in range(1, 17)', encoder)
+        self.assertIn('image_slots.get(f"image_{i}")', encoder)
+        self.assertIn('images.append(image)', encoder)
+        self.assertIn('if images is not None:', encoder)
+        # The existing single-reference/other-model vision API remains available.
+        self.assertIn('"images": ("IMAGE",', encoder)
+
+
 if __name__ == "__main__":
     unittest.main()
