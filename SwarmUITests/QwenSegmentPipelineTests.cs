@@ -334,6 +334,61 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
+    public void BatchedQwenSegmentsMustProcessEachImageIndependently()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.BatchSize, 2);
+        RunSegment(g);
+
+        Assert.That(Nodes(g, "ImageFromBatch"), Has.Length.EqualTo(2),
+            "Each source image must have a distinct crop, prompt-reference, sampler, and compositor branch.");
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "SwarmKSampler"), Has.Length.EqualTo(2));
+        JProperty finalBatch = Nodes(g, "ImageBatch").Single();
+        Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(finalBatch.Name, 0)));
+        string[] encoderSources = Nodes(g, "SwarmQwenImage21SegmentEncode")
+            .Select(node => node.Value["inputs"]!["image"]![0]!.Value<string>()!).ToArray();
+        Assert.That(encoderSources.Distinct().Count(), Is.EqualTo(2),
+            "Batch item 2 must not be conditioned on batch item 1's crop.");
+    }
+
+    [TestCase("small", true)]
+    [TestCase("none", false)]
+    public void QwenSegmentOptionalPromptImagesRespectTextImageSetting(string setting, bool expected)
+    {
+        WorkflowGenerator g = Prepare();
+        using SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32> source = new(640, 320);
+        g.UserInput.Set(T2IParamTypes.PromptImages, new List<Image> { new(source) });
+        g.UserInput.Set(ComfyUIBackendExtension.TextEncodedImage, setting);
+        RunSegment(g);
+
+        JProperty encoder = Nodes(g, "SwarmQwenImage21SegmentEncode").Single();
+        JToken optional = encoder.Value["inputs"]!["image_1"];
+        Assert.That(optional is not null, Is.EqualTo(expected));
+        if (expected)
+        {
+            string nodeId = optional![0]!.Value<string>()!;
+            JProperty resize = g.Workflow.Property(nodeId)!;
+            Assert.That(resize.Value["class_type"]!.Value<string>(), Is.EqualTo("ImageScale"));
+            int width = resize.Value["inputs"]!["width"]!.Value<int>();
+            int height = resize.Value["inputs"]!["height"]!.Value<int>();
+            Assert.That(width / (double)height, Is.EqualTo(2.0).Within(0.025),
+                "Optional reference must retain its own aspect ratio instead of inheriting the crop's shape.");
+            Assert.That(Nodes(g, "ImageBatch"), Is.Empty, "References must remain individual Qwen vision slots.");
+        }
+    }
+
+    [Test]
+    public void QwenSegmentRejectsPromptImagesBeyondAvailableReferenceSlots()
+    {
+        WorkflowGenerator g = Prepare();
+        using SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32> source = new(64, 64);
+        Image image = new(source);
+        g.UserInput.Set(T2IParamTypes.PromptImages, Enumerable.Repeat(image, 16).ToList());
+        Assert.Throws<SwarmUserErrorException>(() => RunSegment(g));
+    }
+
+    [Test]
     public void ZeroCreativityStillSavesRequestedSegmentMask()
     {
         WorkflowGenerator g = Prepare(creativity: 0);
