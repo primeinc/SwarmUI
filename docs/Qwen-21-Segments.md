@@ -15,6 +15,14 @@ segment without a source image is an error. Ordinary text-to-image prompts with
 global scene content and no supplied image may still segment their generated
 frame.
 
+For remote Comfy backends without the Swarm base64 loader, ordinary `Init Image`
+file uploads are rescaled to the generation canvas by the legacy fallback.
+That is incorrect when native Qwen segmentation edits the original photo.
+The generated native crop graph now disables only that Init Image rescaling,
+so its file upload retains the supplied source dimensions and pixels.
+Ordinary img2img and raw custom workflow upload semantics are unchanged.
+Independent Prompt Images were already non-resizing inputs.
+
 The two selectable segment sampling modes are intentionally different:
 
 ```
@@ -148,6 +156,14 @@ and captures before/crop/mask/after images for semantic review.
 `tests/live/test_qwen_segment_lora.py` checks an actual LoRA node is on the
 sampler model path and compares OFF/ON/OFF model-backed output from real global
 and segment workflows.
+The NUnit production-generator checks exercise original Init Image, Prompt Image-only
+source, independent reference image slots, exact native base64 bytes, separate
+batch detector/crop/sampler paths with different seeds, OFF/ON LoRA loader
+placement, and the remote Init Image upload-resizing decision. These are
+source and graph contracts, not Qwen inference. Upstream CropAndStitch also
+high-pass-filters its optional context mask: weak confidence below the cutoff
+cannot enlarge the crop, but strong false detections can, so real mask inspection
+remains part of acceptance.
 
 **Testability does not require a GPU as a blanket rule.** C# graph generation,
 prompt/LoRA-path invariants, native node contracts, exported-graph preflight,
