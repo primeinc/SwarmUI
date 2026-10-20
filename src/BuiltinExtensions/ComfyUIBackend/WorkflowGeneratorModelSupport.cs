@@ -559,12 +559,14 @@ public partial class WorkflowGenerator
         }
         else if (IsQwenImage21())
         {
-            // TODO: This ain't right, but there's no correct node.
-            return resultImage(CreateNode("EmptyLatentImage", new JObject()
+            // Match ComfyUI TextEncodeQwenImage21: the Qwen 2.1 latent has
+            // 64 channels and a 16x spatial downscale. EmptyLatentImage is
+            // only 4 channels and cannot be used for native Qwen generation.
+            return resultImage(CreateNode("SwarmEmptyQwenImage21Latent", new JObject()
             {
                 ["batch_size"] = batchSize,
-                ["height"] = height / 2,
-                ["width"] = width / 2
+                ["height"] = height,
+                ["width"] = width
             }, id));
         }
         else
