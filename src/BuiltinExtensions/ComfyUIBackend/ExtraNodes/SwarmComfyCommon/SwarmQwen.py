@@ -14,7 +14,10 @@ class SwarmQwenImage21SegmentEncode:
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
                 "negative_prompt": ("STRING", {"multiline": True, "dynamicPrompts": True}),
-            }
+            },
+            "optional": {
+                "use_original_reference": ("BOOLEAN", {"default": True}),
+            },
         }
 
     CATEGORY = "SwarmUI/qwen"
@@ -23,7 +26,7 @@ class SwarmQwenImage21SegmentEncode:
     FUNCTION = "encode"
     DESCRIPTION = "Qwen Image 2.1 segment conditioning compatible with ComfyUI TextEncodeQwenImage21."
 
-    def encode(self, clip, vae, image, prompt, negative_prompt):
+    def encode(self, clip, vae, image, prompt, negative_prompt, use_original_reference=True):
         # Match Qwen 2.1's native edit contract without depending on the newer upstream
         # TextEncodeQwenImage21 node being registered in the selected Comfy backend.
         source = image[:1]
@@ -35,25 +38,29 @@ class SwarmQwenImage21SegmentEncode:
         else:
             resized = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
 
-        rgb = resized[:, :, :, :3]
-        if resized.shape[-1] > 3:
-            rgb = rgb * resized[:, :, :, 3:] + (1.0 - resized[:, :, :, 3:])
+        # Match TextEncodeQwenImage21 in both supported modes: the source crop
+        # supplies vision/reference conditioning only when requested. Without it,
+        # native Qwen tokenization keeps vision tokens and attaches no reference latents.
+        images_vl = []
+        reference = None
+        if use_original_reference:
+            rgb = resized[:, :, :, :3]
+            if resized.shape[-1] > 3:
+                rgb = rgb * resized[:, :, :, 3:] + (1.0 - resized[:, :, :, 3:])
+            images_vl = [rgb]
+            reference = vae.encode(resized)
 
-        reference = vae.encode(resized)
-        images_vl = [rgb]
-
-        # Mirror ComfyUI TextEncodeQwenImage21 at the tokenizer boundary.
-        # Qwen 2.1 drops the vision tokens from the text sequence when matching reference
-        # latents are present, then splices those latents into the DiT at image_slots.
+        keep_vision = reference is None
         positive = clip.encode_from_tokens_scheduled(
-            clip.tokenize(prompt or "", images=images_vl, keep_vision=False, prevent_empty_text=True)
+            clip.tokenize(prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
         )
         negative = clip.encode_from_tokens_scheduled(
-            clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=False, prevent_empty_text=True)
+            clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
         )
 
-        positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [reference]}, append=True)
-        negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [reference]}, append=True)
+        if reference is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [reference]}, append=True)
+            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [reference]}, append=True)
 
         # Keep the native-compatible third output for workflow/debug parity. Segment Reference Edit
         # intentionally does not sample from it; it uses a VAE encoding of the crop as its edit anchor.
@@ -66,7 +73,8 @@ class SwarmQwenImage21SegmentEncode:
 
         print(
             f"[QWEN21-SEG] encoder crop={tuple(resized.shape)} "
-            f"latent={tuple(reference.shape)} prompt={repr((prompt or '')[:160])} "
+            f"reference_latent={tuple(reference.shape) if reference is not None else None} "
+            f"original_reference={use_original_reference} prompt={repr((prompt or '')[:160])} "
             f"negative={repr((negative_prompt or '')[:120])}",
             flush=True,
         )
