@@ -1933,34 +1933,54 @@ public class WorkflowGeneratorSteps
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
                     bool nativeQwenSegment = g.IsQwenImage21();
                     string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
-                    // Qwen 2.1 Reference Edit samples the plain crop VAE latent and relies on the
-                    // final pixel-space segment mask for confinement. DifferentialDiffusion only
-                    // has meaning for the masked partial-denoise mode.
-                    if (!nativeQwenSegment || qwenSegmentMode != "Reference Edit")
+                    bool scopedQwenLora = nativeQwenSegment && g.HasLorasForConfinement(part.ContextID);
+                    bool qwenMaskedMode = nativeQwenSegment && qwenSegmentMode == "Masked Img2Img";
+
+                    // Non-Qwen segment behavior is unchanged. Qwen's DifferentialDiffusion wrapper is
+                    // segment-local, so build it after the scoped LoRA variant instead of mutating
+                    // CurrentModel first and then cloning an orphan wrapper.
+                    if (!nativeQwenSegment)
                     {
                         g.EnableDifferential();
                     }
-                    // Always start each segment from its own selected model and unmodified text encoder.
-                    // EnableDifferential may replace CurrentModel; the sampler must use that replacement.
+
                     model = g.CurrentModel;
                     clip = segmentBaseClip;
                     if (part.ContextID > 0)
                     {
-                        (JArray newModel, JArray newClip) = nativeQwenSegment && g.HasLorasForConfinement(part.ContextID)
+                        (JArray newModel, JArray newClip) = scopedQwenLora
                             ? g.LoadLorasForConfinementInsideWrappers(part.ContextID, model.Path, clip.Path)
                             : g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
                         model = model.WithPath(newModel);
                         clip = clip.WithPath(newClip);
+                    }
+                    if (qwenMaskedMode)
+                    {
+                        string differential = g.CreateNode("DifferentialDiffusion", new JObject()
+                        {
+                            ["model"] = model.Path
+                        });
+                        model = model.WithPath([differential, 0]);
                     }
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
                     JArray prompt, negPrompt;
                     JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
+                    string qwenEffectiveMode = qwenSegmentMode;
                     if (nativeQwenSegment)
                     {
-                        (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21SegmentConditioning(
-                            part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID);
+                        if (scopedQwenLora)
+                        {
+                            (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21LoraImg2ImgConditioning(
+                                part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID, maskedLatent: qwenMaskedMode);
+                            qwenEffectiveMode = qwenMaskedMode ? "LoRA Img2Img / Masked" : "LoRA Img2Img";
+                        }
+                        else
+                        {
+                            (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21SegmentConditioning(
+                                part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID);
+                        }
                     }
                     else
                     {
@@ -1997,7 +2017,7 @@ public class WorkflowGeneratorSteps
                         {
                             logPrompt = logPrompt[..160];
                         }
-                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
+                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenEffectiveMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
                     }
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
@@ -2014,7 +2034,7 @@ public class WorkflowGeneratorSteps
                             ["mask"] = NodePath(g.MaskShrunkInfo.CroppedMask, 0),
                             ["section_id"] = Math.Max(0, part.ContextID),
                             ["prompt"] = part.Prompt ?? "",
-                            ["mode"] = qwenSegmentMode ?? ""
+                            ["mode"] = qwenEffectiveMode ?? ""
                         });
                         g.CurrentMedia = g.CurrentMedia.WithPath([diagnostic, 0]);
                     }
