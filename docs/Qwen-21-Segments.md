@@ -24,7 +24,7 @@ Original source -> SwarmClipSeg(text) -> detected mask
                          TextEncodeQwenImage21.images.image_1
                               positive / negative / output-2 empty edit latent
                                               |
-Reference Edit [default]: KSampler(model, Qwen output-2 latent, denoise=1)
+Reference Edit [advanced option]: KSampler(model, Qwen output-2 latent, denoise=1)
                                               |
                              LanPaint_ImageDecode(image=crop, no mask)
                                               |
@@ -32,11 +32,19 @@ Reference Edit [default]: KSampler(model, Qwen output-2 latent, denoise=1)
                                               |
                                         final original-size image
 
-Masked Img2Img: same crop -> LanPaint_ImageEncode(image=crop, mask=crop mask)
+Masked Img2Img [default]: same crop -> LanPaint_ImageEncode(image=crop, mask=crop mask)
                                     -> LanPaint_KSampler(denoise=requested strength)
                                     -> LanPaint_ImageDecode -> SplitImageWithAlpha
                                     -> InpaintStitchImproved(stitcher)
 ```
+
+Previously, Swarm defaulted to Reference Edit, which fed a zero-filled
+latent to an unmasked KSampler and used the segment mask only after generation.
+That is **not masked inpainting** and can fail to replace the selected subject
+even if the selected LoRA model is correctly attached. Qwen segments now
+default to the existing upstream masked path, which sends the actual crop
+mask into LanPaint_ImageEncode and its KSampler. Reference Edit remains an
+explicit advanced option for users who specifically want unmasked crop edits.
 
 The Qwen native edit encoder returns a **zero-filled** output-2 latent, not
 the original image encoded as an img2img latent. Therefore Reference Edit
