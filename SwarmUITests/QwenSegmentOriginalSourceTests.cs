@@ -476,13 +476,47 @@ public class QwenSegmentOriginalSourceTests
             string independentLoaderId = scaled?["inputs"]?["image"]?[0]?.ToString();
             Assert.That(graph[independentLoaderId]?["class_type"]?.ToString(),
                 Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"));
-            var secondVae = nodes.Single(x => x.Node["class_type"]?.ToString() == "VAEEncode"
-                && x.Node["inputs"]?["pixels"]?.ToString()
-                    == new Newtonsoft.Json.Linq.JArray(independentId, 0).ToString());
-            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "ReferenceLatent"
-                && x.Node["inputs"]?["latent"]?.ToString()
-                    == new Newtonsoft.Json.Linq.JArray(secondVae.Id, 0).ToString()), Is.EqualTo(2),
-                "The same normalized second image must be used by both Swarm vision and VAE references");
+            // A global/base Qwen stage may encode the same independent
+            // reference as the segment stage. Distinct VAEEncode nodes with
+            // identical pixels are legitimate. Follow BOTH segment sampler
+            // conditioning branches instead of calling Single() across the
+            // entire graph and falsely failing on a correct additional stage.
+            string expectedPixels = new Newtonsoft.Json.Linq.JArray(independentId, 0).ToString();
+            var secondVaeIds = nodes.Where(x =>
+                x.Node["class_type"]?.ToString() == "VAEEncode" &&
+                x.Node["inputs"]?["pixels"]?.ToString() == expectedPixels)
+                .Select(x => x.Id).ToHashSet();
+            Assert.That(secondVaeIds, Is.Not.Empty,
+                "Independent Qwen image reference must reach a VAEEncode");
+            bool HasSegmentReference(string direction)
+            {
+                Newtonsoft.Json.Linq.JArray cursor = sampler.Node["inputs"]?[direction] as Newtonsoft.Json.Linq.JArray;
+                System.Collections.Generic.HashSet<string> visited = [];
+                while (cursor is not null)
+                {
+                    string nodeId = cursor[0]?.ToString();
+                    if (nodeId is null || !visited.Add(nodeId))
+                    {
+                        break;
+                    }
+                    var current = graph[nodeId] as Newtonsoft.Json.Linq.JObject;
+                    if (current is null)
+                    {
+                        break;
+                    }
+                    if (current["class_type"]?.ToString() == "ReferenceLatent"
+                        && secondVaeIds.Contains(current["inputs"]?["latent"]?[0]?.ToString()))
+                    {
+                        return true;
+                    }
+                    cursor = current["inputs"]?["conditioning"] as Newtonsoft.Json.Linq.JArray;
+                }
+                return false;
+            }
+            Assert.That(HasSegmentReference("positive"), Is.True,
+                "Segment positive conditioning must attach the second native-sized image latent");
+            Assert.That(HasSegmentReference("negative"), Is.True,
+                "Segment negative conditioning must attach the same native-sized image reference");
         }
         else
         {
