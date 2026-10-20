@@ -90,6 +90,29 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo("Replace the girl in <image1> with HannahLynn. Keep the rest of the image unchanged."));
     }
 
+    [TestCase("Add sunglasses to the girl")]
+    [TestCase("Put a hat on the subject")]
+    [TestCase("Give the girl blue eyes")]
+    [TestCase("Draw a star on the girl's shirt")]
+    [TestCase("Make the subject smile")]
+    public static void NativeQwenMustNotConvertInstructionsIntoReplacementNouns(string instruction)
+    {
+        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(instruction, "girl"),
+            Is.EqualTo(instruction));
+    }
+
+    [Test]
+    public static void MissingOriginalReferenceMustNotInventImageOneToken()
+    {
+        string edit = WorkflowGenerator.BuildQwen21SegmentEditInstruction(
+            "<weight[1.2]:HannahLynn>", "girl", hasCroppedReference: false);
+        Assert.That(edit, Does.Not.Contain("<image1>"));
+        Assert.That(edit, Does.Contain("HannahLynn"));
+        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
+            "<weight[1.2]:HannahLynn>", "girl", hasCroppedReference: true),
+            Does.Contain("<image1>"));
+    }
+
     [Test]
     public static void NativeQwenTextFlattenerPreservesNestedSubjectText()
     {
