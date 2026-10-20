@@ -27,10 +27,10 @@ The Qwen-only path consists of:
 2. Existing `SwarmMaskBounds` determines tight crop bounds on the **raw
    detection before blur/grow**, using native `ThresholdMask(0.5)`. Bounds
    are not determined from barely-nonzero blurred-mask pixels.
-3. Native `ImageCrop` extracts the image at those bounds. Swarm's existing
-   `SwarmImageScaleForMP` supplies the chosen crop resolution without
-   distorting the aspect ratio. These two Swarm utility nodes are existing
-   mask-to-bounds and megapixel-scaling infrastructure, not new Qwen adapters.
+3. Native `ImageCrop` extracts the image at those bounds and native
+   `ImageScaleToTotalPixels` scales it to the configured megapixel count,
+   preserving its aspect ratio. Only existing Swarm `SwarmMaskBounds`
+   remains to calculate dynamic coordinates for both the image and mask.
 4. Native `TextEncodeQwenImage21` receives the selected crop as
    `images.image_1`; it performs all Qwen vision-token preprocessing, image
    reference VAE encoding, positive/negative conditioning, and outputs its
@@ -41,6 +41,8 @@ The Qwen-only path consists of:
    `denoise=0.8`, not `start_at_step=1`.
 6. Native `ImageScale`, `ThresholdMask`, and `ImageCompositeMasked`
    resize and apply the result at the original crop coordinates.
+   Where requested, mask blur uses native `MaskToImage` + `ImageBlur` +
+   `ImageToMask` instead of a Qwen-specific Python mask transform.
    Native `PreviewImage` nodes added by the live integration test inspect
    the crop before and after, the mask fed to the compositor, and the final
    full image. The regular `SaveOptionalIntermediate` path saves the
