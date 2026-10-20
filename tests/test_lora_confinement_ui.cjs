@@ -16,7 +16,15 @@ class MockOption {
 }
 class MockSelect {
     options = [];
-    value = '';
+    _value = '';
+    get value() {
+        return this._value;
+    }
+    set value(next) {
+        const requested = String(next);
+        // Like an actual HTML select, assigning a value absent from its options clears the selection.
+        this._value = this.options.some(option => option.value === requested) ? requested : '';
+    }
     add(option) {
         this.options.push(option);
     }
@@ -64,4 +72,37 @@ test('no segment prompt leaves stage choices and preserves other stage confineme
     assert.equal(options.get('1'), 'Refiner');
     assert.equal(options.get('5'), 'Base');
     assert.equal(options.get('0'), '@ Global');
+});
+
+
+test('existing browser LoRA row renders selected segment and refreshes without changing its value', () => {
+    const primary = { value: 'scene <segment:face> identity edit' };
+    sandbox.document = {
+        activeElement: primary,
+        getElementById(id) {
+            return id === 'input_prompt' ? primary : id === 'input_loras' ? {} : null;
+        }
+    };
+    sandbox.getRequiredElementById = () => ({ style: {}, innerText: '' });
+    sandbox.genTabLayout = { reapplyPositions() {} };
+    sandbox.setTimeout = callback => { callback(); return 1; };
+    const select = new MockSelect();
+    helper.selected = [{ name: 'face', weight: 0.8, confinement: 11 }];
+    helper.rendered = {
+        face: {
+            weightInput: { value: 1 },
+            confinementInput: select,
+            fixSize() {}
+        }
+    };
+    helper.rebuildUI();
+    assert.equal(select.value, '11');
+    assert.match(select.options.find(option => option.value === '11').text, /Segment 1.*face/);
+    assert.equal(helper.rendered.face.weightInput.value, 0.8);
+
+    // Editing the prompt must not silently reassign an existing adapter to Global.
+    primary.value = 'scene without segmentation';
+    helper.refreshConfinementOptions();
+    assert.equal(select.value, '11');
+    assert.match(select.options.find(option => option.value === '11').text, /not in current prompt/);
 });
