@@ -357,6 +357,15 @@ def validate_runtime_node_contracts(base_url, graph):
                     f"Selected Comfy backend has obsolete SwarmTextEncodeAdvanced "
                     f"node: missing image sockets {missing_images} in /object_info. "
                     "Update SwarmText.py on this backend and refresh its schema.")
+            # Qwen 2.1's native text node uses prevent_empty_text=True for
+            # BOTH conditionings. The Swarm adapter exposes this as an explicit
+            # optional node input, which older backends silently lack.
+            if (node["inputs"].get("qwen21_prevent_empty_text") is not None
+                    and "qwen21_prevent_empty_text" not in known_sockets):
+                raise AssertionError(
+                    "Selected Comfy backend has obsolete SwarmTextEncodeAdvanced: "
+                    "missing qwen21_prevent_empty_text socket in /object_info. "
+                    "Update SwarmText.py on this backend and refresh its schema.")
     return schemas
 
 
