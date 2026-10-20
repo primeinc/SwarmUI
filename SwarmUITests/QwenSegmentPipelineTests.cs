@@ -148,7 +148,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
     [TestCase(false)]
     [TestCase(true)]
-    public void ReferenceEditUsesPlainCropLatentAndRuntimeDiagnostics(bool beforeRefiner)
+    public void ReferenceEditUsesNativeFreshLatentAndRuntimeDiagnostics(bool beforeRefiner)
     {
         WorkflowGenerator g = Prepare();
         RunSegment(g, beforeRefiner);
@@ -163,14 +163,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
         Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
-        string samplerLatentNodeId = sampler.Value["inputs"]!["latent_image"]![0]!.Value<string>()!;
-        JProperty plainCropEncode = g.Workflow.Property(samplerLatentNodeId)!;
-        Assert.That(plainCropEncode.Value["class_type"]!.Value<string>(), Is.EqualTo("VAEEncode"));
-        Assert.That(plainCropEncode.Value["inputs"]!["pixels"],
-            Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
-        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(encoder.Name, 2)));
-        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
-        Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Plain-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(encoder.Name, 2)),
+            "Qwen 2.1 Reference Edit must sample from the encoder's native empty latent, not re-encode the original crop.");
+        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero,
+            "Native Qwen reference edits use full denoising; partial denoising belongs to Masked Img2Img.");
+        Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Fresh-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
 
         JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
         Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)));
@@ -193,12 +190,15 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
-    public void ReferenceEditUsesCreativityAsEditControl()
+    public void ReferenceEditUsesNativeFullDenoiseForPartialSegmentStrength()
     {
         WorkflowGenerator g = Prepare(creativity: 0.8);
         RunSegment(g);
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
-        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.EqualTo(4));
+        JProperty encoder = Nodes(g, "SwarmQwenImage21SegmentEncode").Single();
+        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero,
+            "Reference Edit uses Qwen's fresh-latent generation, so partial denoise would discard initial noise steps.");
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(encoder.Name, 2)));
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty);
         Assert.That(Nodes(g, "SetLatentNoiseMask"), Has.Length.EqualTo(1), "The crop helper may build its legacy masked latent, but Reference Edit must not sample it.");
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
@@ -280,7 +280,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void SegmentScopedLoraIsAppliedBeforeTorchCompile()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(creativity: 0.8);
         g.UserInput.Set(T2IParamTypes.TorchCompile, "inductor");
         RunSegment(g);
 
@@ -292,6 +292,9 @@ public class QwenSegmentPipelineTests : SwarmUITest
             "Scoped Qwen LoRA must be inside the compiled model graph, matching ordinary model-load LoRA ordering.");
         Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(compile.Name, 0)),
             "Segment sampler must consume the compiled model whose input already contains the confined LoRA.");
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(Nodes(g, "SwarmQwenImage21SegmentEncode").Single().Name, 2)),
+            "The scoped LoRA and Qwen-native fresh reference latent must reach the same sampler.");
+        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
     }
 
     [Test]
