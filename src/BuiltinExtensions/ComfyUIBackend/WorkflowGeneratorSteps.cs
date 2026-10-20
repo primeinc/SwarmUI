@@ -1999,6 +1999,19 @@ public class WorkflowGeneratorSteps
                     }
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
                     JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: g.IsQwenImage21());
+                    if (nativeQwenSegment)
+                    {
+                        string postCompositeDiagnostic = g.CreateNode("SwarmQwen21SegmentDiagnostics", new JObject()
+                        {
+                            ["source"] = beforeImage.Path,
+                            ["generated"] = composited,
+                            ["mask"] = NodePath(segmentNode, 0),
+                            ["section_id"] = Math.Max(0, part.ContextID),
+                            ["prompt"] = part.Prompt ?? "",
+                            ["mode"] = $"Post Composite / {qwenSegmentMode ?? ""}"
+                        });
+                        composited = [postCompositeDiagnostic, 0];
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }
