@@ -2187,7 +2187,7 @@ public class WorkflowGeneratorSteps
                         // ComfyUI's own KSampler uses 'steps' as actual evaluations
                         // and expands the denoise sigma schedule internally.
                         // No Swarm-specific sampler or hand-computed start index.
-                        sampler = g.CreateNode("KSampler", new JObject()
+                        sampler = g.CreateNode("LanPaint_KSampler", new JObject()
                         {
                             ["model"] = model.Path,
                             ["seed"] = seed,
@@ -2198,7 +2198,9 @@ public class WorkflowGeneratorSteps
                             ["positive"] = prompt,
                             ["negative"] = negPrompt,
                             ["latent_image"] = segmentLatent,
-                            ["denoise"] = part.Strength2
+                            ["denoise"] = part.Strength2,
+                            ["LanPaint_NumSteps"] = 5,
+                            ["LanPaint_PromptMode"] = "Image First"
                         });
                     }
                     else
@@ -2208,7 +2210,24 @@ public class WorkflowGeneratorSteps
                                 10000, seed, false, true, sectionId: part.ContextID));
                     }
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
-                    g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
+                    if (nativeQwenSegment)
+                    {
+                        // Upstream LanPaint_ImageDecode performs crop-space
+                        // source-preserving mask blend before upstream stitch.
+                        string decoder = g.CreateNode("LanPaint_ImageDecode", new JObject()
+                        {
+                            ["samples"] = NodePath(sampler, 0),
+                            ["vae"] = vae.Path,
+                            ["image"] = qwenCrop,
+                            ["mask"] = qwenCropMask,
+                            ["blend_overlap"] = 9
+                        });
+                        g.CurrentMedia = g.CurrentMedia.WithPath(NodePath(decoder, 0), WGNodeData.DT_IMAGE);
+                    }
+                    else
+                    {
+                        g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
+                    }
                     if (nativeQwenSegment)
                     {
                         TraceQwenImage("04_sampler_decoded_crop", g.CurrentMedia.Path);
