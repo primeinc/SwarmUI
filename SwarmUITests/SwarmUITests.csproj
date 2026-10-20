@@ -10,6 +10,7 @@
     <TestProjectType>UnitTest</TestProjectType>
     <Nullable>Disable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\src\SwarmUI.csproj" />
