@@ -23,7 +23,7 @@ import zipfile
 SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
 COMPOSITES = {"SwarmImageCompositeMaskedColorCorrecting", "ImageCompositeMasked"}
 LORAS = {"LoraLoader", "LoraLoaderModelOnly", "NunchakuFluxLoraLoader"}
-ENCODERS = {"SwarmTextEncodeAdvanced", "CLIPTextEncode", "TextEncodeQwenImage21"}
+ENCODERS = {"SwarmTextEncodeAdvanced", "CLIPTextEncode", "TextEncodeQwenImage21", "SwarmQwenImage21SegmentEncode"}
 MAX_BYTES = 32 * 1024 * 1024
 MAX_NODES = 20000
 
