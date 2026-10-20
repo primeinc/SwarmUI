@@ -128,6 +128,10 @@ public class WorkflowGeneratorSteps
             {
                 (g.LoadingModel, g.LoadingClip) = g.LoadLorasForConfinement(T2IParamInput.SectionID_BaseOnly, g.LoadingModel, g.LoadingClip);
             }
+            if (g.LoadingAdditionalLoraConfinement > 0)
+            {
+                (g.LoadingModel, g.LoadingClip) = g.LoadLorasForConfinement(g.LoadingAdditionalLoraConfinement, g.LoadingModel, g.LoadingClip);
+            }
         }, -10);
         AddModelGenStep(g =>
         {
