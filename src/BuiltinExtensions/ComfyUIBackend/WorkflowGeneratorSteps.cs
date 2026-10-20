@@ -2314,21 +2314,9 @@ public class WorkflowGeneratorSteps
                             g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID)
                             ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID));
                     WGNodeData beforeImage = g.CurrentMedia;
-                    // Diagnostic images must never become additional user-visible
-                    // generation results unless intermediates were requested.
-                    // Backend graph/LoRA logs remain available on every run.
-                    bool traceQwen = nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false);
-                    void TraceQwenImage(string stage, JArray imagePath)
-                    {
-                        if (!traceQwen)
-                        {
-                            return;
-                        }
-                        string outputId = g.GetStableDynamicID(50000, 0);
-                        new WGNodeData(imagePath, g, WGNodeData.DT_IMAGE, g.CurrentCompat())
-                            .SaveOutput(null, null, outputId);
-                        Logs.Info($"[QWEN21-SEG] DIAG section={part.ContextID} stage={stage} intermediate_output={outputId} source_node={imagePath[0]}:{imagePath[1]}");
-                    }
+                    // The intermediate-images setting requests normal stage
+                    // outputs, not seven private debugging frames per segment.
+                    // Only the final stitched image is the Qwen segment result.
                     if (nativeQwenSegment)
                     {
                         Logs.Info($"[QWEN21-SEG] graph section={part.ContextID} region='{part.DataText}' prompt='{part.Prompt?.Trim()}' " +
@@ -2337,22 +2325,7 @@ public class WorkflowGeneratorSteps
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
                             $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} " +
                             $"requested_creativity={part.Strength2:0.####} sampler_denoise={(qwenSegmentMode == "Reference Edit" ? 1.0 : part.Strength2):0.####} seed={seed} cfg={cfg:0.####} " +
-                            $"trace_images={traceQwen}");
-                        if (traceQwen)
-                        {
-                            TraceQwenImage("00_source_full_frame", beforeImage.Path);
-                            string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
-                            {
-                                ["mask"] = NodePath(detectedMaskNode, 0)
-                            });
-                            TraceQwenImage("01_raw_detector_mask", NodePath(rawMaskImage, 0));
-                            TraceQwenImage("02_exact_qwen_reference_crop", qwenCrop);
-                            string adapterMaskImage = g.CreateNode("MaskToImage", new JObject()
-                            {
-                                ["mask"] = qwenCropMask
-                            });
-                            TraceQwenImage("03_adapter_crop_mask", NodePath(adapterMaskImage, 0));
-                        }
+                            $"stitch_output_only=true");
                     }
                     string sampler;
                     if (nativeQwenSegment)
@@ -2417,11 +2390,7 @@ public class WorkflowGeneratorSteps
                     {
                         g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     }
-                    if (nativeQwenSegment)
-                    {
-                        TraceQwenImage("04_sampler_decoded_crop", g.CurrentMedia.Path);
-                    }
-                    else
+                    if (!nativeQwenSegment)
                     {
                         g.SaveOptionalIntermediate();
                     }
@@ -2447,8 +2416,6 @@ public class WorkflowGeneratorSteps
                             $"stitcher={cropStitcher[0]}:0 crop_image={qwenCrop[0]}:1 " +
                             $"sampler={sampler} sampled_rgb={stitchInput[0]} " +
                             $"final={stitchNode} result={composited[0]}");
-                        TraceQwenImage("05_exact_stitch_input", stitchInput);
-                        TraceQwenImage("06_stitched_full_frame", composited);
                     }
                     else
                     {
