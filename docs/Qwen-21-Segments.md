@@ -43,11 +43,16 @@ image is also supplied as vision/reference conditioning. Disabling it does **not
 change Reference Edit's fresh output latent or Masked Img2Img's masked crop
 latent, and does not disable other optional Prompt Images. The default is enabled.
 
-Optional `Prompt Images` are retained as individual Qwen references when Text
-Encoded Image is not `none`; each reference retains its aspect ratio and its
-own vision slot. Qwen supports at most 16 reference images in this workflow:
-15 additional images when the original crop is a reference, or 16 when it is
-not. VAE tiling settings also apply to reference encoding.
+For an InitEdit segment, **Prompt Images[0] is the whole original image being
+edited**. When Original Reference is enabled, the resized detected crop takes
+its place as Qwen image 1. Do not send both: conditioning on the unmodified
+whole frame again can preserve the person that the segment prompt is trying
+to replace. Prompt Images[1..] remain optional additional references with
+their own aspect ratios and native vision slots. If Original Reference is
+disabled, Prompt Images[0..] are passed without substitution. The Qwen
+reference limit remains 16 total inputs (the crop plus at most 15 other
+references, or up to 16 prompt images when the crop reference is disabled).
+VAE tiling settings also apply to reference encoding.
 
 Batch size greater than one is handled by splitting the source into individual
 images **before** segment detection and conditioning. Each image gets an
