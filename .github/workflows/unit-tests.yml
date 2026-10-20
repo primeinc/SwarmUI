@@ -15,7 +15,14 @@ jobs:
         - uses: actions/setup-dotnet@v5
           with:
             dotnet-version: '8.x'
-        - run: bash ./launchtools/run_tests.sh
+        - name: Run C# graph tests and export actual Qwen segment reproduction graph
+          env:
+            SWARM_QWEN_EXPORT_GRAPH: /tmp/swarm-qwen-production-graph.json
+          run: bash ./launchtools/run_tests.sh
+        - name: Validate actual generated Qwen graph with no-model Python acceptance preflight
+          run: |
+            test -s /tmp/swarm-qwen-production-graph.json
+            python3 tests/integration/qwen_segment_text_replacement.py --workflow /tmp/swarm-qwen-production-graph.json --preflight-only
         # These checks are deliberately only syntax checks. They do not imply
         # that Qwen segment LoRA weights were matched or applied during inference.
         - name: Validate vendored upstream Qwen node and production routing (NOT inference)
