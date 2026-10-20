@@ -17,7 +17,17 @@ namespace SwarmUITests;
 public class QwenSegmentLoraChainTests : SwarmUITest
 {
     [OneTimeSetUp]
-    public static void PreInit() => Setup();
+    public static void PreInit()
+    {
+        Setup();
+        // Unlike the full application, the NUnit process does not register
+        // T2I parameters at startup. Without this, every LoRA-chain control
+        // crashes before inspecting a graph.
+        if (T2IParamTypes.Loras is null)
+        {
+            T2IParamTypes.RegisterDefaults();
+        }
+    }
 
     private static WorkflowGenerator Prepare(int segmentConfinement = 11, double selectedStrength = 1)
     {
