@@ -10,8 +10,8 @@ public partial class WorkflowGenerator
 {
     /// <summary>
     /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
-    /// Reference Edit follows the proven edit-stage contract: Qwen reference conditioning plus
-    /// a plain VAE encoding of the crop, with edit strength expressed through start_at_step.
+    /// Reference Edit follows the inspected Base2Edit stage pattern: Qwen reference conditioning
+    /// plus a plain VAE encoding of the crop, with edit strength expressed through start_at_step.
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
