@@ -184,6 +184,73 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         Assert.That(graph.Properties().Any(p =>
             p.Value?["class_type"]?.ToString() == "LanPaint_ImageEncode"), Is.False);
     }
+    [Test]
+    public static void DynamicLoRAHookReachesBothNativeSwarmQwenConditioners()
+    {
+        // The parser CPU test proves the //hook marker survives. This real
+        // generator test proves that its CreateHookLora node is wired into
+        // BOTH the positive and negative SwarmTextEncodeAdvanced nodes.
+        // It does not claim that Qwen responds to the LoRA in image space.
+        bool hadHandler = SwarmUI.Core.Program.T2IModelSets.TryGetValue(
+            "LoRA", out T2IModelHandler previousHandler);
+        try
+        {
+            T2IModelHandler handler = new() { ModelType = "LoRA" };
+            handler.Models["Audit/HannahLynn.safetensors"] = new T2IModel(
+                handler, "/models/loras", "/models/loras/Audit/HannahLynn.safetensors",
+                "Audit/HannahLynn.safetensors");
+            SwarmUI.Core.Program.T2IModelSets["LoRA"] = handler;
+
+            T2IParamInput input = new(null);
+            input.Set(T2IParamTypes.Loras,
+                new System.Collections.Generic.List<string> { "Audit/HannahLynn" });
+            input.Set(T2IParamTypes.LoraWeights,
+                new System.Collections.Generic.List<string> { "0.8" });
+            input.DynamicLoraIndices.Add(0);
+
+            WorkflowGenerator generator = new()
+            {
+                UserInput = input,
+                Workflow = new JObject()
+            };
+            WGNodeData clip = new(new JArray("clip", 0), generator, WGNodeData.DT_TEXTENC, null);
+            WGNodeData vae = new(new JArray("vae", 0), generator, WGNodeData.DT_VAE, null);
+            const string authored = "HannahLynn <lora:Audit/HannahLynn//hook=0>";
+            generator.CreateQwen21SegmentConditioning(authored, "", clip, vae,
+                new JArray("crop", 1), new JArray("crop", 2), 11, steps: 4);
+
+            JProperty hook = generator.Workflow.Properties().Single(p =>
+                p.Value?["class_type"]?.ToString() == "CreateHookLora");
+            Assert.That(hook.Value?["inputs"]?["lora_name"]?.ToString(),
+                Does.Contain("Audit/HannahLynn"));
+            Assert.That(hook.Value?["inputs"]?["strength_model"]?.ToObject<double>(),
+                Is.EqualTo(0.8).Within(0.00001));
+            JArray hookPath = new(hook.Name, 0);
+            JProperty[] encoders = [.. generator.Workflow.Properties().Where(p =>
+                p.Value?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced")];
+            Assert.That(encoders, Has.Length.EqualTo(2));
+            foreach (JProperty encoder in encoders)
+            {
+                Assert.That(encoder.Value?["inputs"]?["lora_hooks"]?.ToString(),
+                    Is.EqualTo(hookPath.ToString()),
+                    "Both Qwen conditioning branches need the same dynamic LoRA hook group");
+            }
+            Assert.That(encoders.Any(p => p.Value?["inputs"]?["prompt"]?.ToString() == authored),
+                Is.True, "The authored LoRA hook marker must not be removed or rewritten");
+        }
+        finally
+        {
+            if (hadHandler)
+            {
+                SwarmUI.Core.Program.T2IModelSets["LoRA"] = previousHandler;
+            }
+            else
+            {
+                SwarmUI.Core.Program.T2IModelSets.Remove("LoRA");
+            }
+        }
+    }
+
     [TestCase(80, 96, 64, 96)]
     [TestCase(128, 128, 128, 128)]
     [TestCase(15, 20, 32, 32)]
