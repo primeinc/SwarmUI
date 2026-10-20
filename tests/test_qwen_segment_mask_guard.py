@@ -86,6 +86,46 @@ class MaskGuardTests(unittest.TestCase):
         self.assertEqual((output > 0.5).float().flatten().tolist(),
                          [0.0, 0.0, 0.0, 1.0])  # negative control: old graph lost pixels
 
+    def test_nearly_full_canvas_detection_fails_instead_of_replacing_background(self):
+        # Adversarial scores: authored CLIPSeg threshold 0.1 retains weak
+        # background everywhere except a tiny corner. Native ThresholdMask(0)
+        # would otherwise turn 99.6% of the original image opaque.
+        mask = torch.full((1, 32, 32), 0.2, dtype=torch.float32)
+        mask[:, :2, :2] = 0.0
+        with self.assertRaisesRegex(ValueError, "near.*entire source canvas"):
+            self.node.validate(mask, minimum_confidence=0.0, maximum_coverage=0.99)
+
+    def test_centered_subject_at_low_authored_threshold_remains_valid(self):
+        mask = torch.zeros((1, 64, 80), dtype=torch.float32)
+        mask[:, 10:36, 15:45] = 0.2
+        output, = self.node.validate(
+            mask, minimum_confidence=0.0, maximum_coverage=0.99)
+        self.assertIs(output, mask)
+        self.assertAlmostEqual(float(output.max()), 0.2, places=6)
+
+    def test_batch_rejects_only_broad_member_without_hiding_behind_valid_mask(self):
+        mask = torch.zeros((2, 32, 32), dtype=torch.float32)
+        mask[0, 10:20, 10:20] = 0.9
+        mask[1] = 0.1
+        mask[1, :2, :2] = 0
+        with self.assertRaisesRegex(ValueError, "nearly the entire source canvas"):
+            self.node.validate(mask, minimum_confidence=0.0, maximum_coverage=0.99)
+
+    def test_exact_maximum_coverage_allowed_but_larger_rejected(self):
+        mask = torch.zeros((1, 10, 10), dtype=torch.float32)
+        mask[:, :, :9] = 0.2
+        self.node.validate(mask, minimum_confidence=0.0, maximum_coverage=0.90)
+        with self.assertRaises(ValueError):
+            self.node.validate(mask, minimum_confidence=0.0, maximum_coverage=0.89)
+
+    def test_invalid_maximum_coverage_rejected(self):
+        mask = torch.zeros((1, 10, 10), dtype=torch.float32)
+        mask[:, 2:8, 2:8] = 0.6
+        for invalid in (0, -0.01, 1.1):
+            with self.assertRaises(ValueError):
+                self.node.validate(mask, minimum_confidence=0.0,
+                                   maximum_coverage=invalid)
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))
