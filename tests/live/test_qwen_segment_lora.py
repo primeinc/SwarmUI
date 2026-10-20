@@ -142,10 +142,16 @@ def graph_variant(original, case, stage, strength):
     node = graph.get(node_id)
     if not node or node["class_type"] not in _LORAS:
         raise AssertionError(f"{stage}: {node_id} is not an actual Comfy LoRA loader")
-    actual = str(node["inputs"].get("lora_name", "")).split("/")[-1].removesuffix(".safetensors").casefold()
-    expected = case["lora_name"].split("/")[-1].removesuffix(".safetensors").casefold()
+    # The LoRA's full relative path is its identity. Comparing only the
+    # basename could silently test a different adapter with the same filename
+    # in another folder, falsely passing a rendered ON/OFF comparison.
+    def normalize_lora(name):
+        return str(name).replace("\\", "/").strip("/").removesuffix(".safetensors").casefold()
+
+    actual = normalize_lora(node["inputs"].get("lora_name", ""))
+    expected = normalize_lora(case["lora_name"])
     if actual != expected:
-        raise AssertionError(f"{stage}: requested {expected} but graph uses {actual}")
+        raise AssertionError(f"{stage}: requested adapter {expected} but graph uses {actual}")
     if node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
         raise AssertionError(f"{stage}: LoRA {node_id} is not on the REAL SAMPLER'S model path")
     node["inputs"]["strength_model"] = strength
