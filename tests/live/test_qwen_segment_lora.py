@@ -149,10 +149,12 @@ def graph_variant(original, case, stage, strength):
     if "strength_clip" in node["inputs"]:
         node["inputs"]["strength_clip"] = strength
     if stage == "segment":
-        if not any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
-            raise AssertionError("This is not a SwarmUI Qwen 2.1 segment workflow")
-        if not any("Composite" in n["class_type"] for n in graph.values()):
-            raise AssertionError("No final segment compositor in exported workflow")
+        if any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
+            raise AssertionError("Obsolete homemade Qwen encoder still present in exported graph")
+        if not any(n["class_type"] == "TextEncodeQwenImage21" for n in graph.values()):
+            raise AssertionError("Segment workflow must use native ComfyUI TextEncodeQwenImage21")
+        if not any(n["class_type"] == "ImageCompositeMasked" for n in graph.values()):
+            raise AssertionError("Segment workflow must use native ImageCompositeMasked")
     ref = case.get(f"{stage}_output_image_ref")
     if ref is None:
         outputs = [n["inputs"]["images"] for n in graph.values()
