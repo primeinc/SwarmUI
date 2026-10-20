@@ -2107,6 +2107,12 @@ public class WorkflowGeneratorSteps
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
                     // When Segment Model differs from the base model, that must be the segment VAE.
                     string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, samplingSteps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
+                    if (nativeQwenSegment && qwenSegmentMode == "Reference Edit" && g.Workflow[sampler] is JObject samplerNode && samplerNode["class_type"]?.ToString() == "SwarmKSampler")
+                    {
+                        // Actual backend checks effective sigma steps after slicing, before GPU model execution.
+                        // This input is deliberately not used by ordinary samplers or other segment modes.
+                        samplerNode["inputs"]["expected_step_count"] = steps;
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     if (nativeQwenSegment)
