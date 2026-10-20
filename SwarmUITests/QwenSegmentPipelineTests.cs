@@ -15,6 +15,8 @@ public class QwenSegmentPipelineTests : SwarmUITest
 {
     private T2IModelHandler priorLoras;
     private bool priorHashSetting;
+    private bool hadPriorQwen21VaeInfo;
+    private CommonModels.ModelInfo priorQwen21VaeInfo;
 
     [OneTimeSetUp]
     public void Initialize()
@@ -36,6 +38,15 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Program.T2IModelSets.TryGetValue("LoRA", out priorLoras);
         priorHashSetting = Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash;
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = false;
+        hadPriorQwen21VaeInfo = CommonModels.Known.TryGetValue("qwen-image-2.1-vae", out priorQwen21VaeInfo);
+        CommonModels.Known["qwen-image-2.1-vae"] = new(
+            "qwen-image-2.1-vae",
+            "Qwen Image 2.1 VAE",
+            "test fixture",
+            "https://example.invalid/qwen_image_2.1_vae_bf16.safetensors",
+            new string('0', 64),
+            "VAE",
+            "QwenImage/qwen_image_2.1_vae_bf16.safetensors");
         T2IModelHandler handler = new() { ModelType = "LoRA" };
         foreach (string name in new[] { "face.safetensors", "hair.safetensors" })
         {
@@ -56,6 +67,14 @@ public class QwenSegmentPipelineTests : SwarmUITest
             Program.T2IModelSets["LoRA"] = priorLoras;
         }
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = priorHashSetting;
+        if (hadPriorQwen21VaeInfo)
+        {
+            CommonModels.Known["qwen-image-2.1-vae"] = priorQwen21VaeInfo;
+        }
+        else
+        {
+            CommonModels.Known.TryRemove("qwen-image-2.1-vae", out _);
+        }
     }
 
     private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false)
