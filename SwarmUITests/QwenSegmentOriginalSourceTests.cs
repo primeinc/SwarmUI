@@ -69,6 +69,13 @@ public class QwenSegmentOriginalSourceTests
         ensureComfyParam(ref ComfyUIBackendExtension.SamplerParam, "Sampler", "euler");
         ensureComfyParam(ref ComfyUIBackendExtension.SchedulerParam, "Scheduler", "simple");
         ensureComfyParam(ref ComfyUIBackendExtension.TextEncodedImage, "Text Encoded Image", "auto");
+        // The real application registers its known model catalog at startup.
+        // Graph construction reads its Qwen VAE metadata even with a user VAE
+        // selected; this placeholder is never downloaded or sampled.
+        CommonModels.Known.TryAdd("qwen-image-2.1-vae",
+            new CommonModels.ModelInfo("qwen-image-2.1-vae", "Qwen Test VAE",
+                "Graph construction only", "https://example.invalid/qwen-vae.safetensors",
+                new string('0', 64), "VAE", "qwen-vae.safetensors"));
         T2IModelClass modelClass = new()
         {
             ID = T2IModelClassSorter.CompatQwenImage21.ID,
