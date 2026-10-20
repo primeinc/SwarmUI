@@ -67,6 +67,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         };
         T2IParamInput input = new(null);
         input.Set(T2IParamTypes.Model, model);
+        if (qwen)
+        {
+            input.Set(T2IParamTypes.QwenModel, new T2IModel(null, "/fixture", "/fixture/qwen3vl_8b_int8_convrot.safetensors", "qwen3vl_8b_int8_convrot.safetensors"));
+            input.Set(T2IParamTypes.VAE, new T2IModel(null, "/fixture", "/fixture/qwen_image_2.1_vae_bf16.safetensors", "qwen_image_2.1_vae_bf16.safetensors"));
+        }
         input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
         input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
         Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001));
