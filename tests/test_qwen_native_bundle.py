@@ -110,7 +110,7 @@ class NativeQwenBundleTest(unittest.TestCase):
         crop_schema = upstream[upstream.index("class InpaintCropImproved:"):
                                upstream.index("class InpaintStitchImproved:")]
         required = crop_schema.split('"required": {', 1)[1].split('"optional": {', 1)[0]
-        required_names = re.findall(r'^\\s+"([a-z_]+)": \\(', required, re.MULTILINE)
+        required_names = re.findall(r'^\s+"([a-z_]+)": \(', required, re.MULTILINE)
         self.assertGreater(len(required_names), 20)
         crop_inputs = steps.split('JObject cropInputs = new()', 1)[1].split('};', 1)[0]
         for field in required_names:
