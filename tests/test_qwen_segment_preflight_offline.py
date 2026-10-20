@@ -130,6 +130,27 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "UNVERIFIED"):
             probe.require_single_final_image({}, "final")
 
+    def test_websocket_save_node_count_uses_original_save_input_not_history(self):
+        graph, spec = probe.inspect_and_instrument(native_contract_fixture())
+        self.assertEqual(
+            graph[probe.NODE_IDS["final_input"]]["inputs"]["images"],
+            graph[spec["final_output_sink"]]["inputs"]["images"])
+        outputs = {probe.NODE_IDS["final_input"]: {"images": [
+            {"filename": "only-final.png"}
+        ]}}
+        self.assertEqual(
+            probe.require_single_final_image(
+                outputs, spec["final_output_sink"], probe.NODE_IDS["final_input"]
+            )["filename"], "only-final.png")
+        outputs[probe.NODE_IDS["final_input"]]["images"].append(
+            {"filename": "unexpected-second.png"})
+        with self.assertRaisesRegex(AssertionError, "got 2"):
+            probe.require_single_final_image(
+                outputs, spec["final_output_sink"], probe.NODE_IDS["final_input"])
+        with self.assertRaisesRegex(AssertionError, "UNVERIFIED"):
+            probe.require_single_final_image(
+                {}, spec["final_output_sink"], probe.NODE_IDS["final_input"])
+
     def test_runtime_preflight_rejects_missing_splitter_and_diagnostic_nodes(self):
         graph, _ = probe.inspect_and_instrument(native_contract_fixture())
         available = {node["class_type"] for node in graph.values()}
