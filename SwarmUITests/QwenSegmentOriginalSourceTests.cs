@@ -340,20 +340,26 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(detector.Node["inputs"]?["images"]?.ToString(), Is.EqualTo(crop.Node["inputs"]?["image"]?.ToString()));
         Assert.That(crop.Node["inputs"]?["mask"]?.ToString(),
             Is.EqualTo(new Newtonsoft.Json.Linq.JArray(mask.Id, 0).ToString()));
-        var visionPath = encoder.Node["inputs"]?["images"] as Newtonsoft.Json.Linq.JArray;
-        Assert.That(visionPath, Is.Not.Null, "The subject crop must reach the native Swarm vision encoder");
+        // Multiple Qwen reference images keep their own pixel geometry.
+        // Do NOT feed differently sized photos through Comfy ImageBatch,
+        // which resizes later images to the first reference's dimensions.
         if (hasInitImage && independentPromptImage)
         {
-            var batchedVision = graph[visionPath[0]?.ToString()] as Newtonsoft.Json.Linq.JObject;
-            Assert.That(batchedVision?["class_type"]?.ToString(), Is.EqualTo("ImageBatch"));
-            Assert.That(batchedVision?["inputs"]?["image1"]?.ToString(),
+            Assert.That(encoder.Node["inputs"]?["images"]?.Type
+                == Newtonsoft.Json.Linq.JTokenType.Array, Is.False);
+            Assert.That(encoder.Node["inputs"]?["image_1"]?.ToString(),
                 Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()));
-            Assert.That(batchedVision?["inputs"]?["image2"]?[0]?.ToString(), Is.Not.EqualTo(sourceId));
+            string independentId = encoder.Node["inputs"]?["image_2"]?[0]?.ToString();
+            Assert.That(independentId, Is.Not.Null.And.Not.EqualTo(sourceId));
+            Assert.That(graph[independentId]?["class_type"]?.ToString(),
+                Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"));
         }
         else
         {
-            Assert.That(visionPath.ToString(),
-                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()));
+            var visionPath = encoder.Node["inputs"]?["images"] as Newtonsoft.Json.Linq.JArray;
+            Assert.That(visionPath?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()),
+                "The original Qwen crop must reach the Swarm vision encoder");
         }
         Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
             Is.EqualTo(authoredRegionText));
