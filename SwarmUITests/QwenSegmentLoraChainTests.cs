@@ -137,6 +137,22 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void SameFolderAndBasenameWithDifferentCaseMustNotCountOnLinux()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["lora_name"] =
+            "subjects/Portrait.safetensors";
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false)).Message,
+            Does.Contain("NOT on the actual sampler model chain"));
+        ((JObject)g.Workflow["patched"]["inputs"])["lora_name"] =
+            "subjects\\portrait.safetensors";
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
     public static void ZeroWeightLoRAIsAnInertAndValidControl()
     {
         WorkflowGenerator g = Prepare();
