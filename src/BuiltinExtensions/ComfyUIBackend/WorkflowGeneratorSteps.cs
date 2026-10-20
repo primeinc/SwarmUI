@@ -2059,7 +2059,20 @@ public class WorkflowGeneratorSteps
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
                     JArray prompt, negPrompt;
                     JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
-                    if (nativeQwenSegment)
+                    // Segment-scoped Qwen LoRAs use the ordinary working Qwen text conditioner,
+                    // not the separate hand-written Qwen reference encoder. The crop latent
+                    // remains the img2img starting point; pixel-space compositing confines it.
+                    bool qwenScopedLora = nativeQwenSegment && g.HasLorasForConfinement(part.ContextID);
+                    if (qwenScopedLora)
+                    {
+                        prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
+                        negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
+                        if (qwenSegmentMode == "Reference Edit")
+                        {
+                            segmentLatent = NodePath(g.CreateVAEEncode(vae.Path, NodePath(g.MaskShrunkInfo.ScaledImage, 0)), 0);
+                        }
+                    }
+                    else if (nativeQwenSegment)
                     {
                         (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21SegmentConditioning(
                             part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID);
@@ -2105,7 +2118,7 @@ public class WorkflowGeneratorSteps
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
                     // When Segment Model differs from the base model, that must be the segment VAE.
-                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
+                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment && !qwenScopedLora));
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     if (nativeQwenSegment)
