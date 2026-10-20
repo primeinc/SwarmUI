@@ -267,7 +267,7 @@ public class QwenSegmentOriginalSourceTests
             string emptyId = referenceSampler["inputs"]?["latent_image"]?[0]?.ToString();
             var emptyLatent = graph[emptyId] as Newtonsoft.Json.Linq.JObject;
             Assert.That(emptyLatent?["class_type"]?.ToString(), Is.EqualTo("LatentMultiply"));
-            Assert.That(emptyLatent?["inputs"]?["multiplier"]?.Value<double>(), Is.Zero);
+            Assert.That(emptyLatent?["inputs"]?["multiplier"]?.ToObject<double>(), Is.Zero);
             string encodedId = emptyLatent?["inputs"]?["samples"]?[0]?.ToString();
             Assert.That(graph[encodedId]?["class_type"]?.ToString(), Is.EqualTo("VAEEncode"));
             Assert.That(graph[encodedId]?["inputs"]?["pixels"]?.ToString(),
