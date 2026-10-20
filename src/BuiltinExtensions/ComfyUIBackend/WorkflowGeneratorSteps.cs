@@ -2032,7 +2032,7 @@ public class WorkflowGeneratorSteps
                                 g.IsRefinerStage = previousRefinerStage;
                             }
                         }
-                        // Reference Edit uses a plain crop latent and final pixel-space masking.
+                        // Reference Edit samples a native empty Qwen latent; the detected crop is a vision reference and pixel-space mask only.
                         // Masked Img2Img still needs DifferentialDiffusion on this segment model.
                         if (qwenSegmentMode != "Reference Edit" && g.UserInput.Get(T2IParamTypes.MaskBehavior, "Differential") == "Differential")
                         {
