@@ -180,6 +180,52 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend));
     }
 
+
+    [Test]
+    public static void StaleQwenTextEncoderMissingEmptyTextOptionFailsBeforeImageUpload()
+    {
+        JObject graph = NativeGraph();
+        graph["vision"] = Node("SwarmTextEncodeAdvanced");
+        graph["vision"]["inputs"]["images"] = new JArray("crop", 1);
+        graph["vision"]["inputs"]["qwen21_prevent_empty_text"] = true;
+        JObject backend = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["images"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        // Even with one image (no image_N inputs), old SwarmText.py has
+        // no Qwen native empty-text option. Validate actual /object_info.
+        var error = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+        Assert.That(error.Message, Does.Contain("qwen21_prevent_empty_text"));
+        Assert.That(error.Message, Does.Contain("THIS backend"));
+
+        const string raw = """
+            {
+                "source": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "crop": {"class_type":"InpaintCropImproved","inputs":{"image":["source",0]}},
+                "vision": {"class_type":"SwarmTextEncodeAdvanced",
+                    "inputs":{"images":["crop",1],"qwen21_prevent_empty_text":true}}
+            }
+            """;
+        HashSet<string> installed = ["LoadImage", "InpaintCropImproved", "SwarmTextEncodeAdvanced"];
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend))
+            .Message, Does.Contain("qwen21_prevent_empty_text"));
+
+        ((JObject)backend["SwarmTextEncodeAdvanced"]["input"]["optional"])
+            ["qwen21_prevent_empty_text"] = new JArray("BOOLEAN");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend));
+    }
+
     [Test]
     public static void ReferenceEditDoesNotRequireLanPaintSamplerWhenNotUsed()
     {
