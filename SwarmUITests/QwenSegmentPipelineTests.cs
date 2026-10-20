@@ -378,8 +378,8 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
         Assert.That(loras, Has.Count.EqualTo(2),
             "A post-refiner segment should carry its confined LoRA and refiner-only LoRAs, not base-only LoRAs.");
-        Assert.That(loras, Does.Contain(("hair.safetensors", 0.8)));
-        Assert.That(loras, Does.Contain(("face.safetensors", 0.4)));
+        Assert.That(loras.Any(p => p.name == "hair.safetensors" && System.Math.Abs(p.strength - 0.8) < 0.0001), Is.True);
+        Assert.That(loras.Any(p => p.name == "face.safetensors" && System.Math.Abs(p.strength - 0.4) < 0.0001), Is.True);
     }
 
     [Test]
