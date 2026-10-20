@@ -126,6 +126,10 @@ public partial class WorkflowGenerator
                 ["lora_hooks"] = dynamicHooks,
                 ["steps"] = steps,
                 ["prompt"] = text ?? "",
+                // Upstream TextEncodeQwenImage21 passes prevent_empty_text=True
+                // to BOTH prompt tokenizers. Preserve native Qwen conditioning
+                // for an empty negative without manufacturing prompt text.
+                ["qwen21_prevent_empty_text"] = true,
                 ["width"] = width,
                 ["height"] = height,
                 ["target_width"] = width,
