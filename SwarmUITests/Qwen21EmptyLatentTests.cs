@@ -1,3 +1,4 @@
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SwarmUI.Builtin_ComfyUIBackend;
@@ -115,6 +116,40 @@ public class Qwen21EmptyLatentTests : SwarmUITest
                 Assert.That(imageNode["inputs"]?["height"]?.ToObject<int>(), Is.EqualTo(expectedHeight));
             }
         }
+    }
+
+    [Test]
+    public void MainQwenInitImageMustReachVisionEncoder()
+    {
+        T2IModelClass cls = new()
+        {
+            ID = T2IModelClassSorter.CompatQwenImage21.ID,
+            Name = "Qwen Image 2.1",
+            CompatClass = T2IModelClassSorter.CompatQwenImage21,
+            StandardWidth = 1024,
+            StandardHeight = 1024
+        };
+        T2IModel model = new(null, "/models/diffusion_models",
+            "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
+        {
+            ModelClass = cls, StandardWidth = 1024, StandardHeight = 1024
+        };
+        WorkflowGenerator gen = new()
+        {
+            UserInput = new T2IParamInput(null),
+            FinalLoadedModel = model,
+            Workflow = new JObject()
+        };
+        gen.BasicInputImage = new WGNodeData(new JArray("init_source", 0),
+            gen, WGNodeData.DT_IMAGE, gen.CurrentCompat());
+        gen.CreateConditioningDirect("Edit the image.", new JArray("clip", 0), model,
+            true, steps: 4);
+        JObject encoder = (JObject)gen.Workflow.Properties()
+            .Single(p => p.Value?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced").Value;
+        Assert.That(encoder["inputs"]?["images"]?.ToString(),
+            Is.EqualTo(gen.BasicInputImage.Path.ToString()),
+            "Qwen must see the explicit edit source through vision, not only an unseen ReferenceLatent");
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo("Edit the image."));
     }
 
 }
