@@ -30,6 +30,40 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>
+    /// One native Qwen reference image, shared by normal image editing and
+    /// segments. Text vision and ReferenceLatent VAE MUST see the same
+    /// original pixels at independent, 32-pixel-aligned geometry.
+    /// </summary>
+    public JArray GetNativeQwen21PromptReference(int index)
+    {
+        if (!UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> references)
+            || index < 0 || index >= references.Count)
+        {
+            return null;
+        }
+        JArray image = GetPromptImage(false, false, index);
+        if (image is null)
+        {
+            return null;
+        }
+        (int rawWidth, int rawHeight) = references[index].GetResolution();
+        (int width, int height) = NativeQwen21ReferenceDimensions(rawWidth, rawHeight);
+        if (rawWidth != width || rawHeight != height)
+        {
+            string resize = CreateNode("ImageScale", new JObject()
+            {
+                ["image"] = image,
+                ["width"] = width,
+                ["height"] = height,
+                ["crop"] = "disabled",
+                ["upscale_method"] = "lanczos"
+            });
+            image = NodePath(resize, 0);
+        }
+        return image;
+    }
+
+    /// <summary>
     /// Qwen 2.1 regions use the SAME Swarm prompt engine as ordinary Qwen
     /// generation. Do not flatten weights, substitute scheduled text, discard
     /// dynamic LoRA hooks, or manufacture an edit instruction.
@@ -74,28 +108,11 @@ public partial class WorkflowGenerator
             for (int i = FirstQwen21AdditionalReferenceIndex(useOriginal, hasInitImage);
                 i < references.Count; i++)
             {
-                // Qwen accepts separate native-size references; preserve the
-                // user's image rather than applying generic text-encoder resizing.
-                JArray image = GetPromptImage(false, false, i);
+                // The same native reference is used by text vision and VAE
+                // without generic prompt-image resampling or ImageBatch.
+                JArray image = GetNativeQwen21PromptReference(i);
                 if (image is not null)
                 {
-                    (int rawWidth, int rawHeight) = references[i].GetResolution();
-                    (int refWidth, int refHeight) = NativeQwen21ReferenceDimensions(rawWidth, rawHeight);
-                    if (rawWidth != refWidth || rawHeight != refHeight)
-                    {
-                        // Resize ONCE per reference so the vision encoder and
-                        // ReferenceLatent/VAEEncode see identical pixels and
-                        // 32-pixel geometry, exactly as native Qwen requires.
-                        string resize = CreateNode("ImageScale", new JObject()
-                        {
-                            ["image"] = image,
-                            ["width"] = refWidth,
-                            ["height"] = refHeight,
-                            ["crop"] = "disabled",
-                            ["upscale_method"] = "lanczos"
-                        });
-                        image = NodePath(resize, 0);
-                    }
                     referenceImages.Add(image);
                     if (referenceImages.Count > 16)
                     {
