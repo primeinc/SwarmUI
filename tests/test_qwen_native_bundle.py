@@ -142,19 +142,45 @@ class NativeQwenBundleTest(unittest.TestCase):
             self.assertIn('"' + field + '": (', sample_required)
             self.assertIn('samplerInputs["' + field + '"] = ', steps)
 
-    def test_generation_uses_the_original_adapters_end_to_end(self):
+    def test_generated_segment_uses_swarm_tag_engine_and_native_edit_adapters(self):
+        """Source-contract check only; image semantics require runtime acceptance.
+
+        Keep this tied to the production C# generator, not the unrelated
+        unmodified upstream TextEncodeQwenImage21 example above.
+        """
         helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
         init = (BACKEND / "ExtraNodes/SwarmComfyCommon/__init__.py").read_text()
-        self.assertIn('CreateNode("TextEncodeQwenImage21"', helper)
-        self.assertIn('CreateNode("LanPaint_KSampler"', steps)
-        self.assertIn('CreateNode("LanPaint_ImageEncode"', helper)
-        self.assertIn('CreateNode("LanPaint_ImageDecode"', steps)
-        self.assertIn('CreateNode("InpaintCropImproved"', steps)
-        self.assertIn('CreateNode("InpaintStitchImproved"', steps)
-        self.assertIn('["stitcher"] = cropStitcher', steps)
-        self.assertIn('["inpainted_image"] = stitchInput', steps)
-        self.assertIn('["images.image_1"] = croppedImage', helper)
+        segment_body = helper.split("CreateQwen21SegmentConditioning(", 1)[1]
+
+        # Swarm's REAL prompt engine owns scheduled tags, token weights, and
+        # dynamic LoRA hooks. The old native node flattened/discarded those.
+        for expression in (
+            'CreateNode("SwarmTextEncodeAdvanced"',
+            '["lora_hooks"] = dynamicHooks',
+            '["prompt"] = text ?? ""',
+            '["images"] = textImages',
+            'CreateNode("GetImageSize"',
+            'CreateNode("ReferenceLatent"',
+            'CreateNode("VAEEncode"',
+            'CreateNode("LatentMultiply"',
+            'CreateNode("LanPaint_ImageEncode"',
+        ):
+            self.assertIn(expression, segment_body, expression)
+        self.assertNotIn('CreateNode("TextEncodeQwenImage21"', segment_body)
+        self.assertNotIn('FlattenQwen21SegmentPrompt(', segment_body,
+                         "Do not strip Swarm tags before the native Swarm parser")
+
+        # Native inference, crop, masks, and compositing are still required.
+        for expression in (
+            'CreateNode("LanPaint_KSampler"',
+            'CreateNode("LanPaint_ImageDecode"',
+            'CreateNode("InpaintCropImproved"',
+            'CreateNode("InpaintStitchImproved"',
+            '["stitcher"] = cropStitcher',
+            '["inpainted_image"] = stitchInput',
+        ):
+            self.assertIn(expression, steps, expression)
         for obsolete in (
             "SwarmQwenImage21SegmentEncode",
             "SwarmQwen21SegmentDiagnostics",
