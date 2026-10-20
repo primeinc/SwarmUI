@@ -27,8 +27,8 @@ def native_contract_fixture():
         "detector": node("SwarmClipSeg", images=["source", 0],
                          match_text="girl", threshold=0.1),
         "guard": node("SwarmRequireNonEmptyMask", mask=["detector", 0],
-                      minimum_confidence=0.5),
-        "binary": node("ThresholdMask", mask=["guard", 0], value=0.5),
+                      minimum_confidence=0.0),
+        "binary": node("ThresholdMask", mask=["guard", 0], value=0.0),
         "crop": node("InpaintCropImproved", image=["source", 0],
                      mask=["binary", 0], mask_hipass_filter=0.5,
                      output_resize_to_target_size=True),
@@ -98,6 +98,17 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         # reference even though unrelated global negatives still exist.
         graph["negative"]["inputs"]["images"] = ["source", 0]
         with self.assertRaisesRegex(AssertionError, "negative conditioning"):
+            probe.inspect_and_instrument(graph)
+
+    def test_no_second_threshold_can_override_the_authored_clipseg_threshold(self):
+        graph = native_contract_fixture()
+        probe.inspect_and_instrument(graph)
+        graph["guard"]["inputs"]["minimum_confidence"] = 0.5
+        with self.assertRaisesRegex(AssertionError, "second threshold"):
+            probe.inspect_and_instrument(graph)
+        graph["guard"]["inputs"]["minimum_confidence"] = 0.0
+        graph["binary"]["inputs"]["value"] = 0.5
+        with self.assertRaisesRegex(AssertionError, "subject-mask threshold"):
             probe.inspect_and_instrument(graph)
 
     def test_detector_mask_must_reach_native_crop_through_guard_and_threshold(self):
