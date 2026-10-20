@@ -84,12 +84,24 @@ public class WorkflowGeneratorSteps
         List<(string Name, double Weight)> actual = [];
         HashSet<string> visited = [];
         JArray current = modelPath;
-        while (current is not null && visited.Add(current[0]?.ToString() ?? ""))
+        while (current is not null)
         {
-            JObject node = g.Workflow[current[0]?.ToString() ?? ""] as JObject;
+            if (current.Count != 2 || current[0] is null)
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: malformed sampler model connection {current}.");
+            }
+            string modelNodeId = current[0].ToString();
+            if (!visited.Add(modelNodeId))
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: cyclic sampler model chain at node '{modelNodeId}'.");
+            }
+            JObject node = g.Workflow[modelNodeId] as JObject;
             if (node is null)
             {
-                break;
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: sampler references missing model node '{modelNodeId}'.");
             }
             string type = node["class_type"]?.ToString();
             JObject inputs = node["inputs"] as JObject;
@@ -110,7 +122,24 @@ public class WorkflowGeneratorSteps
                 JToken strength = inputs?[type == "NunchakuFluxLoraLoader" ? "lora_strength" : "strength_model"];
                 actual.Add((name, strength?.Value<double>() ?? 0));
             }
-            current = inputs?["model"] as JArray;
+            JToken parent = inputs?["model"];
+            if (parent is null)
+            {
+                if (type is "LoraLoader" or "LoraLoaderModelOnly" or
+                    "NunchakuFluxLoraLoader" or "DifferentialDiffusion")
+                {
+                    throw new SwarmUserErrorException(
+                        $"Qwen segment {sectionId}: model wrapper '{modelNodeId}' ({type}) " +
+                        "has no upstream MODEL connection.");
+                }
+                break; // Legitimate source-model loader; no MODEL input.
+            }
+            if (parent is not JArray nextModel || nextModel.Count != 2)
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: malformed MODEL input on '{modelNodeId}' ({type}).");
+            }
+            current = nextModel;
         }
 
         List<(string Name, double Weight, int Confinement)> expected = [];
