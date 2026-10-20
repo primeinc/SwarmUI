@@ -52,10 +52,15 @@ default to the existing upstream masked path, which sends the actual crop
 mask into LanPaint_ImageEncode and its KSampler. Reference Edit remains an
 explicit advanced option for users who specifically want unmasked crop edits.
 
-A bare regional LoRA trigger is first flattened from Swarm markup into plain
-text, then presented to the native Qwen encoder as a targeted image-edit
-instruction rather than a stand-alone noun phrase. Explicit edit instructions
-are passed through without rewording. Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
+A bare single-token regional LoRA trigger is flattened from Swarm markup
+into plain text, then presented to the native Qwen encoder as a targeted
+image-edit instruction rather than a stand-alone noun. All multiword
+natural-language requests are preserved verbatim after markup flattening:
+classification by a short verb allowlist corrupts valid instructions such as
+"Add sunglasses" or "Give the girl blue eyes". When the cropped source
+reference is disabled, generated instructions must not inject an unbound or
+unrelated `<image1>` token. Explicit replacement requests should state the
+intended transformation in full. Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
 before upstream CropAndStitch can fall back to the entire image. Accepted
 fractional confidence values are converted to a solid subject mask using
 ComfyUI's native ThresholdMask before the unchanged crop adapter. Its own
