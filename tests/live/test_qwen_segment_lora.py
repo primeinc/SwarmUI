@@ -1,0 +1,208 @@
+"""Live ComfyUI Qwen-segment LoRA acceptance. No fake models, tensors, or Comfy nodes.
+
+Use actual SwarmUI-exported Comfy API graphs, installed model files and a running
+Comfy backend. This queues real GPU generations; it is never a CPU CI substitute.
+
+SWARM_LORA_ACCEPTANCE_MANIFEST=/path/to/manifest.json \
+    python -m pytest tests/live/test_qwen_segment_lora.py -v -s
+"""
+from __future__ import annotations
+
+import copy
+from io import BytesIO
+import json
+import math
+import os
+from pathlib import Path
+import time
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, build_opener, ProxyHandler
+
+from PIL import Image, ImageChops, ImageStat
+import pytest
+
+
+pytestmark = pytest.mark.inference
+_OUTPUT = "swarm_lora_live_capture"
+_LORAS = {"LoraLoader", "LoraLoaderModelOnly"}
+_SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced"}
+_IMAGE_OUTPUTS = {"SaveImage", "PreviewImage", "SwarmSaveImageWS"}
+
+
+def acceptance_cases():
+    manifest_path = os.environ.get("SWARM_LORA_ACCEPTANCE_MANIFEST")
+    if not manifest_path:
+        raise RuntimeError(
+            "LIVE LORA ACCEPTANCE NOT RUN: SWARM_LORA_ACCEPTANCE_MANIFEST "
+            "must identify real SwarmUI-exported global and segment API graphs. "
+            "Passing unit tests is NOT a substitute for this gate."
+        )
+    file = Path(manifest_path).resolve(strict=True)
+    manifest = json.loads(file.read_text(encoding="utf-8"))
+    cases = manifest.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("No LoRA acceptance cases. Refusing an empty green run.")
+    names = [case.get("name") for case in cases]
+    if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
+        raise ValueError("Cases must have unique, nonblank names")
+    required = manifest.get("required_loras")
+    if not isinstance(required, list) or not required or set(required) != set(names):
+        raise ValueError("required_loras must enumerate exactly the LoRAs being tested")
+    url = manifest.get("comfy_url")
+    parsed = urlsplit(url) if isinstance(url, str) else None
+    if not parsed or parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("comfy_url must be an actual Comfy backend HTTP(S) URL without credentials")
+    for case in cases:
+        for field in ("global_graph", "segment_graph", "lora_name", "global_lora_node",
+                      "segment_lora_node", "global_sampler_node", "segment_sampler_node"):
+            if not isinstance(case.get(field), str) or not case[field]:
+                raise ValueError(f"{case['name']}: missing {field}")
+        case["_root"] = file.parent
+        case["_url"] = url.rstrip("/")
+        case["_timeout"] = int(manifest.get("timeout_seconds", 900))
+        case["_min_rms"] = float(manifest.get("minimum_changed_pixel_rms", 1.0))
+    return cases
+
+
+# Canonical Comfy API protocol: Comfy-Org/ComfyUI/script_examples/
+# basic_api_example.py and websockets_api_example.py.
+class ComfyClient:
+    def __init__(self, base_url, timeout):
+        self.base = base_url
+        self.timeout = timeout
+        self.opener = build_opener(ProxyHandler({}))
+
+    def request(self, route, data=None):
+        body = None if data is None else json.dumps(data).encode("utf-8")
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        req = Request(self.base + "/" + route.lstrip("/"), data=body, headers=headers)
+        with self.opener.open(req, timeout=30) as response:
+            return response.read()
+
+    def run_image(self, graph, label):
+        queued = json.loads(self.request("prompt", {"prompt": graph}))
+        if "prompt_id" not in queued:
+            raise AssertionError(f"{label}: Comfy rejected actual graph: {queued}")
+        prompt_id = queued["prompt_id"]
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            response = json.loads(self.request("history/" + prompt_id))
+            if prompt_id not in response:
+                time.sleep(1)
+                continue
+            history = response[prompt_id]
+            status = history.get("status", {})
+            if status.get("status_str") != "success" or status.get("completed") is False:
+                raise AssertionError(f"{label}: Comfy execution failed: {status}")
+            images = history.get("outputs", {}).get(_OUTPUT, {}).get("images", [])
+            if len(images) != 1:
+                raise AssertionError(f"{label}: expected one Comfy saved image; got {images}")
+            image = images[0]
+            query = urlencode({"filename": image["filename"], "subfolder": image["subfolder"],
+                               "type": image["type"]})
+            with Image.open(BytesIO(self.request("view?" + query))) as decoded:
+                return decoded.convert("RGB").copy()
+        raise AssertionError(f"{label}: Comfy prompt {prompt_id} timed out after {self.timeout}s")
+
+
+def read_graph(path):
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    graph = data.get("prompt", data) if isinstance(data, dict) else None
+    if not isinstance(graph, dict) or not graph or any(
+        not isinstance(v, dict) or "class_type" not in v or "inputs" not in v
+        for v in graph.values()
+    ):
+        raise ValueError(f"{path}: export the actual Comfy API graph, NOT editor JSON")
+    return graph
+
+
+def model_chain(graph, sampler_id):
+    sampler = graph.get(sampler_id)
+    if not sampler or sampler["class_type"] not in _SAMPLERS:
+        raise AssertionError(f"Missing sampler {sampler_id!r} in real API graph")
+    link = sampler["inputs"].get("model")
+    chain = []
+    while isinstance(link, list) and len(link) == 2 and str(link[0]) in graph:
+        node_id = str(link[0])
+        if node_id in chain:
+            raise AssertionError(f"Model chain cycle at {node_id}")
+        chain.append(node_id)
+        link = graph[node_id]["inputs"].get("model")
+    return chain
+
+
+def graph_variant(original, case, stage, strength):
+    graph = copy.deepcopy(original)
+    node_id = case[f"{stage}_lora_node"]
+    node = graph.get(node_id)
+    if not node or node["class_type"] not in _LORAS:
+        raise AssertionError(f"{stage}: {node_id} is not an actual Comfy LoRA loader")
+    actual = str(node["inputs"].get("lora_name", "")).split("/")[-1].removesuffix(".safetensors").casefold()
+    expected = case["lora_name"].split("/")[-1].removesuffix(".safetensors").casefold()
+    if actual != expected:
+        raise AssertionError(f"{stage}: requested {expected} but graph uses {actual}")
+    if node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
+        raise AssertionError(f"{stage}: LoRA {node_id} is not on the REAL SAMPLER'S model path")
+    node["inputs"]["strength_model"] = strength
+    if "strength_clip" in node["inputs"]:
+        node["inputs"]["strength_clip"] = strength
+    if stage == "segment":
+        if not any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
+            raise AssertionError("This is not a SwarmUI Qwen 2.1 segment workflow")
+        if not any("Composite" in n["class_type"] for n in graph.values()):
+            raise AssertionError("No final segment compositor in exported workflow")
+    ref = case.get(f"{stage}_output_image_ref")
+    if ref is None:
+        outputs = [n["inputs"]["images"] for n in graph.values()
+                   if n["class_type"] in _IMAGE_OUTPUTS and "images" in n["inputs"]]
+        if len(outputs) != 1:
+            raise ValueError(f"{stage}: identify the exact final output_image_ref; found {len(outputs)}")
+        ref = outputs[0]
+    if not isinstance(ref, list) or len(ref) != 2 or str(ref[0]) not in graph:
+        raise ValueError(f"{stage}: invalid real final image connection {ref!r}")
+    if _OUTPUT in graph:
+        raise ValueError(f"Output id {_OUTPUT} already exists in workflow")
+    graph[_OUTPUT] = {"class_type": "SaveImage", "inputs": {
+        "images": [str(ref[0]), int(ref[1])], "filename_prefix": "swarm_lora_live_acceptance"
+    }}
+    return graph
+
+
+def rms(a, b):
+    if a.size != b.size:
+        raise AssertionError(f"Output image sizes changed: {a.size} versus {b.size}")
+    stats = ImageStat.Stat(ImageChops.difference(a, b))
+    return math.sqrt(sum(value * value for value in stats.rms) / len(stats.rms))
+
+
+@pytest.mark.parametrize("case", acceptance_cases(), ids=lambda c: c["name"])
+def test_real_global_and_segment_lora_effect(case):
+    """Actual Comfy execution; off-on-off negative control in BOTH workflows."""
+    client = ComfyClient(case["_url"], case["_timeout"])
+    if not isinstance(json.loads(client.request("system_stats")).get("system"), dict):
+        raise AssertionError("Endpoint is not the actual ComfyUI runtime")
+    strength = float(case.get("strength", 1))
+    if not math.isfinite(strength) or strength == 0:
+        raise ValueError("Nonzero finite LoRA strength required")
+    metrics = {}
+    for stage in ("global", "segment"):
+        graph = read_graph(case["_root"] / case[f"{stage}_graph"])
+        off = graph_variant(graph, case, stage, 0.0)
+        on = graph_variant(graph, case, stage, strength)
+        image_off_first = client.run_image(off, f"{case['name']} {stage} OFF-1")
+        image_on = client.run_image(on, f"{case['name']} {stage} ON")
+        image_off_again = client.run_image(off, f"{case['name']} {stage} OFF-2")
+        baseline_noise = rms(image_off_first, image_off_again)
+        effect = rms(image_off_first, image_on)
+        threshold = max(case["_min_rms"], baseline_noise * 8)
+        print(f"{case['name']} {stage}: real-image LoRA RMS {effect:.3f}; "
+              f"zero-weight repeat noise {baseline_noise:.3f}; required > {threshold:.3f}")
+        assert effect > threshold, (
+            f"{case['name']}: {stage.upper()} LORA INEFFECTIVE. Real ComfyUI forward "
+            f"and saved image have no distinct adapter effect; RMS {effect:.3f}."
+        )
+        metrics[stage] = effect
+    print(f"{case['name']} accepted: global RMS={metrics['global']:.3f}, "
+          f"segment RMS={metrics['segment']:.3f}. Real weights; no fakes.")
