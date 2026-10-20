@@ -17,11 +17,18 @@ sharing because prompts and model filenames may remain.
 
 ## Current source and runtime distinction
 
-The current Qwen segment workflow generates native `TextEncodeQwenImage21`,
-`KSampler`, and `ImageCompositeMasked` nodes, and ships the unchanged
-upstream `nodes_qwen.py` module as `ComfyQwenNodes_Upstream.py`
-(GPL-3.0 license included). The prior
-`SwarmQwenImage21SegmentEncode` and Qwen Python diagnostics are removed.
+The current Qwen segment workflow uses native `TextEncodeQwenImage21`
+and unchanged upstream `InpaintCropImproved` / `InpaintStitchImproved`
+adapters. The default **Masked Img2Img** path uses upstream
+`LanPaint_ImageEncode`, `LanPaint_KSampler`, and `LanPaint_ImageDecode`.
+The separate **Reference Edit** mode uses ComfyUI's `KSampler` and
+Qwen's own edit latent. Both modes use upstream CropAndStitch for the final
+image; neither generates the old homemade Qwen diagnostics gallery.
+
+Swarm bundles unchanged upstream Qwen, LanPaint, and CropAndStitch sources
+under separate node packages, retaining their respective licenses. Empty
+CLIPSeg masks fail before the crop adapter rather than becoming whole-frame
+fallback crops. Neither this wiring nor CPU tests prove semantic replacement.
 
 The live, opt-in `tests/integration/qwen_segment_text_replacement.py`
 preflights **real exported Comfy API graphs** and the running backend's
@@ -47,7 +54,8 @@ with correct crop and final composite, plus positive/negative LoRA controls.
 
 - SwarmUI: `WorkflowGeneratorQwenSegment.cs`,
   `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`,
-  `WorkflowGenerator.cs#CreateImageMaskCrop,RecompositeCropped`.
+  `ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py`,
+  `ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py`.
 - ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
   `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute`,
   `nodes.py#KSampler.sample`,
