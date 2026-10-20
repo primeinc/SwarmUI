@@ -62,6 +62,7 @@ public class WorkflowGeneratorSteps
             }
             g.FinalLoadedModelList = [g.FinalLoadedModel];
             (g.FinalLoadedModel, g.CurrentModel, g.CurrentTextEnc, g.CurrentVae) = g.CreateModelLoader(g.FinalLoadedModel, "Base", "4", sectionId: T2IParamInput.SectionID_BaseOnly);
+            g.CurrentModelFromRefiner = false;
         }, -15);
         AddModelGenStep(g =>
         {
@@ -1576,6 +1577,7 @@ public class WorkflowGeneratorSteps
                     g.FinalLoadedModel = refineModel;
                     g.FinalLoadedModelList = [refineModel];
                     (g.FinalLoadedModel, g.CurrentModel, g.CurrentTextEnc, g.CurrentVae) = g.CreateModelLoader(refineModel, "Refiner", loaderNodeId, sectionId: T2IParamInput.SectionID_Refiner);
+                    g.CurrentModelFromRefiner = true;
                     g.NoVAEOverride = false;
                     prompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.Prompt), g.CurrentTextEnc.Path, g.FinalLoadedModel, true, isRefiner: true, steps: steps);
                     negPrompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.NegativePrompt), g.CurrentTextEnc.Path, g.FinalLoadedModel, false, isRefiner: true, steps: steps);
@@ -1804,6 +1806,8 @@ public class WorkflowGeneratorSteps
                 T2IModel t2iModel = g.FinalLoadedModel;
                 WGNodeData model = g.CurrentModel, clip = g.CurrentTextEnc, vae = g.CurrentVae;
                 bool hasSegmentModelOverride = g.UserInput.TryGet(T2IParamTypes.SegmentModel, out T2IModel segmentModel);
+                // Capture the model-producing stage before the segment overrides or any later loaders.
+                bool segmentSourceIsRefiner = g.CurrentModelFromRefiner;
                 if (hasSegmentModelOverride)
                 {
                     if (segmentModel.ModelClass?.CompatClass != t2iModel.ModelClass?.CompatClass)
@@ -1812,7 +1816,17 @@ public class WorkflowGeneratorSteps
                     }
                     t2iModel = segmentModel;
                     g.FinalLoadedModel = segmentModel;
-                    (t2iModel, model, clip, vae) = g.CreateModelLoader(t2iModel, "Refiner", sectionId: parts[0].ContextID);
+                    bool previousRefinerStage = g.IsRefinerStage;
+                    g.IsRefinerStage = true;
+                    try
+                    {
+                        (t2iModel, model, clip, vae) = g.CreateModelLoader(t2iModel, "Refiner", sectionId: parts[0].ContextID);
+                    }
+                    finally
+                    {
+                        g.IsRefinerStage = previousRefinerStage;
+                    }
+                    segmentSourceIsRefiner = true;
                     g.FinalLoadedModel = t2iModel;
                     g.CurrentModel = model;
                 }
@@ -1824,10 +1838,6 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
-                    if (g.IsQwenImage21() && part.Strength2 <= 0)
-                    {
-                        continue;
-                    }
                     string[] segmentSections = part.DataText.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     string segmentNode = null;
                     if (segmentSections.Length == 0)
@@ -1935,6 +1945,11 @@ public class WorkflowGeneratorSteps
                         });
                         new WGNodeData([imageNode, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat()).SaveOutput(null, null, g.GetStableDynamicID(50000, 0));
                     }
+                    // A zero-creativity Qwen edit is a no-op, but the requested mask is still an output.
+                    if (g.IsQwenImage21() && part.Strength2 <= 0)
+                    {
+                        continue;
+                    }
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
@@ -1951,12 +1966,21 @@ public class WorkflowGeneratorSteps
                         // before any later cache/attention/compile wrappers are constructed.
                         if (g.HasLorasForConfinement(part.ContextID))
                         {
-                            string loaderType = hasSegmentModelOverride ? "Refiner" : "Base";
-                            (t2iModel, model, clip, vae) = g.CreateModelLoader(
-                                t2iModel,
-                                loaderType,
-                                sectionId: part.ContextID,
-                                additionalLoraConfinement: part.ContextID);
+                            string loaderType = segmentSourceIsRefiner ? "Refiner" : "Base";
+                            bool previousRefinerStage = g.IsRefinerStage;
+                            g.IsRefinerStage = segmentSourceIsRefiner;
+                            try
+                            {
+                                (t2iModel, model, clip, vae) = g.CreateModelLoader(
+                                    t2iModel,
+                                    loaderType,
+                                    sectionId: part.ContextID,
+                                    additionalLoraConfinement: part.ContextID);
+                            }
+                            finally
+                            {
+                                g.IsRefinerStage = previousRefinerStage;
+                            }
                         }
                         // Reference Edit uses a plain crop latent and final pixel-space masking.
                         // Masked Img2Img still needs DifferentialDiffusion on this segment model.
@@ -2013,8 +2037,9 @@ public class WorkflowGeneratorSteps
                             string nodeType = node["class_type"]?.ToString() ?? "(unknown)";
                             modelChain.Add(nodeType);
                             JObject inputs = node["inputs"] as JObject;
-                            if (nodeType is "LoraLoaderModelOnly" or "LoraLoader")
+                            if (nodeType is "LoraLoaderModelOnly" or "LoraLoader" && loraName == "(none)")
                             {
+                                // Walk from the sampler inward: the first adapter is the segment-scoped loader.
                                 loraName = inputs?["lora_name"]?.ToString() ?? "(unknown)";
                                 loraStrength = inputs?["strength_model"]?.ToString() ?? "(unknown)";
                             }
