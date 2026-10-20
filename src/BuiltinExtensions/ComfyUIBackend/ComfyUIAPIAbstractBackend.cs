@@ -69,6 +69,46 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         }
     }
 
+    /// <summary>
+    /// Qwen multi-reference support is a NEW SwarmTextEncodeAdvanced input
+    /// schema, even though its class name already existed on older backends.
+    /// NodeTypes alone cannot prove that a remote API-by-URL ComfyUI registered
+    /// the image_N sockets needed for independent reference geometry.
+    /// </summary>
+    public static void ValidateQwen21IndependentVisionSockets(JObject workflow, JObject backendObjectInfo)
+    {
+        if (workflow is null || !workflow.Properties().Any(p =>
+            p.Value?["class_type"]?.ToString() == "InpaintCropImproved"))
+        {
+            return;
+        }
+        foreach (JProperty node in workflow.Properties())
+        {
+            if (node.Value?["class_type"]?.ToString() != "SwarmTextEncodeAdvanced"
+                || node.Value["inputs"] is not JObject inputs)
+            {
+                continue;
+            }
+            foreach (JProperty input in inputs.Properties())
+            {
+                if (!input.Name.StartsWith("image_", StringComparison.Ordinal)
+                    || !int.TryParse(input.Name.AsSpan("image_".Length), out int index)
+                    || index < 1 || index > 16 || input.Value.Type == JTokenType.Null)
+                {
+                    continue;
+                }
+                if (backendObjectInfo?["SwarmTextEncodeAdvanced"]?["input"]?["optional"]?[input.Name] is null)
+                {
+                    throw new SwarmUserErrorException(
+                        $"The selected ComfyUI backend has an outdated SwarmTextEncodeAdvanced node: " +
+                        $"its /object_info does not register '{input.Name}' for Qwen 2.1 independent references. " +
+                        "Update SwarmComfyCommon/SwarmText.py on THIS backend and refresh /object_info. " +
+                        "Do not batch differently sized Qwen references as a workaround: ImageBatch resizes them.");
+                }
+            }
+        }
+    }
+
     public string ModelFolderFormat = null;
 
     public class ReusableSocket
@@ -1113,6 +1153,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 workflow = CreateWorkflow(user_input, static graph => graph, ModelFolderFormat, [.. SupportedFeatures]);
                 JObject nativeGraph = JObject.Parse(workflow);
                 ValidateNativeQwenSegmentNodes(nativeGraph, NodeTypes);
+                ValidateQwen21IndependentVisionSockets(nativeGraph, RawObjectInfo);
                 preserveQwenOriginalInitUpload = ShouldPreserveQwenOriginalInitUpload(nativeGraph, user_input);
                 workflow = initImageFixer(workflow);
             }
