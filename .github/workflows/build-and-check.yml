@@ -4,10 +4,10 @@ on:
     push:
     pull_request:
 
-# An older branch head cannot prove the current PR; cancel obsolete runs.
+# An older branch head cannot prove the current PR; keep the active proof running and replace only older pending runs.
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: false
 
 jobs:
     build-and-check:
