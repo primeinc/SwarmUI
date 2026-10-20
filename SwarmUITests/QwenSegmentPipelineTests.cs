@@ -224,7 +224,8 @@ public class QwenSegmentPipelineTests : SwarmUITest
         else
         {
             Assert.That(Nodes(g, "SwarmTextEncodeAdvanced").All(e =>
-                e.Value["inputs"]!["images"] is null), Is.True);
+                e.Value["inputs"]!["images"] is null ||
+                e.Value["inputs"]!["images"]!.Type == JTokenType.Null), Is.True);
             Assert.That(Nodes(g, "ReferenceLatent"), Is.Empty);
         }
     }
