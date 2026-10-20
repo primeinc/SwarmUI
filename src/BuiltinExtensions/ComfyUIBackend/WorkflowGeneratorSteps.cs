@@ -1907,9 +1907,14 @@ public class WorkflowGeneratorSteps
                     string sourceKind = null;
                     if (g.UserInput.TryGet(T2IParamTypes.InitImage, out Image originalInit))
                     {
-                        // Reload the original pixels, not BasicInputImage which
-                        // can have init-image noise or other modifications.
-                        originalSource = g.LoadImage(originalInit, "${initimage}", true);
+                        // Take the actual source dimensions and pixels, not
+                        // BasicInputImage (which may be noised) or a forced
+                        // resample to the unrelated text-to-image canvas size.
+                        // The upstream crop-and-stitch adapter handles arbitrary
+                        // source dimensions and restores that same canvas.
+                        (int sourceWidth, int sourceHeight) = originalInit.GetResolution();
+                        originalSource = g.LoadImage(originalInit, "${initimage}", false,
+                            width: sourceWidth, height: sourceHeight);
                         sourceKind = "InitImage";
                     }
                     else
