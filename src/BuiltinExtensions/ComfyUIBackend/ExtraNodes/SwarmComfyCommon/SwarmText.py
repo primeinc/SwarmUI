@@ -498,6 +498,10 @@ class SwarmTextEncodeAdvanced:
                 "images": ("IMAGE", {"default": None, "tooltip": "Optional images to use for a text-vision model, if applicable."}),
                 "minimax_refs": ("MiniMaxReferences", {"default": None, "tooltip": "Optional MiniMax H3 references (images, videos, audio)."}),
                 "lora_hooks": ("HOOKS", {"default": None, "tooltip": "Optional ordered LoRA hook list referenced by //hook attachments in the prompt."}),
+                # Distinct Qwen reference images must not be collapsed into
+                # ImageBatch: that Comfy node resizes later frames to the first.
+                **{f"image_{i}": ("IMAGE", {"tooltip": "Independent visual reference (own geometry), Qwen 2.1."})
+                   for i in range(1, 17)},
             }
         }
 
@@ -506,7 +510,7 @@ class SwarmTextEncodeAdvanced:
     FUNCTION = "encode"
     DESCRIPTION = "Acts like the regular CLIPTextEncode, but supports Swarm prompt tags such as '<break>', '<fromto[0.5]:a, b>', '<alternate:a, b>', '<weight[2]:text>', '<embed:name>'."
 
-    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None, tokenize_kwargs = None):
+    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None, tokenize_kwargs = None, **image_slots):
         append_images = False
         prepend_images = False
         fix_images = True
@@ -520,6 +524,23 @@ class SwarmTextEncodeAdvanced:
             llama_template = PROMPT_TEMPLATE_QWEN_IMAGE_EDIT_PLUS
             append_images = True
             prepend_images = True
+        # Preserve independently-sized Qwen vision images without batching or
+        # interpolating them. Comfy's Qwen tokenizer accepts a Python list.
+        # Keep the existing IMAGE batch input unchanged for other callers.
+        if image_slots:
+            if images is not None:
+                raise ValueError("Use either the images batch or independent image_N references")
+            images = []
+            for i in range(1, 17):
+                image = image_slots.get(f"image_{i}")
+                if image is None:
+                    continue
+                if image.shape[0] < 1:
+                    raise ValueError(f"Qwen image_{i} reference has no image")
+                image = image[:1]
+                if image.shape[-1] == 4:
+                    image = image[..., :3] * image[..., 3:] + (1.0 - image[..., 3:])
+                images.append(image)
         if images is not None and not isinstance(images, list):
             if images.shape[-1] == 4:
                 images = images[..., :3] * images[..., 3:] + (1.0 - images[..., 3:])
