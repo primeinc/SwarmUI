@@ -246,7 +246,12 @@ def main(argv=None):
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
-    for expected_node in ("TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved"):
+    # Probe EVERY load-bearing runtime node before scheduling expensive GPU work.
+    # A checked-in plugin does not prove Comfy loaded or registered it.
+    for expected_node in (
+        "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
+        "LanPaint_ImageEncode", "LanPaint_KSampler", "LanPaint_ImageDecode",
+    ):
         registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
         if expected_node not in registered:
             raise AssertionError(f"Actual Comfy backend does not expose {expected_node}; "
