@@ -49,15 +49,17 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -129,11 +131,12 @@ public class QwenSegmentOriginalSourceTests
             input.Set(T2IParamTypes.InitImage, image);
         }
         using var independentPixels = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(80, 96);
+        var independentReference = new SwarmUI.Utils.Image(independentPixels);
         if (independentPromptImage)
         {
             input.Set(T2IParamTypes.PromptImages, new System.Collections.Generic.List<SwarmUI.Utils.Image>
             {
-                new SwarmUI.Utils.Image(independentPixels)
+                independentReference
             });
         }
         input.Set(T2IParamTypes.Prompt, prompt);
@@ -164,7 +167,8 @@ public class QwenSegmentOriginalSourceTests
             input.Set(T2IParamTypes.LoraSectionConfinement,
                 new System.Collections.Generic.List<string> { section.ToString() });
         }
-        WorkflowGenerator generator = new() { UserInput = input };
+        WorkflowGenerator generator = new() { UserInput = input,
+            Features = useBase64Images ? new() { "comfy_loadimage_b64" } : new() };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
         var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
@@ -175,8 +179,15 @@ public class QwenSegmentOriginalSourceTests
         var mask = nodes.Single(x => x.Node["class_type"]?.ToString() == "ThresholdMask");
         string sourceId = crop.Node["inputs"]?["image"]?[0]?.ToString();
         Assert.That(sourceId, Is.Not.Null);
-        Assert.That(graph[sourceId]?["class_type"]?.ToString(), Is.EqualTo("LoadImage"),
-            "Explicit original photo must be the segment canvas with or without global scene text");
+        Assert.That(graph[sourceId]?["class_type"]?.ToString(),
+            Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"),
+            "The edit canvas must load the original image, not the sampled base frame");
+        if (useBase64Images)
+        {
+            string expectedBytes = (hasInitImage ? image : independentReference).AsBase64;
+            Assert.That(graph[sourceId]?["inputs"]?["image_base64"]?.ToString(), Is.EqualTo(expectedBytes),
+                "The native detector must receive the exact supplied image bytes, without resampling");
+        }
         Assert.That(detector.Node["inputs"]?["images"]?.ToString(), Is.EqualTo(crop.Node["inputs"]?["image"]?.ToString()));
         Assert.That(crop.Node["inputs"]?["mask"]?.ToString(),
             Is.EqualTo(new Newtonsoft.Json.Linq.JArray(mask.Id, 0).ToString()));
