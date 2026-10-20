@@ -41,12 +41,15 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException("Native TextEncodeQwenImage21 does not support VAE tiling for reference images.");
         }
 
+        // Swarm weight tags are parsed by SwarmTextEncodeAdvanced, not by the
+        // native Qwen encoder. Reuse Swarm\'s existing prompt-text flattener
+        // so Qwen sees the actual subject and LoRA trigger, not literal markup.
         JObject inputs = new()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["prompt"] = prompt ?? "",
-            ["negative_prompt"] = negativePrompt ?? "",
+            ["prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? ""),
+            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? ""),
             ["resolution"] = 0
         };
         bool useOriginal = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
