@@ -706,7 +706,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Recomposites a masked image edit, after <see cref="CreateImageMaskCrop(JArray, JArray, int)"/> was used.</summary>
-    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false)
+    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false, bool preserveSoftMask = false)
     {
         // Segment masks govern where an edit is applied. Qwen Image 2.1 can return RGBA pixels,
         // and the compositor otherwise multiplies the segment mask by the generated alpha.
@@ -726,7 +726,10 @@ public partial class WorkflowGenerator
             ["upscale_method"] = "lanczos",
             ["crop"] = "disabled"
         });
-        if (!UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
+        // CLIPSeg confidence masks are continuous. Hard-thresholding at 0.001
+        // turns barely detected background into an opaque rectangular paste.
+        // Preserve those fractional confidences for native Qwen segment edits.
+        if (!preserveSoftMask && !UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
         {
             string thresholded = CreateNode("ThresholdMask", new JObject()
             {
