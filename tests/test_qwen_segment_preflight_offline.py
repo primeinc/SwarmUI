@@ -27,7 +27,7 @@ def native_contract_fixture():
         "detector": node("SwarmClipSeg", images=["source", 0],
                          match_text="girl", threshold=0.1),
         "guard": node("SwarmRequireNonEmptyMask", mask=["detector", 0],
-                      minimum_confidence=0.0),
+                      minimum_confidence=0.0, maximum_coverage=0.99),
         "binary": node("ThresholdMask", mask=["guard", 0], value=0.0),
         "crop": node("InpaintCropImproved", image=["source", 0],
                      mask=["binary", 0], mask_hipass_filter=0.5,
@@ -235,6 +235,22 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
             declared["qwen21_prevent_empty_text"] = ["BOOLEAN"]
             self.assertTrue(probe.validate_runtime_node_contracts(
                 "http://example.invalid", graph))
+
+    def test_runtime_required_qwen_mask_coverage_socket_is_never_omitted(self):
+        graph, _ = probe.inspect_and_instrument(native_contract_fixture())
+        required = {"maximum_coverage": ["FLOAT"]}
+
+        def schema_fetch(_base, route):
+            node = route.removeprefix("object_info/")
+            return {node: {"input": {"required": required
+                         if node == "SwarmRequireNonEmptyMask" else {}}}}
+
+        with patch.object(probe, "fetch_json", side_effect=schema_fetch):
+            self.assertTrue(probe.validate_runtime_node_contracts(
+                "http://example.invalid", graph))
+            del graph["guard"]["inputs"]["maximum_coverage"]
+            with self.assertRaisesRegex(AssertionError, "maximum_coverage"):
+                probe.validate_runtime_node_contracts("http://example.invalid", graph)
 
     def test_runtime_preflight_rejects_missing_splitter_and_diagnostic_nodes(self):
         graph, _ = probe.inspect_and_instrument(native_contract_fixture())
