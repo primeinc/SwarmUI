@@ -30,9 +30,9 @@ The two selectable segment sampling modes are intentionally different:
 ```
 Original source -> SwarmClipSeg(text) -> normalized detector mask
         |                                      |
-        |                 SwarmRequireNonEmptyMask (>0.5 support)
+        |                 SwarmRequireNonEmptyMask (nonempty post-detector mask)
         |                                      |
-        |                      native ThresholdMask (value=0.5)
+        |                      native ThresholdMask (value=0, binary support)
         |                                      |
         +--------> InpaintCropImproved(image, binary subject mask)
                                |0 stitcher   |1 cropped image   |2 cropped mask
@@ -81,12 +81,14 @@ rather than passing literal `<weight...>` strings to the old native Qwen
 `TextEncodeQwenImage21` node. Passing through `SwarmTextEncodeAdvanced`
 is the branch's graph-level implementation of full Swarm segment-tag support;
 this graph construction is not proof of image-space LoRA effectiveness.
-Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
-before upstream CropAndStitch can fall back to the entire image. Accepted
-fractional confidence values are converted to a solid subject mask using
-ComfyUI's native ThresholdMask before the unchanged crop adapter. Its own
-feathering still handles the mask boundary; the subject interior no longer
-blends old and replacement identities.
+SwarmClipSeg first applies the threshold authored in <segment:...>, then
+normalizes its nonzero detection scores. SwarmRequireNonEmptyMask now rejects
+only an entirely empty post-detector mask (minimum confidence=0). Native
+ThresholdMask(value=0) makes every detector-selected pixel fully opaque,
+rather than discarding pixels below an unrelated second 0.5 cutoff. The
+unchanged CropAndStitch high-pass filter stays 0.5, operating on this binary
+mask, while its own feathering handles the boundary. No original subject
+pixels are blended through a fractional interior confidence mask.
 
 The Reference Edit branch now constructs its zero-filled native-format latent
 from `VAEEncode(cropped source) -> LatentMultiply(multiplier=0)`.
