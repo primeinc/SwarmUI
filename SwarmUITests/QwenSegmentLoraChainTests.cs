@@ -119,6 +119,24 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void SameDirectoryDifferentCaseMustNotCountOnCaseSensitiveBackend()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["lora_name"] = "subjects/Portrait.safetensors";
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void BackslashAndForwardSlashRemainEquivalentForSameLoRA()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["lora_name"] = "subjects\\portrait.safetensors";
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
     public static void ZeroWeightLoRAIsAnInertAndValidControl()
     {
         WorkflowGenerator g = Prepare();
