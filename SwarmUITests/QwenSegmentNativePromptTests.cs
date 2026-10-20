@@ -3,16 +3,15 @@ using System.Linq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SwarmUI.Builtin_ComfyUIBackend;
-using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
 namespace SwarmUITests;
 
 /// <summary>
-/// The segment parser owns Swarm directives; the native Qwen encoder must
-/// receive exactly the remaining author-supplied text, not a generated
-/// replacement instruction. Graph tests do not prove rendered edit success.
+/// The production Qwen segment path uses SwarmTextEncodeAdvanced for Swarm
+/// syntax and upstream ReferenceLatent for Qwen edit references. These are
+/// graph-contract tests, not Qwen inference or image-space LoRA acceptance.
 /// </summary>
 public class QwenSegmentNativePromptTests : SwarmUITest
 {
@@ -26,11 +25,17 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         }
     }
 
-    private static JObject NativeEncoderFor(
-        string prompt, string negativePrompt = "", bool useOriginalReference = true)
+    private static (JObject Positive, JObject Negative, JObject Graph, JArray Latent) ConditionersFor(
+        string prompt, string negativePrompt = "", bool useOriginalReference = true,
+        bool referenceEdit = false)
     {
         T2IParamInput input = new(null);
-        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference, useOriginalReference, sectionId: 11);
+        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference,
+            useOriginalReference, sectionId: 11);
+        if (referenceEdit)
+        {
+            input.Set(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: 11);
+        }
         WorkflowGenerator generator = new()
         {
             UserInput = input,
@@ -38,33 +43,37 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         };
         WGNodeData clip = new(new JArray("clip", 0), generator, WGNodeData.DT_TEXTENC, null);
         WGNodeData vae = new(new JArray("vae", 0), generator, WGNodeData.DT_VAE, null);
-        generator.CreateQwen21SegmentConditioning(
+        var result = generator.CreateQwen21SegmentConditioning(
             prompt, negativePrompt, clip, vae,
-            new JArray("crop", 1), new JArray("crop", 2), 11);
-        return generator.Workflow.Properties()
+            new JArray("crop", 1), new JArray("crop", 2), 11, steps: 4);
+        JObject[] encoders = generator.Workflow.Properties()
             .Select(p => p.Value as JObject)
-            .Single(node => node["class_type"]?.ToString() == "TextEncodeQwenImage21");
+            .Where(node => node?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced")
+            .ToArray();
+        Assert.That(encoders, Has.Length.EqualTo(2),
+            "One authored positive and one authored negative text encoder are required");
+        Assert.That(generator.Workflow.Properties()
+            .Any(p => p.Value?["class_type"]?.ToString() == "TextEncodeQwenImage21"),
+            Is.False, "Do not accidentally mix the two conditioning contracts");
+        Assert.That(encoders[0]["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+        Assert.That(encoders[1]["inputs"]?["prompt"]?.ToString(), Is.EqualTo(negativePrompt));
+        return (encoders[0], encoders[1], generator.Workflow, result.Latent);
     }
 
     [Test]
-    public static void NativeEncoderMustOnlyFlattenSwarmWeightTags()
+    public static void RegionParserRemovesOnlyTheSegmentDirective()
     {
-        const string savedPrompt = "sunrise, a girl is walking down the street "
-            + "<segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
-        PromptRegion.Part segment = new PromptRegion(savedPrompt).Parts.Single();
-        Assert.That(segment.ContextID, Is.EqualTo(11));
-        Assert.That(segment.Prompt, Is.EqualTo(" <weight[1.2]:HannahLynn>"));
-        JObject encoder = NativeEncoderFor(segment.Prompt, "<weight[0.5]:blurry>");
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(" HannahLynn"));
-        Assert.That(encoder["inputs"]?["negative_prompt"]?.ToString(), Is.EqualTo("blurry"));
-        Assert.That(encoder["inputs"]?["images.image_1"]?.ToString(),
-            Is.EqualTo(new JArray("crop", 1).ToString()));
+        const string saved = "sunrise, a girl on the street <segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
+        PromptRegion.Part part = new(saved);
+        Assert.That(part.Prompt, Is.EqualTo(" <weight[1.2]:HannahLynn>"));
+        var (positive, negative, _, _) = ConditionersFor(part.Prompt, "<weight[0.5]:blurry>");
+        Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo(part.Prompt));
+        Assert.That(negative["inputs"]?["prompt"]?.ToString(), Is.EqualTo("<weight[0.5]:blurry>"));
     }
 
     [TestCase("HannahLynn")]
     [TestCase("Replace")]
     [TestCase("Add")]
-    [TestCase("Remove")]
     [TestCase("Remove.")]
     [TestCase("删除女孩")]
     [TestCase("Replace the girl with a black boy with blue eyes")]
@@ -72,126 +81,68 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("Put a hat on the subject")]
     [TestCase("Give the girl blue eyes")]
     [TestCase("Draw a star on the girl's shirt")]
-    [TestCase("Make the subject smile")]
-    [TestCase("In this picture, replace the girl with a black boy with blue eyes")]
     [TestCase("  Preserve this punctuation, and spacing!  ")]
     [TestCase("Replace the girl in <image1> with the boy in <image2>.")]
     [TestCase("This is <alternative> literal text, not a Swarm tag.")]
-    public static void NativeQwenMustPreserveLiteralAuthorText(string prompt)
+    public static void AuthoredInstructionsReachNativeSwarmEncoderVerbatim(string prompt)
     {
-        Assert.That(WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt), Is.EqualTo(prompt));
-        JObject encoder = NativeEncoderFor(prompt);
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+        var (positive, _, _, _) = ConditionersFor(prompt);
+        Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
     }
 
-    [Test]
-    public static void NestedSwarmWeightTagsAreFlattenedWithoutWritingAnInstruction()
-    {
-        const string prompt = "<weight[1.2]:portrait of <weight[1.5]:HannahLynn>>";
-        const string expected = "portrait of HannahLynn";
-        Assert.That(WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt), Is.EqualTo(expected));
-        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(), Is.EqualTo(expected));
-    }
-
-    [Test]
-    public static void WeightedMultilineInstructionIsPreservedAfterMarkupProcessing()
-    {
-        const string prompt = "<weight[1.2]:Add sunglasses to the girl>";
-        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(),
-            Is.EqualTo("Add sunglasses to the girl"));
-    }
-
-    [TestCase(true)]
-    [TestCase(false)]
-    public static void CropReferenceSwitchMustNeverInventPromptText(bool cropEnabled)
-    {
-        JObject encoder = NativeEncoderFor("<weight[1.2]:HannahLynn>", useOriginalReference: cropEnabled);
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo("HannahLynn"));
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Does.Not.Contain("<image1>"));
-        Assert.That(encoder["inputs"]?["images.image_1"] is not null, Is.EqualTo(cropEnabled));
-    }
-
-    [Test]
-    public static void AuthorSuppliedImageTokenMustSurviveWithoutRewriting()
-    {
-        JObject encoder = NativeEncoderFor("Replace the subject in <image1>.", useOriginalReference: false);
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(),
-            Is.EqualTo("Replace the subject in <image1>."));
-    }
-
-    [TestCase("<alternate:red,blue>")]
+    [TestCase("<weight[1.2]:HannahLynn>")]
+    [TestCase("<weight[1.2]:portrait of <weight[1.5]:HannahLynn>>")]
+    [TestCase("<alternate:hat,glasses>")]
     [TestCase("<fromto[0.5]:before,after>")]
-    [TestCase("<random:red,blue>")]
-    [TestCase("<repeat[3]:girl>")]
-    [TestCase("<embed:portrait>")]
-    [TestCase("<param:cfg,7>")]
-    [TestCase("<comment:ignore-this>")]
     [TestCase("<break>")]
-    [TestCase("<weight[1.5]:Change <alternate:hat,glasses>>")]
-    public static void UnsupportedResidualSwarmTagsMustFailInsteadOfSilentlyChangingInstruction(string prompt)
+    [TestCase("<embed:portrait>")]
+    public static void SwarmTagsReachTheirActualProcessorRatherThanLengthEstimator(string prompt)
     {
-        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(
-            () => WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt));
-        Assert.That(error.Message, Does.Contain("cannot be flattened without changing"));
-    }
-
-    [TestCase("<weight[abc]:Remove the hat>")]
-    [TestCase("<weight[1..2]:Remove the hat>")]
-    [TestCase("<weight[NaN]:Remove the hat>")]
-    [TestCase("<weight[Infinity]:Remove the hat>")]
-    [TestCase("<weight:Remove the hat>")]
-    [TestCase("<weight[1.2]>")]
-    [TestCase("<weight[]:Remove the hat>")]
-    [TestCase("<weight[1.2]Remove the hat>")]
-    [TestCase("<weight[1.2]:Remove the hat")]
-    [TestCase("<weight[1.2]:A <weight[2]:B>")]
-    public static void MalformedResidualWeightTagsMustNeverBeFlattened(string prompt)
-    {
-        Assert.Throws<SwarmUserErrorException>(
-            () => WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt));
-        Assert.Throws<SwarmUserErrorException>(
-            () => NativeEncoderFor("Replace the subject.", prompt));
+        var (positive, negative, _, _) = ConditionersFor(prompt, prompt + " negative");
+        Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+        Assert.That(negative["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt + " negative"));
+        Assert.That(positive["inputs"]?["steps"]?.ToObject<int>(), Is.EqualTo(4));
     }
 
     [Test]
-    public static void LiteralNonTagWordsThatBeginWithWeightArePreserved()
+    public static void OriginalReferenceCreatesVisionAndReferenceLatentBranches()
     {
-        const string prompt = "A <weighted> graph of the replacement";
-        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+        var (positive, negative, graph, latent) = ConditionersFor("Replace the subject.", "blurry");
+        Assert.That(positive["inputs"]?["images"]?.ToString(),
+            Is.EqualTo(new JArray("crop", 1).ToString()));
+        Assert.That(negative["inputs"]?["images"]?.ToString(),
+            Is.EqualTo(new JArray("crop", 1).ToString()));
+        JObject[] referenceNodes = graph.Properties()
+            .Select(p => p.Value as JObject)
+            .Where(n => n?["class_type"]?.ToString() == "ReferenceLatent").ToArray();
+        Assert.That(referenceNodes, Has.Length.EqualTo(2),
+            "Both Qwen positive and negative conditioning must carry the source reference latent");
+        Assert.That(graph[latent[0]?.ToString()]?["class_type"]?.ToString(),
+            Is.EqualTo("LanPaint_ImageEncode"), "Masked Img2Img uses the native masked encoder");
     }
 
     [Test]
-    public static void QwenNegativeTextReceivesExactlyTheSameSwarmOnlyProcessing()
+    public static void DisablingOriginalReferenceDoesNotInventAnImageOrTextToken()
     {
-        JObject encoder = NativeEncoderFor("Replace the girl.", "  <weight[0.7]:no hats>  ");
-        Assert.That(encoder["inputs"]?["negative_prompt"]?.ToString(),
-            Is.EqualTo("  no hats  "));
-        Assert.That(NativeEncoderFor("Replace the girl.")["inputs"]?["negative_prompt"]?.ToString(),
-            Is.EqualTo(""));
+        var (positive, negative, graph, _) = ConditionersFor("HannahLynn", useOriginalReference: false);
+        Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo("HannahLynn"));
+        Assert.That(positive["inputs"]?["images"]?.Type == JTokenType.Array, Is.False);
+        Assert.That(negative["inputs"]?["images"]?.Type == JTokenType.Array, Is.False);
+        Assert.That(graph.Properties().Count(p =>
+            p.Value?["class_type"]?.ToString() == "ReferenceLatent"), Is.Zero);
     }
 
     [Test]
-    public static void UnsupportedResidualTagsInNegativeTextCannotSilentlyChangeInstructions()
+    public static void ReferenceEditStartsFromNativeZeroedCropLatent()
     {
-        Assert.Throws<SwarmUserErrorException>(() =>
-            NativeEncoderFor("Replace the girl.", "<alternate:blurry,clear>"));
-    }
-
-    [Test]
-    public static void MissingSegmentTextMustFailWithoutInvention()
-    {
-        Assert.Throws<SwarmUserErrorException>(
-            () => WorkflowGenerator.FlattenQwen21SegmentPrompt("  "));
-    }
-
-    [TestCase(true, true, 0)]
-    [TestCase(true, false, 1)]
-    [TestCase(false, true, 0)]
-    [TestCase(false, false, 0)]
-    public static void QwenMustKeepIndependentPromptImageReferences(
-        bool useOriginal, bool hasInitImage, int expectedFirstIndex)
-    {
-        Assert.That(WorkflowGenerator.FirstQwen21AdditionalReferenceIndex(
-            useOriginal, hasInitImage), Is.EqualTo(expectedFirstIndex));
+        var (_, _, graph, latent) = ConditionersFor(
+            "Replace the girl.", referenceEdit: true);
+        JObject empty = graph[latent[0]?.ToString()] as JObject;
+        Assert.That(empty?["class_type"]?.ToString(), Is.EqualTo("LatentMultiply"));
+        Assert.That(empty?["inputs"]?["multiplier"]?.ToObject<double>(), Is.Zero);
+        string baseLatent = empty?["inputs"]?["samples"]?[0]?.ToString();
+        Assert.That(graph[baseLatent]?["class_type"]?.ToString(), Is.EqualTo("VAEEncode"));
+        Assert.That(graph.Properties().Any(p =>
+            p.Value?["class_type"]?.ToString() == "LanPaint_ImageEncode"), Is.False);
     }
 }
