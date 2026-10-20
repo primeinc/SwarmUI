@@ -2913,6 +2913,24 @@ public partial class WorkflowGenerator
                     }
                 }
             }
+            else if (UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none"
+                && ShouldUseQwen21AutomaticReference())
+            {
+                // The ordinary Init Image edit path attaches its source image
+                // as a ReferenceLatent during sampling. Give that *same image*
+                // to Qwen's vision tokenizer, rather than silently making a
+                // text-only instruction paired with a hidden VAE reference.
+                // Base-image initialization runs before positive/negative
+                // text generation, so these source nodes already exist.
+                if (MaskShrunkInfo?.ScaledImage is not null)
+                {
+                    inputs["images"] = NodePath(MaskShrunkInfo.ScaledImage, 0);
+                }
+                else if (BasicInputImage is not null)
+                {
+                    inputs["images"] = BasicInputImage.Path;
+                }
+            }
             node = CreateNode("SwarmTextEncodeAdvanced", inputs, id);
         }
         else if (IsMingImage() && isPositive)
