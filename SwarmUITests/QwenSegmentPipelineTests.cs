@@ -214,6 +214,40 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
     }
 
+
+    [Test]
+    public void SegmentScopedLoraIsAppliedBeforeTorchCompile()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.TorchCompile, "inductor");
+        g.LoadingModel = new JArray("base-model", 0);
+        g.LoadingClip = new JArray("base-clip", 0);
+        g.LoadingModelType = "Base";
+        g.LoadingAdditionalLoraConfinement = 11;
+
+        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -10).Action(g);
+        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -3).Action(g);
+
+        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
+        JProperty compile = Nodes(g, "TorchCompileModel").Single();
+        Assert.That(compile.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
+            "Scoped Qwen LoRA must be inside the compiled model graph, matching global LoRA ordering.");
+    }
+
+    [Test]
+    public void ReferenceEditAnchorsOnPlainCropLatentAndRespectsCreativity()
+    {
+        WorkflowGenerator g = Prepare(creativity: 0.8);
+        RunSegment(g);
+
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        string latentNodeId = sampler.Value["inputs"]!["latent_image"]![0]!.Value<string>()!;
+        JToken latentNode = g.Workflow[latentNodeId]!;
+        Assert.That(latentNode["class_type"]!.Value<string>(), Is.EqualTo("VAEEncode"));
+        Assert.That(latentNode["inputs"]!["pixels"], Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
+        Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.EqualTo(4));
+    }
+
     [Test]
     public void KreaKeepsItsExistingSegmentPath()
     {
