@@ -32,7 +32,7 @@ jobs:
         - name: Validate live acceptance test syntax (NOT inference)
           run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
-          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmMasks.py tests/test_qwen_segment_mask_guard.py
+          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmMasks.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmLatents.py tests/test_qwen_segment_mask_guard.py
         - name: Validate browser JS syntax (NOT browser execution)
           run: node --check src/wwwroot/js/genpage/gentab/loras.js
 
@@ -49,6 +49,8 @@ jobs:
           run: |
             python3 -m pip install 'numpy<3' pillow scipy
             python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - name: Run native Qwen Image 2.1 64-channel empty-latent tensor controls (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen21_empty_latent_cpu.py -v
         - name: Run shipped Swarm prompt tag parser CPU controls
           run: python3 -m unittest discover -s tests -p test_qwen_swarm_prompt_parser_cpu.py -v
         - name: Verify Qwen native empty-text tokenizer dispatch on CPU
