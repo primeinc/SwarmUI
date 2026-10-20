@@ -82,6 +82,24 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         self.assertFalse(summary["runtime_node_registration_verified"])
         self.assertFalse(summary["native_schema_completeness_verified"])
 
+    def test_unrelated_empty_global_negatives_are_not_mistaken_for_segment(self):
+        graph = native_contract_fixture()
+        graph["global_negative_a"] = {
+            "class_type": "SwarmTextEncodeAdvanced",
+            "inputs": {"clip": ["clip", 0], "prompt": "", "images": None},
+        }
+        graph["global_negative_b"] = {
+            "class_type": "SwarmTextEncodeAdvanced",
+            "inputs": {"clip": ["clip", 0], "prompt": "", "images": ["source", 0]},
+        }
+        _, spec = probe.inspect_and_instrument(graph)
+        self.assertEqual(spec["encoder"], "condition")
+        # The same graph must fail if the real negative loses the precise crop
+        # reference even though unrelated global negatives still exist.
+        graph["negative"]["inputs"]["images"] = ["source", 0]
+        with self.assertRaisesRegex(AssertionError, "negative conditioning"):
+            probe.inspect_and_instrument(graph)
+
     def test_detector_mask_must_reach_native_crop_through_guard_and_threshold(self):
         graph = native_contract_fixture()
         graph["crop"]["inputs"]["mask"] = ["detector", 0]
