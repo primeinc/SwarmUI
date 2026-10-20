@@ -1933,8 +1933,9 @@ public class WorkflowGeneratorSteps
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
                     bool nativeQwenSegment = g.IsQwenImage21();
                     string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
-                    // Qwen 2.1 Reference Edit regenerates from a fresh latent and does not use a denoise mask.
-                    // DifferentialDiffusion only has meaning for the masked partial-denoise mode.
+                    // Qwen 2.1 Reference Edit samples the plain crop VAE latent and relies on the
+                    // final pixel-space segment mask for confinement. DifferentialDiffusion only
+                    // has meaning for the masked partial-denoise mode.
                     if (!nativeQwenSegment || qwenSegmentMode != "Reference Edit")
                     {
                         g.EnableDifferential();
