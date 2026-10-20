@@ -31,7 +31,37 @@ public partial class WorkflowGenerator
         {
             if (registeredTag.Equals("weight", StringComparison.OrdinalIgnoreCase))
             {
-                continue; // This one may be flattened without changing its words.
+                // The request parser rejects nonnumeric weight metadata but leaves
+                // the original tag in place. The length estimator would nevertheless
+                // strip that malformed tag, silently changing the author's text.
+                // Validate EVERY residual weight occurrence before using it.
+                const string weightMarker = "<weight";
+                int weightScan = 0;
+                while ((weightScan = raw.IndexOf(weightMarker, weightScan, StringComparison.OrdinalIgnoreCase)) >= 0)
+                {
+                    int boundary = weightScan + weightMarker.Length;
+                    if (boundary >= raw.Length || raw[boundary] is not (':' or '[' or '>'))
+                    {
+                        weightScan = boundary; // eg literal <weighted> is not a Swarm weight tag
+                        continue;
+                    }
+                    int close = raw[boundary] == '[' ? raw.IndexOf(']', boundary + 1) : -1;
+                    bool isValid = raw[weightScan..boundary] == weightMarker
+                        && close > boundary + 1
+                        && close + 1 < raw.Length
+                        && raw[close + 1] == ':'
+                        && double.TryParse(raw[(boundary + 1)..close].Trim(), out double weight)
+                        && double.IsFinite(weight);
+                    if (!isValid)
+                    {
+                        throw new SwarmUserErrorException(
+                            "Qwen segment has a malformed residual Swarm weight tag. " +
+                            "Only numeric <weight[number]:text> tags can be flattened; " +
+                            "the authored prompt has not been reinterpreted.");
+                    }
+                    weightScan = close + 2;
+                }
+                continue; // Valid numeric weights can be flattened without changing the words.
             }
             string marker = "<" + registeredTag;
             int scan = 0;
