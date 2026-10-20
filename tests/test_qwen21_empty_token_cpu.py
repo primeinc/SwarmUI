@@ -44,8 +44,9 @@ class Parsed:
                                 embed=None, is_break=False)]
 
 
-def real_shipped_encoder():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+def real_shipped_encoder(source_override=None):
+    source = SOURCE.read_text(encoding="utf-8") if source_override is None else source_override
+    tree = ast.parse(source, filename=str(SOURCE))
     klass = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                  and node.name == "SwarmTextEncodeAdvanced")
 
@@ -81,6 +82,19 @@ class QwenNativeEmptyTextTokenizationTests(unittest.TestCase):
         calls = self.encode("", True)
         self.assertTrue(any(text == "" and kw.get("prevent_empty_text") is True
                             for text, kw in calls), calls)
+
+    def test_native_empty_negative_gate_rejects_removed_forwarding(self):
+        original = SOURCE.read_text(encoding="utf-8")
+        needle = 'tokenize_kwargs["prevent_empty_text"] = True'
+        self.assertIn(needle, original)
+        mutant = original.replace(needle, 'tokenize_kwargs.pop("prevent_empty_text", None)', 1)
+        clip = ClipProbe()
+        real_shipped_encoder(mutant).encode(
+            clip, steps=4, prompt="", width=64, height=64,
+            target_width=64, target_height=64, qwen21_prevent_empty_text=True)
+        with self.assertRaises(AssertionError):
+            self.assertTrue(any(text == "" and kw.get("prevent_empty_text") is True
+                                for text, kw in clip.calls))
 
     def test_regular_encoder_does_not_change_empty_prompt_tokenization(self):
         calls = self.encode("", False)
