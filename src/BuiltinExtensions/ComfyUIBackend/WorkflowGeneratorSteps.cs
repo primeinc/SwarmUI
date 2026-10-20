@@ -2201,7 +2201,15 @@ public class WorkflowGeneratorSteps
                         negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
                     }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
-                    double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
+                    // ComfyUI's Qwen Image 2.1 image-edit template publishes CFG=1.
+                    // Swarm's generic CFG default is 7 (degrades Qwen severely).
+                    // Honor explicit section/segment CFG overrides; never inherit
+                    // generic SD/SDXL defaults for Qwen segmented edits.
+                    double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false)
+                        ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID)
+                        ?? (nativeQwenSegment ? 1.0 :
+                            g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID)
+                            ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID));
                     WGNodeData beforeImage = g.CurrentMedia;
                     // Diagnostic images must never become additional user-visible
                     // generation results unless intermediates were requested.
@@ -2224,7 +2232,8 @@ public class WorkflowGeneratorSteps
                             $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 " +
                             $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
-                            $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
+                            $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} " +
+                            $"requested_creativity={part.Strength2:0.####} sampler_denoise={(qwenSegmentMode == "Reference Edit" ? 1.0 : part.Strength2):0.####} seed={seed} cfg={cfg:0.####} " +
                             $"trace_images={traceQwen}");
                         if (traceQwen)
                         {
@@ -2263,7 +2272,11 @@ public class WorkflowGeneratorSteps
                             ["positive"] = prompt,
                             ["negative"] = negPrompt,
                             ["latent_image"] = segmentLatent,
-                            ["denoise"] = part.Strength2
+                            // Qwen native output 2 is an EMPTY latent. It must run
+                            // the full native noise schedule (denoise=1), not a
+                            // truncated img2img schedule on zero-filled latents.
+                            // Masked Img2Img does use the requested creativity.
+                            ["denoise"] = qwenSegmentMode == "Reference Edit" ? 1.0 : part.Strength2
                         };
                         if (qwenSegmentMode == "Reference Edit")
                         {

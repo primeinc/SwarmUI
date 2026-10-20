@@ -156,8 +156,13 @@ def inspect_and_instrument(original):
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", -1))
     denoise = float(sampler.get("denoise", -1))
-    if steps != 4 or abs(denoise - 0.8) > 1e-4 or "start_at_step" in sampler:
-        raise AssertionError(f"Native four-pass schedule broken: steps={steps}, denoise={denoise}")
+    # The native Qwen edit encoder emits a ZERO-FILLED latent. Reference Edit
+    # requires a full schedule, unlike masked LanPaint image-to-image.
+    cfg = float(sampler.get("cfg", -1))
+    if steps != 4 or abs(denoise - 1.0) > 1e-4 or "start_at_step" in sampler:
+        raise AssertionError(f"Native Qwen empty-latent schedule broken: steps={steps}, denoise={denoise}")
+    if abs(cfg - 1.0) > 1e-4:
+        raise AssertionError(f"Native Qwen default CFG must be 1.0, got {cfg}; the generic CFG 7 degrades Qwen 2.1")
 
     stitch_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "InpaintStitchImproved"],
@@ -213,7 +218,7 @@ def inspect_and_instrument(original):
         "mode": "Reference Edit", "sampler_class": "KSampler",
         "sampler_latent_source": [enc_id, 2],
         "steps": steps, "native_denoise": denoise, "effective_steps": steps,
-        "expected_iterations": 4, "creativity": denoise,
+        "expected_iterations": 4, "requested_creativity": 0.8, "cfg": cfg,
         "clipseg_threshold": 0.1,
         "mask_used_definition": "adapter output 2 (cropped mask), not inaccessible private stitcher blend",
     }
