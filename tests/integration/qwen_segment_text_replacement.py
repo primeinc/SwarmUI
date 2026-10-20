@@ -363,15 +363,29 @@ def validate_runtime_node_contracts(base_url, graph):
                     f"Selected Comfy backend has obsolete SwarmTextEncodeAdvanced "
                     f"node: missing image sockets {missing_images} in /object_info. "
                     "Update SwarmText.py on this backend and refresh its schema.")
+            for name in node["inputs"]:
+                if (name.startswith("image_") and name[6:].isdigit()
+                        and name in known_sockets):
+                    definition = schema_inputs.get("required", {}).get(
+                        name, schema_inputs.get("optional", {}).get(name))
+                    if not isinstance(definition, list) or not definition or definition[0] != "IMAGE":
+                        raise AssertionError(
+                            f"Selected Comfy backend declares {name} as a non-IMAGE socket")
             # Qwen 2.1's native text node uses prevent_empty_text=True for
             # BOTH conditionings. The Swarm adapter exposes this as an explicit
             # optional node input, which older backends silently lack.
-            if (node["inputs"].get("qwen21_prevent_empty_text") is not None
-                    and "qwen21_prevent_empty_text" not in known_sockets):
-                raise AssertionError(
-                    "Selected Comfy backend has obsolete SwarmTextEncodeAdvanced: "
-                    "missing qwen21_prevent_empty_text socket in /object_info. "
-                    "Update SwarmText.py on this backend and refresh its schema.")
+            if node["inputs"].get("qwen21_prevent_empty_text") is not None:
+                if "qwen21_prevent_empty_text" not in known_sockets:
+                    raise AssertionError(
+                        "Selected Comfy backend has obsolete SwarmTextEncodeAdvanced: "
+                        "missing qwen21_prevent_empty_text socket in /object_info. "
+                        "Update SwarmText.py on this backend and refresh its schema.")
+                definition = schema_inputs.get("optional", {}).get(
+                    "qwen21_prevent_empty_text",
+                    schema_inputs.get("required", {}).get("qwen21_prevent_empty_text"))
+                if not isinstance(definition, list) or not definition or definition[0] != "BOOLEAN":
+                    raise AssertionError(
+                        "Selected Comfy backend must declare qwen21_prevent_empty_text as BOOLEAN")
     return schemas
 
 
