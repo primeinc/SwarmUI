@@ -14,7 +14,15 @@ namespace SwarmUITests;
 public class Qwen21EmptyLatentTests : SwarmUITest
 {
     [OneTimeSetUp]
-    public static void PreInit() => Setup();
+    public static void PreInit()
+    {
+        Setup();
+        // The isolated graph fixture does not initialize the Comfy backend
+        // extension; register the one typed parameter the native reference
+        // encoder reads. The real application registers it on startup.
+        ComfyUIBackendExtension.TextEncodedImage ??= T2IParamTypes.Register<string>(
+            new("Qwen text image sizing", "Test-only Comfy text reference control", "auto"));
+    }
 
     [TestCase(1024, 768, 2)]
     [TestCase(1024, 1024, 1)]
