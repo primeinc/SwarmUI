@@ -418,6 +418,30 @@ public partial class WorkflowGenerator
         return path is null ? "" : $"{path[0]}:{path[1]}";
     }
 
+    /// <summary>Whether a non-dynamic LoRA is statically confined to the given prompt section.</summary>
+    public bool HasLorasForConfinement(int confinement)
+    {
+        if (confinement <= 0 || !UserInput.TryGet(T2IParamTypes.Loras, out List<string> loras))
+        {
+            return false;
+        }
+        List<string> confinements = UserInput.Get(T2IParamTypes.LoraSectionConfinement);
+        if (confinements is null)
+        {
+            return false;
+        }
+        for (int i = 0; i < loras.Count && i < confinements.Count; i++)
+        {
+            if (!UserInput.DynamicLoraIndices.Contains(i)
+                && int.TryParse(confinements[i], out int confinementId)
+                && confinementId == confinement)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Applies a section-confined LoRA at the same model-chain point used by normal/global LoRAs,
     /// then recreates the exact existing model wrappers around that variant.
