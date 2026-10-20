@@ -163,6 +163,9 @@ public partial class WorkflowGenerator
     /// <summary>Type id ('Base', 'Refiner') of the current loading model.</summary>
     public string LoadingModelType;
 
+    /// <summary>Optional extra LoRA confinement to apply while the model is still in its load pipeline.</summary>
+    public int LoadingAdditionalLoraConfinement = 0;
+
     /// <summary>If true, user-selected VAE may be wrong, so ignore it.</summary>
     public bool NoVAEOverride = false;
 
@@ -405,6 +408,30 @@ public partial class WorkflowGenerator
         }
         DynamicLoraHooks = last;
         return DynamicLoraHooks;
+    }
+
+    /// <summary>Whether a non-dynamic LoRA is statically confined to the given prompt section.</summary>
+    public bool HasLorasForConfinement(int confinement)
+    {
+        if (confinement <= 0 || !UserInput.TryGet(T2IParamTypes.Loras, out List<string> loras))
+        {
+            return false;
+        }
+        List<string> confinements = UserInput.Get(T2IParamTypes.LoraSectionConfinement);
+        if (confinements is null)
+        {
+            return false;
+        }
+        for (int i = 0; i < loras.Count && i < confinements.Count; i++)
+        {
+            if (!UserInput.DynamicLoraIndices.Contains(i)
+                && int.TryParse(confinements[i], out int confinementId)
+                && confinementId == confinement)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>Loads and applies LoRAs in the user parameters for the given LoRA confinement ID.</summary>
