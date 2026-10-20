@@ -187,10 +187,13 @@ def main(argv=None):
     for i in range(args.attempts):
         instance = copy.deepcopy(graph)
         sampler = instance[spec["sampler"]]["inputs"]
-        original_seed = sampler.get("seed")
+        # SwarmKSampler.INPUT_TYPES names the seed noise_seed; native
+        # KSampler uses seed. Inspect the real node, never invent a value.
+        seed_key = "noise_seed" if instance[spec["sampler"]]["class_type"] == "SwarmKSampler" else "seed"
+        original_seed = sampler.get(seed_key)
         if not isinstance(original_seed, int):
-            raise AssertionError(f"Segment sampler does not contain a real integer seed: {original_seed!r}")
-        sampler["seed"] = original_seed + i
+            raise AssertionError(f"Segment sampler does not contain integer {seed_key}: {original_seed!r}")
+        sampler[seed_key] = original_seed + i
         queued = actual_comfy.fetch_json(
             args.comfy_url, "prompt",
             {"prompt": instance, "client_id": str(uuid.uuid4())},
@@ -213,7 +216,7 @@ def main(argv=None):
                    "FINAL_COMPOSITE_UNCHANGED" if composite_change < 1.0 else
                    "IMAGE_CHANGED_SEMANTIC_REVIEW_REQUIRED")
         result = {
-            "attempt": i+1, "segment_seed": sampler["seed"], "prompt_id": pid,
+            "attempt": i+1, "segment_seed": sampler[seed_key], "prompt_id": pid,
             "mask_fraction_above_5_percent": mask_coverage,
             "crop_mean_absolute_rgb_difference": crop_change,
             "final_mean_absolute_rgb_difference": composite_change,
