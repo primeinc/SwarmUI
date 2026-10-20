@@ -34,6 +34,44 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
 
     public HashSet<string> NodeTypes = [];
 
+    /// <summary>
+    /// Validate against this exact backend's /object_info node inventory before
+    /// submitting a native Qwen segmented-edit workflow. Globally advertised
+    /// extension features can come from a DIFFERENT backend, particularly an
+    /// external API-by-URL Comfy instance with no bundled nodes installed.
+    /// Ordinary/non-Qwen generation is not affected.
+    /// </summary>
+    public static void ValidateNativeQwenSegmentNodes(JObject workflow, IReadOnlySet<string> availableNodeTypes)
+    {
+        string[] usedTypes = [.. workflow.Properties()
+            .Select(property => property.Value?["class_type"]?.ToString())
+            .Where(name => !string.IsNullOrWhiteSpace(name))];
+        if (!usedTypes.Contains("InpaintCropImproved"))
+        {
+            return;
+        }
+        HashSet<string> nativeSegmentNodes = [
+            "TextEncodeQwenImage21", "SwarmClipSeg", "SwarmYoloDetection",
+            "SwarmRequireNonEmptyMask", "ThresholdMask",
+            "InpaintCropImproved", "InpaintStitchImproved",
+            "LanPaint_ImageEncode", "LanPaint_KSampler",
+            "LanPaint_ImageDecode", "SplitImageWithAlpha"
+        ];
+        string[] missing = [.. usedTypes
+            .Where(type => nativeSegmentNodes.Contains(type)
+                && (availableNodeTypes is null || !availableNodeTypes.Contains(type)))
+            .Distinct()
+            .OrderBy(type => type)];
+        if (missing.Length > 0)
+        {
+            throw new SwarmUserErrorException(
+                "The selected ComfyUI backend does not have the required Qwen segmented-edit nodes registered: " +
+                string.Join(", ", missing) +
+                ". Install/enable those node packages on THIS backend and refresh its /object_info. " +
+                "Other ComfyUI backends advertising the feature do not make these nodes available here.");
+        }
+    }
+
     public string ModelFolderFormat = null;
 
     public class ReusableSocket
@@ -994,6 +1032,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             return workflow;
         }
         string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+        ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
         try
         {
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);
