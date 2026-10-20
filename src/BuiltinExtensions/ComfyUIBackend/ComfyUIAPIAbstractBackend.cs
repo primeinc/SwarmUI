@@ -972,6 +972,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             && generatedGraph.Properties().Any(p => p.Value["class_type"]?.ToString() == "InpaintCropImproved");
     }
 
+    /// <summary>
+    /// Parse raw Comfy workflow node types without uploading referenced files.
+    /// Raw placeholders may intentionally be unquoted until CreateWorkflow
+    /// substitutes their values; the same inert-null preprocessing is used by
+    /// TryIsValid when deciding whether a custom workflow fits a backend.
+    /// </summary>
+    public static void PreflightRawQwenSegmentNodes(string rawWorkflow, IReadOnlySet<string> availableNodeTypes)
+    {
+        string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
+            rawWorkflow, "${", "}", _ => "null");
+        ValidateNativeQwenSegmentNodes(JObject.Parse(structuralGraph), availableNodeTypes);
+    }
+
     public volatile int ImageIDDedup = 0;
 
     /// <summary>Returns true if the file will be deleted properly (and ID should not be reused as it may conflict), or false if it can't be deleted (and thus the ID should be reused to reduce amount of images getting stored).</summary>
@@ -1067,12 +1080,12 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 && !user_input.Get(T2IParamTypes.ControlNetPreviewOnly);
             if (hasRawWorkflow)
             {
-                // /object_info registration depends on class_type, not the
-                // expanded input placeholders. Parse and preflight the raw
-                // JSON BEFORE initImageFixer can upload any remote images.
-                // Invalid JSON must fail before side effects as well.
+                // Raw workflow macros can be unquoted JSON placeholders.
+                // Validate the fixed class_type inventory before upload,
+                // replacing placeholders with inert JSON nulls for parsing.
+                // The expanded graph is validated again after generation.
                 string rawGraph = GetRawWorkflowFrom(user_input);
-                ValidateNativeQwenSegmentNodes(JObject.Parse(rawGraph), NodeTypes);
+                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes);
                 workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
                 ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
             }
