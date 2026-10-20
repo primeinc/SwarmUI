@@ -2110,7 +2110,7 @@ public class WorkflowGeneratorSteps
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
-                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: g.IsQwenImage21());
+                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: g.IsQwenImage21(), keepSoftMask: g.IsQwenImage21());
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }
