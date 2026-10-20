@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -9,10 +10,9 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
-    /// Reference Edit follows the same edit-stage sampler contract used by the working Base2Edit
-    /// implementation: native-style Qwen conditioning plus a plain VAE encoding of the crop,
-    /// with edit strength expressed through start_at_step.
+    /// Qwen Image 2.1 segments reuse Swarm's ordinary text-conditioning path for LoRAs,
+    /// or ComfyUI's native TextEncodeQwenImage21 for genuine image references.
+    /// Only the segment crop / sampling schedule belongs to this helper.
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
@@ -29,91 +29,104 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException($"Unknown Qwen Image 2.1 segment sampling mode '{mode}'.");
         }
 
-        bool useOriginalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
-        JObject encoderInputs = new()
+        // A confined model LoRA must be encoded with the same Swarm/CLIP route that
+        // already works in ordinary generation. A source-image reference can overwhelm
+        // an identity edit, so only text-only segments add the crop automatically.
+        bool confinedLora = HasLorasForConfinement(sectionId);
+        bool dynamicLora = UserInput.DynamicLoraIndices.Count > 0;
+        bool originalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
+        List<JArray> references = [];
+        if (originalReference && !confinedLora && !dynamicLora)
         {
-            ["clip"] = clip.Path,
-            ["vae"] = vae.Path,
-            ["image"] = NodePath(crop.ScaledImage, 0),
-            ["prompt"] = prompt ?? "",
-            ["negative_prompt"] = negativePrompt ?? "",
-            ["use_original_reference"] = useOriginalReference,
-            ["steps"] = steps,
-            ["lora_hooks"] = CreateDynamicLoraHooks()
-        };
-        // Match WGNodeData.EncodeToLatent's VAE tiling contract for reference images.
-        // The source crop and each optional reference use the same encoding mode.
-        if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
-        {
-            encoderInputs["reference_tile_size"] = UserInput.Get(T2IParamTypes.VAETileSize, 256);
-            encoderInputs["reference_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETileOverlap, 64);
-            encoderInputs["reference_temporal_tile_size"] = UserInput.Get(T2IParamTypes.VAETemporalTileSize, 32);
-            encoderInputs["reference_temporal_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETemporalTileOverlap, 4);
+            references.Add(NodePath(crop.ScaledImage, 0));
         }
-        // Qwen supports sixteen individual references; the segment crop consumes one
-        // when enabled. Keep every optional prompt image in its own native vision slot.
-        if (UserInput.TryGet(T2IParamTypes.PromptImages, out System.Collections.Generic.List<Image> referenceImages)
+        if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            int maxPromptImages = useOriginalReference ? 15 : 16;
-            if (referenceImages.Count > maxPromptImages)
+            if (dynamicLora && images.Count > 0)
             {
-                throw new SwarmUserErrorException($"Qwen Image 2.1 segment accepts at most {maxPromptImages} Prompt Images with the current Original Reference setting; got {referenceImages.Count}.");
+                throw new SwarmUserErrorException("Native Qwen Image 2.1 reference conditioning cannot apply Swarm's scheduled dynamic LoRA hooks. Disable Prompt Images for that segment or use a static LoRA.");
             }
-            for (int i = 0; i < referenceImages.Count; i++)
+            if (references.Count + images.Count > 16)
             {
-                JArray referenceImage = GetPromptImage(true, true, i);
-                if (referenceImage is not null)
+                throw new SwarmUserErrorException($"Qwen Image 2.1 supports at most sixteen reference images; got {references.Count + images.Count}.");
+            }
+            for (int i = 0; i < images.Count; i++)
+            {
+                JArray reference = GetPromptImage(true, true, i);
+                if (reference is not null)
                 {
-                    encoderInputs[$"image_{i + 1}"] = referenceImage;
+                    references.Add(reference);
                 }
             }
         }
-        string encoder = CreateNode("SwarmQwenImage21SegmentEncode", encoderInputs);
 
-        int startStep = (int)Math.Round(steps * (1 - creativity));
-        JArray latent;
-        if (mode == "Reference Edit")
+        JArray positive;
+        JArray negative;
+        if (references.Count == 0)
         {
-            // Base2Edit's working Qwen 2.1 edit path samples from the current image latent.
-            // Do not use the encoder's fresh/noise latent here, and do not attach the segment
-            // mask to this latent; the existing pixel-space composite confines the final paste.
-            string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
-            latent = NodePath(encodedCrop, 0);
+            // Exactly the ordinary Qwen LoRA/dynamic-hook/prompt-tag conditioner.
+            positive = CreateConditioning(prompt ?? "", clip.Path, FinalLoadedModel, true, steps: steps);
+            negative = CreateConditioning(negativePrompt ?? "", clip.Path, FinalLoadedModel, false, steps: steps);
         }
         else
         {
-            latent = NodePath(crop.MaskedLatent, 0);
+            if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
+            {
+                throw new SwarmUserErrorException("ComfyUI's native TextEncodeQwenImage21 node does not expose tiled reference VAE encoding. Disable VAE tiling for referenced Qwen segments.");
+            }
+            if ((prompt ?? "").Contains('<') || (negativePrompt ?? "").Contains('<'))
+            {
+                throw new SwarmUserErrorException("ComfyUI's native TextEncodeQwenImage21 does not parse Swarm's advanced prompt tags with image references. Use a plain referenced segment prompt, or turn off Original Reference.");
+            }
+
+            JObject native = new()
+            {
+                ["clip"] = clip.Path,
+                ["vae"] = vae.Path,
+                ["prompt"] = prompt ?? "",
+                ["negative_prompt"] = negativePrompt ?? "",
+                ["resolution"] = 0 // Native Qwen preserves the actual crop/reference geometry.
+            };
+            for (int i = 0; i < references.Count; i++)
+            {
+                native[$"images.image_{i + 1}"] = references[i];
+            }
+            string encoder = CreateNode("TextEncodeQwenImage21", native);
+            positive = NodePath(encoder, 0);
+            negative = NodePath(encoder, 1);
+            // The ordinary conditioner already applies these modifiers in the
+            // no-reference case. Apply the same existing Comfy nodes here.
+            if (UserInput.TryGet(T2IParamTypes.ConditioningMultiplier, out double posMult) && posMult != 1)
+            {
+                positive = NodePath(CreateNode("ConditioningMultiply", new JObject()
+                {
+                    ["conditioning"] = positive,
+                    ["multiplier"] = posMult
+                }), 0);
+            }
+            if (UserInput.TryGet(T2IParamTypes.NegativeConditioningMultiplier, out double negMult) && negMult != 1)
+            {
+                negative = NodePath(CreateNode("ConditioningMultiply", new JObject()
+                {
+                    ["conditioning"] = negative,
+                    ["multiplier"] = negMult
+                }), 0);
+            }
+            if (string.IsNullOrWhiteSpace(negativePrompt) && ShouldZeroNegative())
+            {
+                negative = NodePath(CreateNode("ConditioningZeroOut", new JObject()
+                {
+                    ["conditioning"] = negative
+                }), 0);
+            }
         }
 
-        JArray positive = NodePath(encoder, 0);
-        JArray negative = NodePath(encoder, 1);
-        // Match the standard CreateConditioningDirect / CreateConditioning post-processing.
-        if (UserInput.TryGet(T2IParamTypes.ConditioningMultiplier, out double positiveMultiplier) && positiveMultiplier != 1)
-        {
-            positive = NodePath(CreateNode("ConditioningMultiply", new JObject()
-            {
-                ["conditioning"] = positive,
-                ["multiplier"] = positiveMultiplier
-            }), 0);
-        }
-        if (UserInput.TryGet(T2IParamTypes.NegativeConditioningMultiplier, out double negativeMultiplier) && negativeMultiplier != 1)
-        {
-            negative = NodePath(CreateNode("ConditioningMultiply", new JObject()
-            {
-                ["conditioning"] = negative,
-                ["multiplier"] = negativeMultiplier
-            }), 0);
-        }
-        if (string.IsNullOrWhiteSpace(negativePrompt) && ShouldZeroNegative())
-        {
-            negative = NodePath(CreateNode("ConditioningZeroOut", new JObject()
-            {
-                ["conditioning"] = negative
-            }), 0);
-        }
-
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} original_reference={useOriginalReference} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
+        JArray latent = mode == "Reference Edit"
+            ? NodePath(CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0)), 0)
+            : NodePath(crop.MaskedLatent, 0);
+        int startStep = (int)Math.Round(steps * (1 - creativity));
+        Logs.Info($"[QWEN21-SEG] conditioning section={sectionId} mode='{mode}' source={(references.Count == 0 ? "SwarmTextEncodeAdvanced" : "TextEncodeQwenImage21")} references={references.Count} scoped_lora={confinedLora} start={startStep}");
         return (positive, negative, latent, startStep);
     }
 }
