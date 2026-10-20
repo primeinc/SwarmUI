@@ -10,9 +10,9 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Qwen Image 2.1 segments reuse Swarm's ordinary text-conditioning path for LoRAs,
-    /// or ComfyUI's native TextEncodeQwenImage21 for genuine image references.
-    /// Only the segment crop / sampling schedule belongs to this helper.
+    /// Reuses the same Qwen 2.1 text/image encoding and reference-latent plumbing
+    /// as a working non-segmented edit. Only the image source (the masked crop)
+    /// and the number of effective denoising passes are segment-specific.
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int SamplerSteps, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
@@ -22,123 +22,82 @@ public partial class WorkflowGenerator
         {
             throw new SwarmUserErrorException("Qwen Image 2.1 segment is missing its scaled crop, text encoder, or VAE.");
         }
-
         string mode = UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: sectionId);
         if (mode != "Reference Edit" && mode != "Masked Img2Img")
         {
             throw new SwarmUserErrorException($"Unknown Qwen Image 2.1 segment sampling mode '{mode}'.");
         }
 
-        // A static UNET LoRA changes the model, not whether its text encoder
-        // receives the source image. Do not silently strip references just
-        // because a LoRA is confined to this segment.
-        bool confinedLora = HasLorasForConfinement(sectionId);
-        bool dynamicLora = UserInput.DynamicLoraIndices.Count > 0;
+        // The first Prompt Image is the original full image being edited. When
+        // using the source crop, substitute it into that slot instead of adding
+        // the full-image reference AGAIN, which conflicts with a local replace.
         bool originalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         List<JArray> references = [];
-        if (originalReference && !dynamicLora)
+        if (originalReference)
         {
             references.Add(NodePath(crop.ScaledImage, 0));
         }
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            if (references.Count + images.Count > 16)
+            int firstExtra = originalReference ? 1 : 0;
+            if (references.Count + images.Count - firstExtra > 16)
             {
-                throw new SwarmUserErrorException($"Qwen Image 2.1 supports at most sixteen reference images; got {references.Count + images.Count}.");
+                throw new SwarmUserErrorException("Qwen Image 2.1 supports at most sixteen reference images.");
             }
-            for (int i = 0; i < images.Count; i++)
+            for (int i = firstExtra; i < images.Count; i++)
             {
-                JArray reference = GetPromptImage(true, true, i);
-                if (reference is not null)
+                JArray image = GetPromptImage(true, true, i);
+                if (image is not null)
                 {
-                    references.Add(reference);
+                    references.Add(image);
                 }
             }
         }
 
-        JArray positive;
-        JArray negative;
-        if (dynamicLora || references.Count == 0)
+        // SwarmTextEncodeAdvanced is the same encoder used outside segments, and
+        // already supports Qwen vision tokens, prompt tags and dynamic LoRA hooks.
+        // ImageBatch is the same multi-image combiner the ordinary Qwen path uses.
+        JArray visionImage = null;
+        foreach (JArray reference in references)
         {
-            // Use the SAME conditioning path as an ordinary Qwen image edit when
-            // scheduled LoRA hooks are present, rather than reimplementing hooks.
-            positive = CreateConditioning(prompt ?? "", clip.Path, FinalLoadedModel, true, steps: steps);
-            negative = CreateConditioning(negativePrompt ?? "", clip.Path, FinalLoadedModel, false, steps: steps);
-            // The ordinary sampling path attaches VAE reference latents using
-            // BuildInputImageHandling. Reuse it for the segment source as well.
-            if (originalReference)
+            if (visionImage is null)
             {
-                (positive, negative) = WithSegmentSamplingVae(vae, () =>
+                visionImage = reference;
+            }
+            else
+            {
+                string batch = CreateNode("ImageBatch", new JObject()
                 {
-                    (JArray p, JArray n, _, _) = BuildInputImageHandling(
-                        [NodePath(crop.ScaledImage, 0)], positive, negative, NodePath(crop.MaskedLatent, 0));
-                    return (p, n);
+                    ["image1"] = visionImage,
+                    ["image2"] = reference
                 });
+                visionImage = NodePath(batch, 0);
             }
         }
-        else
+        JArray positive = CreateConditioning(prompt ?? "", clip.Path, FinalLoadedModel, true,
+            attachImages: visionImage, steps: steps);
+        JArray negative = CreateConditioning(negativePrompt ?? "", clip.Path, FinalLoadedModel, false,
+            attachImages: visionImage, steps: steps);
+        if (references.Count > 0)
         {
-            if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
+            // Attach precisely the same VAE reference latents as normal Qwen
+            // sampling. Qwen consumes them on BOTH positive and negative paths.
+            (positive, negative) = WithSegmentSamplingVae(vae, () =>
             {
-                throw new SwarmUserErrorException("ComfyUI's native TextEncodeQwenImage21 node does not expose tiled reference VAE encoding. Disable VAE tiling for referenced Qwen segments.");
-            }
-            if ((prompt ?? "").Contains('<') || (negativePrompt ?? "").Contains('<'))
-            {
-                throw new SwarmUserErrorException("ComfyUI's native TextEncodeQwenImage21 does not parse Swarm's advanced prompt tags with image references. Use a plain referenced segment prompt, or turn off Original Reference.");
-            }
-
-            JObject native = new()
-            {
-                ["clip"] = clip.Path,
-                ["vae"] = vae.Path,
-                ["prompt"] = prompt ?? "",
-                ["negative_prompt"] = negativePrompt ?? "",
-                ["resolution"] = 0 // Native Qwen preserves the actual crop/reference geometry.
-            };
-            for (int i = 0; i < references.Count; i++)
-            {
-                native[$"images.image_{i + 1}"] = references[i];
-            }
-            string encoder = CreateNode("TextEncodeQwenImage21", native);
-            positive = NodePath(encoder, 0);
-            negative = NodePath(encoder, 1);
-            // The ordinary conditioner already applies these modifiers in the
-            // no-reference case. Apply the same existing Comfy nodes here.
-            if (UserInput.TryGet(T2IParamTypes.ConditioningMultiplier, out double posMult) && posMult != 1)
-            {
-                positive = NodePath(CreateNode("ConditioningMultiply", new JObject()
-                {
-                    ["conditioning"] = positive,
-                    ["multiplier"] = posMult
-                }), 0);
-            }
-            if (UserInput.TryGet(T2IParamTypes.NegativeConditioningMultiplier, out double negMult) && negMult != 1)
-            {
-                negative = NodePath(CreateNode("ConditioningMultiply", new JObject()
-                {
-                    ["conditioning"] = negative,
-                    ["multiplier"] = negMult
-                }), 0);
-            }
-            if (string.IsNullOrWhiteSpace(negativePrompt) && ShouldZeroNegative())
-            {
-                negative = NodePath(CreateNode("ConditioningZeroOut", new JObject()
-                {
-                    ["conditioning"] = negative
-                }), 0);
-            }
+                (JArray p, JArray n, _, _) = BuildInputImageHandling(
+                    references, positive, negative, NodePath(crop.MaskedLatent, 0));
+                return (p, n);
+            });
         }
 
         JArray latent = mode == "Reference Edit"
             ? NodePath(CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0)), 0)
             : NodePath(crop.MaskedLatent, 0);
-        // ComfyUI's start_at_step skips scheduler iterations: steps=4,start=1
-        // executes just THREE passes. This is incorrect for a four-step Turbo
-        // LoRA. Interpret Segment Steps as the effective number of model
-        // evaluations and extend the scheduler prefix for partial denoising.
-        // A creativity of 0.8 with four requested passes uses a five-step
-        // schedule, skips one, and performs all four passes.
+        // KSampler's 'steps' counts the entire schedule, while start_at_step
+        // skips the prefix. To execute four requested passes at 0.8 denoise,
+        // construct a 5-step schedule and skip one, exactly as Comfy's
+        // KSampler denoise setting does. A 4-step Turbo must run four passes.
         if (steps <= 0 || creativity <= 0 || creativity > 1)
         {
             throw new SwarmUserErrorException("Qwen segment requires positive steps and creativity in (0, 1].");
@@ -150,7 +109,7 @@ public partial class WorkflowGenerator
         }
         int samplerSteps = Math.Max(steps, (int)neededSchedule);
         int startStep = samplerSteps - steps;
-        Logs.Info($"[QWEN21-SEG] conditioning section={sectionId} mode='{mode}' source={(references.Count == 0 ? "SwarmTextEncodeAdvanced" : "TextEncodeQwenImage21")} references={references.Count} scoped_lora={confinedLora} effective_steps={steps} schedule_steps={samplerSteps} start_at_step={startStep}");
+        Logs.Info($"[QWEN21-SEG] conditioning section={sectionId} mode='{mode}' encoder=SwarmTextEncodeAdvanced references={references.Count} effective_steps={steps} schedule_steps={samplerSteps} start_at_step={startStep}");
         return (positive, negative, latent, samplerSteps, startStep);
     }
 }
