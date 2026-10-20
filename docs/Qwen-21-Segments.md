@@ -61,6 +61,11 @@ sentences, classify edit verbs, add a target description, or insert
 `<image1>` unless the user wrote that token. Image references are supplied
 through the encoder's image inputs, not inferred from text. A bare LoRA
 trigger remains a bare LoRA trigger; the user determines any edit instruction.
+Residual scheduled Swarm tags such as `<alternate:...>` and
+`<fromto[...]:...>` are rejected rather than applying
+`ProcessPromptLikeForLength`'s length-estimation substitution (which
+can silently choose an unintended instruction). Only supported literal
+flattening is allowed; unsupported syntax fails explicitly.
 Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
 before upstream CropAndStitch can fall back to the entire image. Accepted
 fractional confidence values are converted to a solid subject mask using
