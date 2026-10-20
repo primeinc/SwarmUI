@@ -2379,7 +2379,7 @@ public class WorkflowGeneratorSteps
                     if (nativeQwenSegment)
                     {
                         (prompt, negPrompt, segmentLatent) = g.CreateQwen21SegmentConditioning(
-                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID);
+                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID, steps);
                     }
                     else
                     {
