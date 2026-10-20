@@ -19,11 +19,17 @@ optional TorchCompile, and dynamic prompt LoRA hooks are passed to the condition
 `Segment Param Overrides` > `Segment Qwen 2.1 Sampling`:
 
 - **Reference Edit** (default): samples a plain VAE encoding of the cropped image
-  (without a latent noise mask). Edit strength comes from
-  `start_at_step = round(steps * (1 - Segment Creativity))`; the final pixel
-  composite, not a latent noise mask, confines the result to the selected region.
-- **Masked Img2Img**: samples from the masked crop latent, uses the same
-  `start_at_step` calculation, and applies DifferentialDiffusion when configured.
+  (without a latent noise mask). The configured `Steps` count is the number of
+  actual denoising iterations, **not** the total length of a schedule whose initial
+  iterations are discarded. For `0 < Segment Creativity < 1`, it follows ComfyUI's
+  `KSampler.set_steps(steps, denoise)` convention: build
+  `scheduled_steps = int(steps / creativity)` and begin at
+  `start_at_step = scheduled_steps - steps`. At four steps and 0.8 creativity,
+  ComfyUI executes **four** iterations from a five-step schedule, not three from
+  a four-step schedule. The final pixel composite confines the result.
+- **Masked Img2Img**: samples the masked crop latent and retains the older
+  `start_at_step = round(steps * (1 - Segment Creativity))` partial-iteration
+  behavior, with DifferentialDiffusion when configured.
 
 Zero creativity skips Qwen segment sampling. If `Save Segment Mask` is enabled,
 the mask is still generated and saved.
@@ -52,18 +58,24 @@ Other model families, including Krea, retain their existing segment workflow.
 
 ## Verification and remaining acceptance
 
-The `QwenSegmentPipelineTests` suite tests generated graph connectivity,
-batch isolation, refiner-stage scoped LoRA selection, prompt-image slot limits,
-conditioning transforms, segment masks, and sampling controls. CPU-only Python
-tests exercise the real bundled Qwen encoder, reference modes, tiled encoding,
-and Swarm prompt parsing without running a diffusion model. The read-only
-`qwen_segment_capture.py` script can report a generated workflow's encoder
-inputs, model-loader lineage, reference nodes, sampler settings, and compositor.
+`QwenReferenceEditStepScheduleTests` verifies the *production* step-plan
+arithmetic, not image fidelity. Regular CI also runs a reduced-size **real
+upstream ComfyUI Qwen transformer, loader, and model patcher** with synthetic
+weights under `tests/integration/test_real_comfy_qwen_lora.py`. Those tests
+show that ComfyUI itself can match and apply a LoRA to a Qwen forward pass.
+They do not prove SwarmUI's real generated segment image has the desired
+semantic edit.
 
-These checks do **not** prove the user's confined LoRA changes the rendered
-identity. That requires observing a real Comfy sampling run and its final image.
-Do not interpret graph tests, reference pixel differences, or model patch counts
-as visual acceptance.
+`tests/live/test_qwen_segment_lora.py` requires real exported workflows,
+installed LoRA files, and a live ComfyUI backend. Its on/off controls compare
+actual saved images from full inference. It is deliberately not a green CPU-CI
+gate without that environment and the specified manifest.
+
+The read-only `qwen_segment_capture.py` tool can report encoder inputs,
+model-loader lineage, reference nodes, sampler settings, and compositor.
+Pixel-delta diagnostics distinguish no pixel change from a semantic edit failure
+but are not a semantic-identity assertion. Never promote a green build, graph
+check, or pixel-delta count to full LoRA acceptance.
 
 ## Source contracts reviewed
 
