@@ -8,6 +8,14 @@ Source: ComfyUI MaskToImage / upstream InpaintStitchImproved masked blend.
 from PIL import ImageChops, ImageFilter, ImageStat
 
 
+def normalized_lora_path(name):
+    # Comfy model catalogs use actual filenames; Linux paths are case-sensitive.
+    # Different-case adapters in one folder are NOT interchangeable.
+    normalized = str(name).replace("\\", "/").strip("/")
+    suffix = ".safetensors"
+    return normalized[:-len(suffix)] if normalized.lower().endswith(suffix) else normalized
+
+
 def binary_mask(image):
     return image.convert("L").point(lambda n: 255 if n >= 128 else 0)
 
