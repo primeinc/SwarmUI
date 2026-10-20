@@ -18,3 +18,4 @@ jobs:
         - run: bash ./launchtools/run_tests.sh
         - run: python3 -m unittest discover -s SwarmUITests -p 'test_qwen21*.py' -v
         - run: python3 -m unittest discover -s tests -p 'test_qwen_segment_capture.py' -v
+        - run: node --test tests/test_lora_confinement_ui.cjs
