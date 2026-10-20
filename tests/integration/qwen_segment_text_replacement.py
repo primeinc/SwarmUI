@@ -25,14 +25,11 @@ from pathlib import Path
 import sys
 import time
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 
 import numpy as np
 from PIL import Image
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-import qwen_segment_effect as actual_comfy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "launchtools"))
 import qwen_segment_capture as capture
@@ -49,6 +46,22 @@ NODE_IDS = {
     "after": "__swarm_text_probe_after",
 }
 OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "after")
+_HTTP = build_opener(ProxyHandler({}))
+
+
+def fetch_bytes(base, route, data=None):
+    # Comfy-Org/ComfyUI script_examples/basic_api_example.py protocol.
+    payload = json.dumps(data).encode("utf-8") if data is not None else None
+    req = Request(
+        base.rstrip("/") + "/" + route.lstrip("/"),
+        data=payload, headers={"Content-Type": "application/json"} if payload else {},
+    )
+    with _HTTP.open(req, timeout=30) as response:
+        return response.read()
+
+
+def fetch_json(base, route, data=None):
+    return json.loads(fetch_bytes(base, route, data))
 
 
 def require_single(nodes, what):
@@ -81,7 +94,13 @@ def inspect_and_instrument(original):
         [k for k, v in graph.items() if v["class_type"] == "SwarmQwen21SegmentDiagnostics"],
         "Qwen segment diagnostics node",
     )
-    compositor_id = actual_comfy.choose_compositor(graph, None)
+    compositor_id = require_single(
+        [key for key, node in graph.items()
+         if node["class_type"] in capture.COMPOSITES
+         and diagnostics_id in capture.upstream(
+             graph, capture.roots(node["inputs"].get("source"), graph))],
+        "segment compositor whose source is the real Qwen diagnostics output",
+    )
     compositor = graph[compositor_id]["inputs"]
     if "destination" not in compositor:
         raise AssertionError("Segment compositor has no pre-segmentation destination image")
@@ -136,7 +155,7 @@ def inspect_and_instrument(original):
 def read_result(base, prompt_id, timeout_seconds):
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        record = actual_comfy.fetch_json(base, "history/" + prompt_id).get(prompt_id)
+        record = fetch_json(base, "history/" + prompt_id).get(prompt_id)
         if record is None:
             time.sleep(1)
             continue
@@ -156,8 +175,7 @@ def read_result(base, prompt_id, timeout_seconds):
                     "subfolder": media.get("subfolder", ""),
                     "type": media.get("type", "temp"),
                 })
-                with urlopen(base.rstrip("/") + "/" + url, timeout=30) as reply:
-                    data = reply.read()
+                data = fetch_bytes(base, url)
                 with Image.open(BytesIO(data)) as img:
                     result[kind] = img.convert("RGB").copy()
             return result
@@ -191,7 +209,9 @@ def main(argv=None):
     if isinstance(original, dict) and "prompt" in original and isinstance(original["prompt"], dict):
         original = original["prompt"]
     graph, spec = inspect_and_instrument(original)
-    actual_comfy.fetch_json(args.comfy_url, "system_stats")
+    stats = fetch_json(args.comfy_url, "system_stats")
+    if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
+        raise AssertionError("The requested URL is not a real Comfy backend")
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
@@ -204,7 +224,7 @@ def main(argv=None):
         if not isinstance(original_seed, int):
             raise AssertionError(f"Segment sampler does not contain integer {seed_key}: {original_seed!r}")
         sampler[seed_key] = original_seed + i
-        queued = actual_comfy.fetch_json(
+        queued = fetch_json(
             args.comfy_url, "prompt",
             {"prompt": instance, "client_id": str(uuid.uuid4())},
         )
