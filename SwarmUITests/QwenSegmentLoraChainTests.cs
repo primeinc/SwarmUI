@@ -119,6 +119,16 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void ZeroWeightLoRAIsAnInertAndValidControl()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["strength_model"] = 0.0;
+        g.UserInput.Set(T2IParamTypes.LoraWeights, new List<string> { "0" });
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
     public static void DuplicateLoRAOnSamplerPathMustFail()
     {
         WorkflowGenerator g = Prepare();
