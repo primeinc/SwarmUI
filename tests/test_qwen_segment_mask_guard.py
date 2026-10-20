@@ -47,6 +47,22 @@ class MaskGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one or more masks"):
             self.node.validate(mask)
 
+    def test_weak_detection_rejected_before_upstream_hipass_removes_it(self):
+        weak_mask = torch.full((1, 64, 80), 0.2, dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "native crop cutoff"):
+            self.node.validate(weak_mask, minimum_confidence=0.5)
+
+    def test_detection_at_native_cutoff_survives(self):
+        mask = torch.zeros((1, 64, 80), dtype=torch.float32)
+        mask[0, 20, 30] = 0.5
+        self.assertIs(self.node.validate(mask, minimum_confidence=0.5)[0], mask)
+
+    def test_batch_with_only_weak_second_detection_fails(self):
+        mask = torch.full((2, 64, 80), 0.2, dtype=torch.float32)
+        mask[0, 20, 30] = 0.8
+        with self.assertRaises(ValueError):
+            self.node.validate(mask, minimum_confidence=0.5)
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))

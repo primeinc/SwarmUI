@@ -119,6 +119,12 @@ class NativeQwenBundleTest(unittest.TestCase):
         self.assertIn('["stitcher"] = cropStitcher', steps)
         self.assertIn('["inpainted_image"] = stitchInput', steps)
 
+    def test_nonempty_mask_guard_uses_native_crop_hipass_cutoff(self):
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        masks = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmMasks.py").read_text()
+        self.assertIn('["minimum_confidence"] = cropInputs["mask_hipass_filter"]', steps)
+        self.assertIn('("FLOAT", {"default": 0.5', masks)
+
     def test_masked_sampler_required_native_inputs_are_supplied(self):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
         nodes = (LANPAINT_PLUGIN / "src/LanPaint/nodes.py").read_text()

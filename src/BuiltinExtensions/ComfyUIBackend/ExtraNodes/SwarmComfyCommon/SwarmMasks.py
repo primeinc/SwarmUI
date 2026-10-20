@@ -139,19 +139,25 @@ class SwarmRequireNonEmptyMask:
     """
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"mask": ("MASK",)}}
+        return {"required": {
+            "mask": ("MASK",),
+            "minimum_confidence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+        }}
 
     RETURN_TYPES = ("MASK",)
     FUNCTION = "validate"
     CATEGORY = "SwarmUI/masks"
 
-    def validate(self, mask):
-        # A batched edit cannot silently fall back to a whole-frame crop
-        # on one empty item just because some OTHER item has a valid mask.
+    def validate(self, mask, minimum_confidence=0.5):
+        # Match the downstream CropAndStitch hipass filter exactly. A mask
+        # containing only scores below that cutoff would otherwise be emptied
+        # after this guard, silently triggering upstream full-frame fallback.
+        # Guard every frame separately so other images do not hide failures.
         frames = mask.unsqueeze(0) if mask.ndim == 2 else mask.reshape(-1, *mask.shape[-2:])
-        has_subject = torch.any(frames > 0, dim=(-2, -1))
-        if not torch.all(has_subject).item():
-            raise ValueError("Qwen segment: no subject detected in one or more masks; refusing full-frame fallback")
+        kept = torch.isfinite(frames) & (frames >= minimum_confidence)
+        has_subject = torch.any(kept, dim=(-2, -1))
+        if has_subject.numel() == 0 or not torch.all(has_subject).item():
+            raise ValueError("Qwen segment: no subject detected above native crop cutoff in one or more masks; refusing full-frame fallback")
         return (mask,)
 
 

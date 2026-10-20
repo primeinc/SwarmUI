@@ -2264,7 +2264,8 @@ public class WorkflowGeneratorSteps
                         // while preserving the native crop-and-stitch adapter.
                         string requiredMask = g.CreateNode("SwarmRequireNonEmptyMask", new JObject()
                         {
-                            ["mask"] = NodePath(detectedMaskNode, 0)
+                            ["mask"] = NodePath(detectedMaskNode, 0),
+                            ["minimum_confidence"] = cropInputs["mask_hipass_filter"]
                         });
                         cropInputs["mask"] = NodePath(requiredMask, 0);
                         string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
