@@ -135,11 +135,17 @@ def inspect_and_instrument(original):
          and v["inputs"].get("mask") == [detector_id, 0]],
         "nonempty-detector-mask guard",
     )
+    # CLIPSeg already applied the author's <segment:...threshold>. Its
+    # normalized/interpolated output still carries valid positive pixels
+    # below 0.5; a second 0.5 cutoff would silently replace the user's choice.
+    # Binarize all detector-selected support BEFORE crop/stitch hipass(0.5).
+    if abs(float(graph[guard_id]["inputs"].get("minimum_confidence", -1))) > 1e-6:
+        raise AssertionError("Segment detector guard must not add a second threshold")
     solid_mask_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "ThresholdMask"
          and v["inputs"].get("mask") == [guard_id, 0]
-         and abs(float(v["inputs"].get("value", -1)) - 0.5) < 1e-6],
-        "native binary subject-mask threshold at crop cutoff",
+         and abs(float(v["inputs"].get("value", -1))) < 1e-6],
+        "native binary subject-mask threshold after the authored CLIPSeg threshold",
     )
     if crop.get("mask") != [solid_mask_id, 0]:
         raise AssertionError("Crop adapter must consume the validated BINARY subject mask, not fractional detector confidence")
