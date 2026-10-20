@@ -76,6 +76,7 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("In this picture, replace the girl with a black boy with blue eyes")]
     [TestCase("  Preserve this punctuation, and spacing!  ")]
     [TestCase("Replace the girl in <image1> with the boy in <image2>.")]
+    [TestCase("This is <alternative> literal text, not a Swarm tag.")]
     public static void NativeQwenMustPreserveLiteralAuthorText(string prompt)
     {
         Assert.That(WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt), Is.EqualTo(prompt));
@@ -123,6 +124,8 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("<random:red,blue>")]
     [TestCase("<repeat[3]:girl>")]
     [TestCase("<embed:portrait>")]
+    [TestCase("<param:cfg,7>")]
+    [TestCase("<comment:ignore-this>")]
     [TestCase("<break>")]
     [TestCase("<weight[1.5]:Change <alternate:hat,glasses>>")]
     public static void UnsupportedResidualSwarmTagsMustFailInsteadOfSilentlyChangingInstruction(string prompt)
