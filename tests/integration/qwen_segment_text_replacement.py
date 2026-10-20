@@ -325,6 +325,20 @@ def main(argv=None):
         if expected_node not in registered:
             raise AssertionError(f"Actual Comfy backend does not expose {expected_node}; "
                                  "a checked-in plugin is not proof that the runtime loaded it.")
+        # Comfy's live object_info is the actual input contract, not Python
+        # function defaults or C# compilation. Fail before expensive inference
+        # if any graph node omits a required native field.
+        node_schema = registered[expected_node]
+        required = set(node_schema.get("input", {}).get("required", {}))
+        for node_id, node in graph.items():
+            if node["class_type"] != expected_node:
+                continue
+            missing = sorted(required - set(node["inputs"]))
+            if missing:
+                raise AssertionError(
+                    f"Native {expected_node} node {node_id} is missing required "
+                    f"Comfy inputs: {missing}"
+                )
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
