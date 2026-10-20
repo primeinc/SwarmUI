@@ -376,6 +376,14 @@ class PatchedKSampler(comfy.samplers.KSampler):
             if start_step < (len(sigmas) - 1):
                 sigmas = sigmas[start_step:]
             else:
+                if expected_step_count > 0:
+                    raise ValueError(
+                        f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
+                        f"{expected_step_count} real denoising evaluations; got 0 "
+                        f"(scheduled={self.steps}, start={start_step}, "
+                        f"available_sigma_intervals={len(sigmas)-1}). "
+                        "Refusing an unchanged latent instead of silently pretending to edit."
+                    )
                 if latent_image is not None:
                     return latent_image
                 else:
