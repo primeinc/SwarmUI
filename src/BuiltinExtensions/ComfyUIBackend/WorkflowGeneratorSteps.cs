@@ -1803,7 +1803,8 @@ public class WorkflowGeneratorSteps
                 g.SaveOptionalIntermediate();
                 T2IModel t2iModel = g.FinalLoadedModel;
                 WGNodeData model = g.CurrentModel, clip = g.CurrentTextEnc, vae = g.CurrentVae;
-                if (g.UserInput.TryGet(T2IParamTypes.SegmentModel, out T2IModel segmentModel))
+                bool hasSegmentModelOverride = g.UserInput.TryGet(T2IParamTypes.SegmentModel, out T2IModel segmentModel);
+                if (hasSegmentModelOverride)
                 {
                     if (segmentModel.ModelClass?.CompatClass != t2iModel.ModelClass?.CompatClass)
                     {
@@ -1815,7 +1816,9 @@ public class WorkflowGeneratorSteps
                     g.FinalLoadedModel = t2iModel;
                     g.CurrentModel = model;
                 }
+                WGNodeData segmentBaseModel = model;
                 WGNodeData segmentBaseClip = clip;
+                WGNodeData segmentBaseVae = vae;
                 PromptRegion negativeRegion = new(g.UserInput.Get(T2IParamTypes.NegativePrompt, ""));
                 PromptRegion.Part[] negativeParts = [.. negativeRegion.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
                 for (int i = 0; i < parts.Length; i++)
@@ -1937,22 +1940,41 @@ public class WorkflowGeneratorSteps
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
                     bool nativeQwenSegment = g.IsQwenImage21();
                     string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
-                    // Qwen 2.1 Reference Edit samples the plain crop VAE latent and relies on the
-                    // final pixel-space segment mask for confinement. DifferentialDiffusion only
-                    // has meaning for the masked partial-denoise mode.
-                    if (!nativeQwenSegment || qwenSegmentMode != "Reference Edit")
+                    model = segmentBaseModel;
+                    clip = segmentBaseClip;
+                    vae = segmentBaseVae;
+                    if (nativeQwenSegment)
+                    {
+                        // Global LoRAs enter the model-load pipeline before cache/attention/compile wrappers.
+                        // Do the same for a segment-confined LoRA instead of applying it to finished CurrentModel.
+                        if (g.HasLorasForConfinement(part.ContextID))
+                        {
+                            string loaderType = hasSegmentModelOverride ? "Refiner" : "Base";
+                            (t2iModel, model, clip, vae) = g.CreateModelLoader(
+                                t2iModel,
+                                loaderType,
+                                sectionId: part.ContextID,
+                                additionalLoraConfinement: part.ContextID);
+                        }
+                        if (qwenSegmentMode != "Reference Edit" && g.UserInput.Get(T2IParamTypes.MaskBehavior, "Differential") == "Differential")
+                        {
+                            string diffNode = g.CreateNode("DifferentialDiffusion", new JObject()
+                            {
+                                ["model"] = model.Path
+                            });
+                            model = model.WithPath([diffNode, 0]);
+                        }
+                    }
+                    else
                     {
                         g.EnableDifferential();
-                    }
-                    // Always start each segment from its own selected model and unmodified text encoder.
-                    // EnableDifferential may replace CurrentModel; the sampler must use that replacement.
-                    model = g.CurrentModel;
-                    clip = segmentBaseClip;
-                    if (part.ContextID > 0)
-                    {
-                        (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
-                        model = model.WithPath(newModel);
-                        clip = clip.WithPath(newClip);
+                        model = g.CurrentModel;
+                        if (part.ContextID > 0)
+                        {
+                            (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
+                            model = model.WithPath(newModel);
+                            clip = clip.WithPath(newClip);
+                        }
                     }
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
@@ -1973,15 +1995,33 @@ public class WorkflowGeneratorSteps
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     if (nativeQwenSegment)
                     {
-                        (string modelNodeType, JObject modelInputs) = model.SourceNodeData;
-                        string loraName = modelInputs?["lora_name"]?.ToString() ?? "(none)";
-                        string loraStrength = modelInputs?["strength_model"]?.ToString() ?? "(n/a)";
+                        string loraName = "(none)";
+                        string loraStrength = "(n/a)";
+                        List<string> modelChain = [];
+                        JArray cursor = model.Path;
+                        for (int depth = 0; depth < 16 && cursor is not null; depth++)
+                        {
+                            string nodeId = cursor[0]?.ToString();
+                            if (nodeId is null || g.Workflow[nodeId] is not JObject node)
+                            {
+                                break;
+                            }
+                            string nodeType = node["class_type"]?.ToString() ?? "(unknown)";
+                            modelChain.Add(nodeType);
+                            JObject inputs = node["inputs"] as JObject;
+                            if (nodeType is "LoraLoaderModelOnly" or "LoraLoader")
+                            {
+                                loraName = inputs?["lora_name"]?.ToString() ?? "(unknown)";
+                                loraStrength = inputs?["strength_model"]?.ToString() ?? "(unknown)";
+                            }
+                            cursor = inputs?["model"] as JArray;
+                        }
                         string logPrompt = (part.Prompt ?? "").Replace('\r', ' ').Replace('\n', ' ');
                         if (logPrompt.Length > 160)
                         {
                             logPrompt = logPrompt[..160];
                         }
-                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_node={modelNodeType ?? "(unknown)"} lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
+                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
                     }
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
