@@ -498,6 +498,7 @@ class SwarmTextEncodeAdvanced:
                 "images": ("IMAGE", {"default": None, "tooltip": "Optional images to use for a text-vision model, if applicable."}),
                 "minimax_refs": ("MiniMaxReferences", {"default": None, "tooltip": "Optional MiniMax H3 references (images, videos, audio)."}),
                 "lora_hooks": ("HOOKS", {"default": None, "tooltip": "Optional ordered LoRA hook list referenced by //hook attachments in the prompt."}),
+                "qwen21_prevent_empty_text": ("BOOLEAN", {"default": False, "tooltip": "For native Qwen Image 2.1 segments, preserve the tokenizer's nonempty negative-text contract without rewriting the authored prompt."}),
                 # Distinct Qwen reference images must not be collapsed into
                 # ImageBatch: that Comfy node resizes later frames to the first.
                 **{f"image_{i}": ("IMAGE", {"tooltip": "Independent visual reference (own geometry), Qwen 2.1."})
@@ -510,7 +511,7 @@ class SwarmTextEncodeAdvanced:
     FUNCTION = "encode"
     DESCRIPTION = "Acts like the regular CLIPTextEncode, but supports Swarm prompt tags such as '<break>', '<fromto[0.5]:a, b>', '<alternate:a, b>', '<weight[2]:text>', '<embed:name>'."
 
-    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None, tokenize_kwargs = None, **image_slots):
+    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None, qwen21_prevent_empty_text = False, tokenize_kwargs = None, **image_slots):
         append_images = False
         prepend_images = False
         fix_images = True
@@ -551,7 +552,12 @@ class SwarmTextEncodeAdvanced:
                     images = [i.unsqueeze(0) for i in images]
         # Qwen 2.1 can supply a list of differently shaped reference images. Do not
         # concatenate or resize them to the first image's geometry.
-        tokenize_kwargs = tokenize_kwargs or {}
+        tokenize_kwargs = dict(tokenize_kwargs or {})
+        if qwen21_prevent_empty_text:
+            # Match comfy_extras/nodes_qwen.py:TextEncodeQwenImage21.execute:
+            # the actual Qwen tokenizer maps only the EMPTY string to one
+            # space. This does not alter the author's prompt or Swarm tags.
+            tokenize_kwargs["prevent_empty_text"] = True
 
         base_hooks = clip.apply_hooks_to_conds
         if lora_hooks is not None:
