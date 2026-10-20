@@ -165,6 +165,48 @@ def model_chain(graph, sampler_id):
         link = parent
 
 
+def assert_segment_final_output_path(graph, reference, stitch_id):
+    """Require the compared image to be the one user-visible stitched result.
+
+    A LoRA loader on a sampler chain is not evidence of segment effect if the
+    screenshot comes from a different branch or an arbitrary manifest ref.
+    """
+    outputs = [
+        (node_id, node["inputs"].get("images"))
+        for node_id, node in graph.items()
+        if node["class_type"] in _IMAGE_OUTPUTS
+    ]
+    if len(outputs) != 1:
+        raise AssertionError(
+            f"Expected one user-visible final output sink, got {len(outputs)}")
+    sink_id, saved_ref = outputs[0]
+    if saved_ref != reference:
+        raise AssertionError(
+            f"Compared image {reference!r} is not the actual saved result "
+            f"at {sink_id}: {saved_ref!r}")
+    pending = [reference]
+    seen = set()
+    while pending:
+        link = pending.pop()
+        if not isinstance(link, list) or len(link) != 2:
+            continue
+        node_id = str(link[0])
+        if node_id == stitch_id and link[1] == 0:
+            return
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        node = graph.get(node_id)
+        if node is None:
+            continue
+        for value in node["inputs"].values():
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) in graph:
+                pending.append(value)
+    raise AssertionError(
+        f"Compared final output {reference!r} does not depend on the actual "
+        f"InpaintStitchImproved result {stitch_id}")
+
+
 def graph_variant(original, case, stage, strength):
     graph = copy.deepcopy(original)
     node_id = case[f"{stage}_lora_node"]
@@ -318,6 +360,8 @@ def graph_variant(original, case, stage, strength):
         ref = outputs[0]
     if not isinstance(ref, list) or len(ref) != 2 or str(ref[0]) not in graph:
         raise ValueError(f"{stage}: invalid real final image connection {ref!r}")
+    if stage == "segment":
+        assert_segment_final_output_path(graph, ref, stitches[0])
     if _OUTPUT in graph:
         raise ValueError(f"Output id {_OUTPUT} already exists in workflow")
     graph[_OUTPUT] = {"class_type": "SaveImage", "inputs": {
