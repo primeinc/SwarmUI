@@ -147,6 +147,50 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void NoSelectedLoRARejectsAnUnexpectedActiveSamplerLoader()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string>());
+        g.UserInput.Set(T2IParamTypes.LoraWeights, new List<string>());
+        g.UserInput.Set(T2IParamTypes.LoraSectionConfinement, new List<string>());
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void NoSelectedLoRAAllowsAPlainModelPath()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string>());
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("raw", 0), 11, false));
+    }
+
+    [Test]
+    public static void NoSelectedLoRAMustStillRejectDifferentialDiffusion()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string>());
+        g.Workflow["diff"] = new JObject
+        {
+            ["class_type"] = "DifferentialDiffusion",
+            ["inputs"] = new JObject { ["model"] = new JArray("raw", 0) }
+        };
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("diff", 0), 11, false));
+    }
+
+    [Test]
+    public static void NoSelectedLoRAAllowsZeroStrengthLoaderAsInert()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string>());
+        ((JObject)g.Workflow["patched"]["inputs"])["strength_model"] = 0.0;
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
     public static void GlobalLoRAIsExpectedInASegment()
     {
         WorkflowGenerator g = Prepare(segmentConfinement: 0);
