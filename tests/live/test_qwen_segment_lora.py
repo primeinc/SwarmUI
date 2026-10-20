@@ -162,6 +162,29 @@ def graph_variant(original, case, stage, strength):
             raise AssertionError("Segment must use one upstream CropAndStitch adapter pair")
         if graph[stitches[0]]["inputs"].get("stitcher") != [crops[0], 0]:
             raise AssertionError("Stitch must receive the metadata from its matching upstream crop")
+        # LoRA effect does not prove the edited subject is cleanly replaced.
+        # Enforce the proven native mask chain before any OFF/ON/OFF GPU runs:
+        # raw detector -> confidence guard -> binary ThresholdMask ->
+        # CropAndStitch's single native blend. Fractional raw confidence
+        # permits old-subject double exposure even with an effective LoRA.
+        crop_inputs = graph[crops[0]]["inputs"]
+        cutoff = float(crop_inputs.get("mask_hipass_filter", -1))
+        threshold_ref = crop_inputs.get("mask")
+        if abs(cutoff - 0.5) > 1e-6 or not isinstance(threshold_ref, list):
+            raise AssertionError("Native segment crop lacks its 0.5-cutoff binary subject mask")
+        threshold_node = graph.get(str(threshold_ref[0])) if len(threshold_ref) == 2 else None
+        if (not threshold_node or threshold_node["class_type"] != "ThresholdMask" or
+                abs(float(threshold_node["inputs"].get("value", -1)) - cutoff) > 1e-6):
+            raise AssertionError("Native subject mask must be binarized before CropAndStitch")
+        guard_ref = threshold_node["inputs"].get("mask")
+        guard = graph.get(str(guard_ref[0])) if isinstance(guard_ref, list) and len(guard_ref) == 2 else None
+        if (not guard or guard["class_type"] != "SwarmRequireNonEmptyMask" or
+                abs(float(guard["inputs"].get("minimum_confidence", -1)) - cutoff) > 1e-6):
+            raise AssertionError("Subject mask must be validated at its native crop cutoff")
+        detector_ref = guard["inputs"].get("mask")
+        detector = graph.get(str(detector_ref[0])) if isinstance(detector_ref, list) and len(detector_ref) == 2 else None
+        if not detector or detector["class_type"] != "SwarmClipSeg":
+            raise AssertionError("Native crop's binary subject mask is not sourced from the actual detector")
         if any(n["class_type"] == "JoinImageWithAlpha" and
                    n["inputs"].get("image") == [crops[0], 1] and
                    n["inputs"].get("alpha") == [crops[0], 2] for n in graph.values()):
