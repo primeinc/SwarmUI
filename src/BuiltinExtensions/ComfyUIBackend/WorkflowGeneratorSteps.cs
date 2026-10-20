@@ -2249,6 +2249,10 @@ public class WorkflowGeneratorSteps
                             ? g.FinalLoadedModel.StandardWidth : g.UserInput.GetImageWidth();
                         int targetH = rw > 0 && rh > 0 ? rh : g.FinalLoadedModel?.StandardHeight > 0
                             ? g.FinalLoadedModel.StandardHeight : g.UserInput.GetImageHeight();
+                        // Qwen's native reference encoder aligns vision and VAE
+                        // input geometry to 32-pixel increments. Align this
+                        // internal crop without resizing the original canvas.
+                        (targetW, targetH) = WorkflowGenerator.NativeQwen21ReferenceDimensions(targetW, targetH);
                         JObject cropInputs = new()
                         {
                             ["image"] = g.CurrentMedia.Path,
