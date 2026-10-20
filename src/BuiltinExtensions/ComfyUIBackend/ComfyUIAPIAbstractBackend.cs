@@ -133,6 +133,33 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 }
             }
         }
+        // A backend may register the guard CLASS without its new coverage
+        // socket. Then a near-full-frame CLIPSeg detection would be accepted
+        // even though the generated graph requests fail-closed validation.
+        // Check the selected backend's actual /object_info schema before image
+        // uploads, just as we do for independent Qwen vision sockets.
+        foreach (JProperty node in workflow.Properties())
+        {
+            if (node.Value?["class_type"]?.ToString() != "SwarmRequireNonEmptyMask"
+                || node.Value["inputs"] is not JObject maskInputs
+                || maskInputs["maximum_coverage"] is null)
+            {
+                continue;
+            }
+            JToken advertised = backendObjectInfo?["SwarmRequireNonEmptyMask"]?
+                ["input"]?["required"]?["maximum_coverage"];
+            string actualType = advertised is JArray socket && socket.Count > 0
+                ? socket[0]?.ToString() : null;
+            if (actualType != "FLOAT")
+            {
+                throw new SwarmUserErrorException(
+                    "The selected ComfyUI backend has an outdated SwarmRequireNonEmptyMask node: " +
+                    "its /object_info must register 'maximum_coverage' as FLOAT, but reports " +
+                    $"'{actualType ?? "missing"}'. Update SwarmComfyCommon/SwarmMasks.py " +
+                    "on THIS backend and refresh /object_info before Qwen segmented editing. " +
+                    "Otherwise near-full-canvas detections may overwrite the source image.");
+            }
+        }
     }
 
     public string ModelFolderFormat = null;
