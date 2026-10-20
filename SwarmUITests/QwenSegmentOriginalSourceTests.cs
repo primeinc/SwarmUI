@@ -240,23 +240,23 @@ public class QwenSegmentOriginalSourceTests
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
         if (referenceEdit)
         {
-            var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
-            var encoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21");
+            var referenceCrop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
+            var referenceEncoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21");
             var decoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageDecode");
             string samplerId = decoder.Node["inputs"]?["samples"]?[0]?.ToString();
-            var sampler = (Newtonsoft.Json.Linq.JObject)graph[samplerId];
-            Assert.That(sampler["class_type"]?.ToString(), Is.EqualTo("KSampler"));
-            Assert.That(sampler["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(1));
-            Assert.That(sampler["inputs"]?["latent_image"]?.ToString(),
-                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(encoder.Id, 2).ToString()));
+            var referenceSampler = (Newtonsoft.Json.Linq.JObject)graph[samplerId];
+            Assert.That(referenceSampler["class_type"]?.ToString(), Is.EqualTo("KSampler"));
+            Assert.That(referenceSampler["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(1));
+            Assert.That(referenceSampler["inputs"]?["latent_image"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(referenceEncoder.Id, 2).ToString()));
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageEncode"),
                 Is.Zero, "Reference Edit must use Qwen's own empty edit latent");
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler"),
                 Is.Zero, "Reference Edit must not mix native Qwen and LanPaint sampler contracts");
             Assert.That(nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved")
                 .Node["inputs"]?["stitcher"]?.ToString(),
-                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 0).ToString()));
-            Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(referenceCrop.Id, 0).ToString()));
+            Assert.That(referenceEncoder.Node["inputs"]?["prompt"]?.ToString(),
                 Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() is "SaveImage" or "SwarmSaveImageWS"),
                 Is.EqualTo(1));
