@@ -14,7 +14,7 @@ public partial class WorkflowGenerator
     /// or ComfyUI's native TextEncodeQwenImage21 for genuine image references.
     /// Only the segment crop / sampling schedule belongs to this helper.
     /// </summary>
-    public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
+    public (JArray Positive, JArray Negative, JArray Latent, int SamplerSteps, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
         ImageMaskCropData crop, int steps, double creativity, int sectionId)
     {
@@ -125,8 +125,24 @@ public partial class WorkflowGenerator
         JArray latent = mode == "Reference Edit"
             ? NodePath(CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0)), 0)
             : NodePath(crop.MaskedLatent, 0);
-        int startStep = (int)Math.Round(steps * (1 - creativity));
-        Logs.Info($"[QWEN21-SEG] conditioning section={sectionId} mode='{mode}' source={(references.Count == 0 ? "SwarmTextEncodeAdvanced" : "TextEncodeQwenImage21")} references={references.Count} scoped_lora={confinedLora} start={startStep}");
-        return (positive, negative, latent, startStep);
+        // ComfyUI's start_at_step skips scheduler iterations: steps=4,start=1
+        // executes just THREE passes. This is incorrect for a four-step Turbo
+        // LoRA. Interpret Segment Steps as the effective number of model
+        // evaluations and extend the scheduler prefix for partial denoising.
+        // A creativity of 0.8 with four requested passes uses a five-step
+        // schedule, skips one, and performs all four passes.
+        if (steps <= 0 || creativity <= 0 || creativity > 1)
+        {
+            throw new SwarmUserErrorException("Qwen segment requires positive steps and creativity in (0, 1].");
+        }
+        double neededSchedule = Math.Ceiling(steps / creativity - 1e-9);
+        if (neededSchedule > 10000)
+        {
+            throw new SwarmUserErrorException($"Qwen segment creativity {creativity:0.####} requires {neededSchedule} scheduler steps to execute {steps} effective passes; ComfyUI supports at most 10000.");
+        }
+        int samplerSteps = Math.Max(steps, (int)neededSchedule);
+        int startStep = samplerSteps - steps;
+        Logs.Info($"[QWEN21-SEG] conditioning section={sectionId} mode='{mode}' source={(references.Count == 0 ? "SwarmTextEncodeAdvanced" : "TextEncodeQwenImage21")} references={references.Count} scoped_lora={confinedLora} effective_steps={steps} schedule_steps={samplerSteps} start_at_step={startStep}");
+        return (positive, negative, latent, samplerSteps, startStep);
     }
 }
