@@ -130,6 +130,17 @@ class QwenSwarmBreakReferenceContract(unittest.TestCase):
         self.assertEqual([len(x) for x in clip.image_slots_per_encoding], [2, 0])
         self.assertEqual(len(result["image_slots"]), 2)
 
+    def test_alternating_scheduled_text_references_once_per_condition(self):
+        """Each scheduled condition needs its own one-time Qwen vision prefix."""
+        ref = torch.ones((1, 64, 64, 3))
+        clip, _ = self.encode("<alternate:girl,boy> <break> with blue eyes", images=ref)
+        occurrences = [len(slots) for slots in clip.image_slots_per_encoding]
+        self.assertGreaterEqual(len(occurrences), 4)
+        self.assertEqual(len(occurrences) % 2, 0)
+        for index in range(0, len(occurrences), 2):
+            self.assertEqual(occurrences[index:index + 2], [1, 0],
+                             "Every new timed conditioning keeps exactly one image prefix")
+
     def test_single_chunk_and_plain_text_remain_unchanged(self):
         ref = torch.ones((1, 64, 64, 3))
         clip, result = self.encode("Replace the person", images=ref)
