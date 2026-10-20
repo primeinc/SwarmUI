@@ -71,21 +71,23 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 2, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 2, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, true)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, true, 1, true)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize, bool useSegmentOverride)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 2, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 2, false, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, true, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, true, 1, true, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false, true)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1, false, true)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize, bool useSegmentOverride, bool referenceEdit)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -199,6 +201,12 @@ public class QwenSegmentOriginalSourceTests
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
         input.PreparsePromptLikes();
+        if (referenceEdit)
+        {
+            int segment = new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts
+                .Single(p => p.Type == PromptRegion.PartType.Segment).ContextID;
+            input.Set(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: segment);
+        }
         // Production prompt parsing assigns the segment's confinement context.
         // A model-only LoRA OFF and ON still must reach this segment sampler.
         if (sectionLoraWeight >= 0)
@@ -230,6 +238,30 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(ComfyUIAPIAbstractBackend.ShouldPreserveQwenOriginalInitUpload(graph, input),
             Is.EqualTo(hasInitImage), "Native Qwen Init Image must bypass external canvas resampling");
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
+        if (referenceEdit)
+        {
+            var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
+            var encoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21");
+            var decoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageDecode");
+            string samplerId = decoder.Node["inputs"]?["samples"]?[0]?.ToString();
+            var sampler = (Newtonsoft.Json.Linq.JObject)graph[samplerId];
+            Assert.That(sampler["class_type"]?.ToString(), Is.EqualTo("KSampler"));
+            Assert.That(sampler["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(1));
+            Assert.That(sampler["inputs"]?["latent_image"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(encoder.Id, 2).ToString()));
+            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageEncode"),
+                Is.Zero, "Reference Edit must use Qwen's own empty edit latent");
+            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler"),
+                Is.Zero, "Reference Edit must not mix native Qwen and LanPaint sampler contracts");
+            Assert.That(nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved")
+                .Node["inputs"]?["stitcher"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 0).ToString()));
+            Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
+                Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
+            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() is "SaveImage" or "SwarmSaveImageWS"),
+                Is.EqualTo(1));
+            return;
+        }
         if (batchSize > 1)
         {
             var cropNodes = nodes.Where(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved").ToArray();
