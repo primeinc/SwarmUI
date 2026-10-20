@@ -73,6 +73,15 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo("Edit the image, replace the girl with a black boy with blue eyes"));
     }
 
+    [TestCase("Please replace the girl with a black boy with blue eyes")]
+    [TestCase("In this picture, replace the girl with a black boy with blue eyes")]
+    [TestCase("I want to edit the girl's appearance")]
+    public static void NativeQwenPreservesNaturalLanguageEditRequests(string prompt)
+    {
+        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(prompt, "girl"),
+            Is.EqualTo(prompt));
+    }
+
     [Test]
     public static void NativeQwenMustNotSendStandaloneLoRATriggerAsEditInstruction()
     {

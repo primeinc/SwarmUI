@@ -23,7 +23,10 @@ public partial class WorkflowGenerator
         }
         string[] commands = ["Edit ", "Replace ", "Change ", "Transform ", "Turn ", "Make ",
             "Remove ", "Swap ", "Repaint ", "Redraw ", "Convert "];
-        if (Array.Exists(commands, command => text.StartsWith(command, StringComparison.OrdinalIgnoreCase)))
+        if (Array.Exists(commands, command =>
+            text.StartsWith(command, StringComparison.OrdinalIgnoreCase) ||
+            text.StartsWith("Please " + command, StringComparison.OrdinalIgnoreCase) ||
+            text.Contains(" " + command, StringComparison.OrdinalIgnoreCase)))
         {
             return text;
         }
