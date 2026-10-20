@@ -9,7 +9,7 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
+    /// Builds Qwen Image 2.1 segment conditioning using ComfyUI's native encoder.
     /// Reference Edit follows upstream ComfyUI's native Qwen Image 2.1 contract:
     /// condition on the crop as a vision/reference image and sample from the encoder's
     /// empty Qwen latent. A VAE-encoded crop anchors the original subject too strongly
@@ -31,46 +31,49 @@ public partial class WorkflowGenerator
         }
 
         bool useOriginalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
+        // Use ComfyUI's shipped Qwen 2.1 encoder. No locally reimplemented
+        // tokenizer, image-slot wiring, VAE reference encoding, or latent shape.
+        // Section-confined static LoRAs are already applied to model/CLIP by the
+        // stage loader. Native TextEncodeQwenImage21 has no dynamic hook input.
+        if (UserInput.DynamicLoraIndices.Count > 0)
+        {
+            throw new SwarmUserErrorException("Qwen 2.1 native segment editing does not support dynamic prompt LoRA hooks. Use a section-confined static LoRA.");
+        }
+        if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
+        {
+            throw new SwarmUserErrorException("Native TextEncodeQwenImage21 does not support tiled reference VAE encoding.");
+        }
         JObject encoderInputs = new()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["image"] = NodePath(crop.ScaledImage, 0),
+            ["resolution"] = 0,
             ["prompt"] = prompt ?? "",
-            ["negative_prompt"] = negativePrompt ?? "",
-            ["use_original_reference"] = useOriginalReference,
-            ["steps"] = steps,
-            ["lora_hooks"] = CreateDynamicLoraHooks()
+            ["negative_prompt"] = negativePrompt ?? ""
         };
-        // Match WGNodeData.EncodeToLatent's VAE tiling contract for reference images.
-        // The source crop and each optional reference use the same encoding mode.
-        if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
+        int referenceCount = 0;
+        if (useOriginalReference)
         {
-            encoderInputs["reference_tile_size"] = UserInput.Get(T2IParamTypes.VAETileSize, 256);
-            encoderInputs["reference_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETileOverlap, 64);
-            encoderInputs["reference_temporal_tile_size"] = UserInput.Get(T2IParamTypes.VAETemporalTileSize, 32);
-            encoderInputs["reference_temporal_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETemporalTileOverlap, 4);
+            encoderInputs[$"image_{++referenceCount}"] = NodePath(crop.ScaledImage, 0);
         }
-        // Qwen supports sixteen individual references; the segment crop consumes one
-        // when enabled. Keep every optional prompt image in its own native vision slot.
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out System.Collections.Generic.List<Image> referenceImages)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            int maxPromptImages = useOriginalReference ? 15 : 16;
+            int maxPromptImages = 16 - referenceCount;
             if (referenceImages.Count > maxPromptImages)
             {
-                throw new SwarmUserErrorException($"Qwen Image 2.1 segment accepts at most {maxPromptImages} Prompt Images with the current Original Reference setting; got {referenceImages.Count}.");
+                throw new SwarmUserErrorException($"Native Qwen Image 2.1 accepts at most {maxPromptImages} additional Prompt Images; got {referenceImages.Count}.");
             }
             for (int i = 0; i < referenceImages.Count; i++)
             {
                 JArray referenceImage = GetPromptImage(true, true, i);
                 if (referenceImage is not null)
                 {
-                    encoderInputs[$"image_{i + 1}"] = referenceImage;
+                    encoderInputs[$"image_{++referenceCount}"] = referenceImage;
                 }
             }
         }
-        string encoder = CreateNode("SwarmQwenImage21SegmentEncode", encoderInputs);
+        string encoder = CreateNode("TextEncodeQwenImage21", encoderInputs);
 
         // ComfyUI KSampler.set_steps(steps, denoise) expands the sigma schedule to
         // int(steps / denoise), then keeps its final (steps + 1) sigmas.

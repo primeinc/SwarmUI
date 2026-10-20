@@ -1,25 +1,29 @@
 # Qwen Image 2.1 segments
 
-Qwen Image 2.1 `<segment:...>` passes use Swarm's bundled
-`SwarmQwenImage21SegmentEncode` ComfyUI node. It takes the selected, resized segment
-crop and optional Prompt Images as separate vision inputs. When enabled, each
-reference is VAE-encoded and attached to both positive and negative Qwen 2.1
-conditioning as `reference_latents`, with matching `image_slots` from the Qwen tokenizer.
-The custom encoder does not require ComfyUI's separately registered
-`TextEncodeQwenImage21` node.
+Qwen Image 2.1 `<segment:...>` passes use ComfyUI's native
+`TextEncodeQwenImage21` node, not a Swarm-specific replacement. The cropped
+original (when enabled) is passed as `image_1`, and optional Prompt Images
+occupy subsequent native image slots. `resolution=0` preserves the crop's
+reference size, rounded by ComfyUI to a multiple of 32. The native encoder
+owns Qwen vision tokens, VAE references, and the empty latent.
 
-For `<weight>`, `<fromto>`, `<alternate>`, `<embed>`, and dynamic LoRA hooks,
-the encoder reuses Swarm's advanced prompt parser while retaining Qwen's
-`keep_vision` / image-slot contract. Plain prompts use the native encoder directly.
-Static, section-confined LoRAs are applied in the model-generation pipeline before
-optional TorchCompile, and dynamic prompt LoRA hooks are passed to the conditioner.
+Static section-confined LoRAs continue to load through Swarm's existing
+model/CLIP loader pipeline. Native Qwen's encoder has no dynamic hook or tiled
+reference-VAE input: those unsupported settings fail explicitly rather than
+being silently ignored. Advanced prompt syntax requires separate upstream
+support, not a locally invented substitute.
+
+Crop bounds use ComfyUI's native `ThresholdMask` at 0.5, while the original
+mask remains available to the compositor. This prevents weak CLIPSeg background
+confidence from expanding the crop without forcing that same mask onto the
+final edit boundary.
 
 ## Sampling modes and controls
 
 `Segment Param Overrides` > `Segment Qwen 2.1 Sampling`:
 
 - **Reference Edit** (default): samples the **native Qwen empty latent** returned
-  by `SwarmQwenImage21SegmentEncode` (output 2), with the cropped original supplied
+  by `TextEncodeQwenImage21` (output 2), with the cropped original supplied
   separately as vision/reference conditioning. This matches the working
   non-segmented Qwen image-reference editing contract: the input girl's pixels
   are **not** re-encoded as the starting latent to be reconstructed. The configured
@@ -28,9 +32,9 @@ optional TorchCompile, and dynamic prompt LoRA hooks are passed to the condition
   `scheduled_steps = int(steps / creativity)` and begin at
   `start_at_step = scheduled_steps - steps`. At four steps and 0.8 creativity,
   ComfyUI executes **four** iterations from a five-step schedule, not three from
-  a four-step schedule. The final pixel composite confines the result, using
-  the original CLIPSeg **soft** mask rather than turning all barely nonzero
-  mask pixels into a hard opaque rectangle.
+  a four-step schedule. The final pixel composite confines the result with an opaque subject
+  mask and feathered boundary, avoiding both faint-source double exposure
+  and opaque rectangular paste.
 - **Masked Img2Img**: samples the masked crop latent and retains the older
   `start_at_step = round(steps * (1 - Segment Creativity))` partial-iteration
   behavior, with DifferentialDiffusion when configured.
@@ -47,7 +51,7 @@ Optional `Prompt Images` are retained as individual Qwen references when Text
 Encoded Image is not `none`; each reference retains its aspect ratio and its
 own vision slot. Qwen supports at most 16 reference images in this workflow:
 15 additional images when the original crop is a reference, or 16 when it is
-not. VAE tiling settings also apply to reference encoding.
+not. Native `TextEncodeQwenImage21` does not expose tiled reference encoding.
 
 Batch size greater than one is handled by splitting the source into individual
 images **before** segment detection and conditioning. Each image gets an
@@ -86,7 +90,7 @@ check, or pixel-delta count to full LoRA acceptance.
 
 - `primeinc/SwarmUI`: `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`,
   `WorkflowGeneratorQwenSegment.cs#CreateQwen21SegmentConditioning`,
-  `SwarmQwen.py#SwarmQwenImage21SegmentEncode`, and
+  `SwarmQwen.py#SwarmQwen21SegmentDiagnostics`, and
   `SwarmText.py#SwarmTextEncodeAdvanced`.
 - `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`:
   `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21`,

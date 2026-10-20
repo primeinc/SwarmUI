@@ -86,10 +86,14 @@ def inspect_and_instrument(original):
     if abs(float(detection.get("threshold", -1)) - 0.1) > 1e-4:
         raise AssertionError(f"Expected exact reported mask threshold 0.1, got {detection.get('threshold')!r}")
     enc_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "SwarmQwenImage21SegmentEncode"],
-        "Qwen 2.1 segment encoder",
+        [k for k, v in graph.items() if v["class_type"] == "TextEncodeQwenImage21"],
+        "native TextEncodeQwenImage21 encoder",
     )
     encoder = graph[enc_id]["inputs"]
+    if "image_1" not in encoder:
+        raise AssertionError("Native Qwen segment edit is missing the cropped original in image_1")
+    if any(v["class_type"] == "SwarmQwenImage21SegmentEncode" for v in graph.values()):
+        raise AssertionError("Legacy custom segment encoder must not be used")
     if encoder.get("prompt", "").strip() != PROMPT:
         raise AssertionError(f"Expected exact segment instruction {PROMPT!r}, got {encoder.get('prompt')!r}")
     diagnostics_id = require_single(

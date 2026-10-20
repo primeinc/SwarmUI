@@ -623,8 +623,9 @@ public partial class WorkflowGenerator
     /// <param name="model">The model in use, for determining resolution.</param>
     /// <param name="threshold">Optional minimum value threshold.</param>
     /// <param name="thresholdMax">Optional maximum value of the threshold.</param>
+    /// <param name="boundsThreshold">Optional native ThresholdMask cutoff for crop bounds only; leaves the actual compositor mask intact.</param>
     /// <returns>(boundsNode, croppedMask, maskedLatent, scaledImage).</returns>
-    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1)
+    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1, double boundsThreshold = 0)
     {
         if (threshold > 0)
         {
@@ -641,9 +642,22 @@ public partial class WorkflowGenerator
         int targetX = int.Parse(targetWidth);
         int targetY = int.Parse(targetHeight);
         bool isCustomRes = targetX > 0 && targetY > 0;
+        JArray boundsMask = mask;
+        if (boundsThreshold > 0)
+        {
+            // Low-confidence pixels should not make the Qwen subject crop
+            // encompass the entire image. Use ComfyUI's native ThresholdMask
+            // only for the bounding box, retaining the original edit mask.
+            string boundedMask = CreateNode("ThresholdMask", new JObject()
+            {
+                ["mask"] = mask,
+                ["value"] = boundsThreshold
+            });
+            boundsMask = NodePath(boundedMask, 0);
+        }
         string boundsNode = CreateNode("SwarmMaskBounds", new JObject()
         {
-            ["mask"] = mask,
+            ["mask"] = boundsMask,
             ["grow"] = growBy,
             ["aspect_x"] = isCustomRes ? targetX : 0,
             ["aspect_y"] = isCustomRes ? targetY : 0

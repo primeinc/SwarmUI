@@ -2002,7 +2002,7 @@ public class WorkflowGeneratorSteps
                     }
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
-                    g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
+                    g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1), boundsThreshold: g.IsQwenImage21() ? 0.5 : 0);
                     bool nativeQwenSegment = g.IsQwenImage21();
                     string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
                     // Start every segment from the same unmodified stage model/CLIP/VAE.

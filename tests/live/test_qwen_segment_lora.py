@@ -149,7 +149,7 @@ def graph_variant(original, case, stage, strength):
     if "strength_clip" in node["inputs"]:
         node["inputs"]["strength_clip"] = strength
     if stage == "segment":
-        if not any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
+        if not any(n["class_type"] == "TextEncodeQwenImage21" for n in graph.values()):
             raise AssertionError("This is not a SwarmUI Qwen 2.1 segment workflow")
         if not any("Composite" in n["class_type"] for n in graph.values()):
             raise AssertionError("No final segment compositor in exported workflow")
