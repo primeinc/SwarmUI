@@ -15,6 +15,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
 {
     private T2IModelHandler priorLoras;
     private bool priorHashSetting;
+    private bool addedQwenVaeKnownModel;
 
     [OneTimeSetUp]
     public void Initialize()
@@ -28,6 +29,23 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
+        addedQwenVaeKnownModel = CommonModels.Known.TryAdd("qwen-image-2.1-vae", new(
+            "qwen-image-2.1-vae",
+            "Qwen Image 2.1 VAE",
+            "The RGBA VAE for Qwen Image 2.1",
+            "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
+            "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+            "VAE",
+            "QwenImage/qwen_image_2.1_vae_bf16.safetensors"));
+    }
+
+    [OneTimeTearDown]
+    public void CleanupKnownModels()
+    {
+        if (addedQwenVaeKnownModel)
+        {
+            CommonModels.Known.TryRemove("qwen-image-2.1-vae", out _);
+        }
     }
 
     [SetUp]
