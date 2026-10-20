@@ -108,6 +108,18 @@ public class WorkflowGeneratorSteps
             }
             string type = node["class_type"]?.ToString();
             JObject inputs = node["inputs"] as JObject;
+            // The first output of both upstream Comfy LoRA loader variants
+            // is MODEL; output 1 of LoraLoader is CLIP. Inspect the linked
+            // output index, not merely the presence of a matching loader node.
+            // Otherwise a sampler referencing CLIP can appear to have a valid
+            // LoRA MODEL chain even though Comfy cannot use that connection.
+            if (type is "LoraLoader" or "LoraLoaderModelOnly"
+                && (current[1]?.Type != JTokenType.Integer || current[1].ToObject<int>() != 0))
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: sampler MODEL path points to output {current[1]} " +
+                    $"of LoRA loader '{modelNodeId}' ({type}); MODEL must use output 0.");
+            }
             // LanPaint's mask-aware sampler already owns the inpainting mask. The
             // generic DifferentialDiffusion model patch rewrites that mask by
             // timestep before LanPaint sees it, defeating a stable region mask.
