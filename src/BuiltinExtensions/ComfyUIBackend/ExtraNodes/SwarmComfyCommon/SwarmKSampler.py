@@ -397,7 +397,7 @@ class PatchedKSampler(comfy.samplers.KSampler):
             if actual_count != expected_step_count:
                 raise ValueError(
                     f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
-                    f"{expected_step_count} real denoising evaluations; got "
+                    f"{expected_step_count} sigma transitions; got "
                     f"{actual_count} (scheduled={self.steps}, start={start_step}, "
                     f"scheduler={self.scheduler}). Refusing truncated inference."
                 )
@@ -414,8 +414,38 @@ class PatchedKSampler(comfy.samplers.KSampler):
                 flush=True,
             )
         sampler = comfy.samplers.sampler_object(self.sampler)
+        # A sigma schedule is only a plan. Observe the callbacks actually emitted
+        # by the real Comfy sampler so 4 scheduled intervals cannot masquerade
+        # as 4 completed iterations. This is not a count of DiT forward calls:
+        # some samplers evaluate the model multiple times per iteration.
+        observed_steps = 0
 
-        return samplers_sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+        def observed_callback(step, x0, x, total_steps):
+            nonlocal observed_steps
+            observed_steps += 1
+            if callback is not None:
+                return callback(step, x0, x, total_steps)
+
+        samples = samplers_sample(
+            self.model, noise, positive, negative, cfg, self.device, sampler,
+            sigmas, self.model_options, latent_image=latent_image,
+            denoise_mask=denoise_mask,
+            callback=observed_callback if expected_step_count > 0 else callback,
+            disable_pbar=disable_pbar, seed=seed, model_negative=model_negative
+        )
+        if expected_step_count > 0:
+            print(
+                f"[QWEN21-SEG] sampler completed_steps={observed_steps} "
+                f"requested_steps={expected_step_count}",
+                flush=True,
+            )
+            if observed_steps != expected_step_count:
+                raise ValueError(
+                    f"[QWEN21-SEG] EXECUTION STEP MISMATCH: requested "
+                    f"{expected_step_count} completed sampler iterations but "
+                    f"observed {observed_steps} callback events."
+                )
+        return samples
 
 
 #comfy/ComfyUI/comfy/sample.py - sample
