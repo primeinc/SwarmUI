@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json.Linq;
@@ -240,14 +241,46 @@ public static class WorkflowGeneratorHarness
     /// <summary>Generates a workflow for a request, optionally traced.</summary>
     public static Build Generate(Request request, bool traced)
     {
-        T2IParamInput input = BuildInput(request);
+        Attempt attempt = TryGenerate(request, traced);
+        if (attempt.Error is not null)
+        {
+            ExceptionDispatchInfo.Capture(attempt.Error).Throw();
+        }
+        return new(attempt.Input, attempt.Generator.Workflow, attempt.Generator.Workflow.ToString(), attempt.Generator.Trace);
+    }
+
+    /// <summary>Result of one generation attempt, which may have thrown.</summary>
+    /// <param name="Input">The user input, as left by the generator, or null if building the input threw.</param>
+    /// <param name="Generator">The generator, holding the workflow as far as it got, or null if building the input threw.</param>
+    /// <param name="Error">The exception thrown, or null.</param>
+    public record class Attempt(T2IParamInput Input, WorkflowGenerator Generator, Exception Error);
+
+    /// <summary>Runs the generator for a request, optionally traced, keeping the input and partial workflow if it throws.</summary>
+    public static Attempt TryGenerate(Request request, bool traced)
+    {
+        T2IParamInput input;
+        try
+        {
+            input = BuildInput(request);
+        }
+        catch (Exception ex)
+        {
+            return new(null, null, ex);
+        }
         WorkflowGenerator generator = new() { UserInput = input, Features = [.. request.Features] };
         if (traced)
         {
             generator.Trace = new(generator);
         }
-        JObject workflow = generator.Generate();
-        return new(input, workflow, workflow.ToString(), generator.Trace);
+        try
+        {
+            generator.Generate();
+            return new(input, generator, null);
+        }
+        catch (Exception ex)
+        {
+            return new(input, generator, ex);
+        }
     }
 
     /// <summary>Returns true if two builds of the same request produced the same workflow. The only per-build randomness the generator emits, the bare-ComfyUI SaveImage 'filename_prefix' ('SwarmUI_{random}_'), is masked.</summary>

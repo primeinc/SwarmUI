@@ -211,37 +211,82 @@ public class WorkflowTraceTests : SwarmUITest
         public bool Trimmed => Omitted is not null && Omitted.Length > 0;
     }
 
-    /// <summary>Builds one request untraced and traced, and checks the traced build.</summary>
+    /// <summary>For a request the untraced build throws on, checks that tracing changed nothing about the failure: same exception, same partial workflow, same input state, no trace stored in metadata, tracker detached, error recorded, and the partial trace still builds.</summary>
+    public static void CheckFailureIsNoOp(Attempt plain, Attempt traced, string label, List<string> failures)
+    {
+        if (traced.Error is null)
+        {
+            failures.Add($"{label}: untraced build threw {plain.Error.GetType().Name} but traced build succeeded");
+            return;
+        }
+        if (traced.Error.GetType() != plain.Error.GetType() || traced.Error.Message != plain.Error.Message)
+        {
+            failures.Add($"{label}: untraced build threw {plain.Error.GetType().Name}: {plain.Error.Message}, traced build threw {traced.Error.GetType().Name}: {traced.Error.Message}");
+        }
+        if (plain.Generator is null || traced.Generator is null)
+        {
+            if (plain.Generator is not null || traced.Generator is not null)
+            {
+                failures.Add($"{label}: only one build failed before generation started");
+            }
+            return;
+        }
+        if (ComparableText(traced.Generator.Workflow) != ComparableText(plain.Generator.Workflow))
+        {
+            failures.Add($"{label}: tracing changed the partial workflow at the point of failure");
+        }
+        string plainMeta = plain.Input.ExtraMeta.Keys.Order().JoinString(","), tracedMeta = traced.Input.ExtraMeta.Keys.Order().JoinString(",");
+        if (plainMeta != tracedMeta)
+        {
+            failures.Add($"{label}: failed build ExtraMeta keys differ: untraced [{plainMeta}], traced [{tracedMeta}]");
+        }
+        if (!traced.Input.ParamsQueried.SetEquals(plain.Input.ParamsQueried))
+        {
+            failures.Add($"{label}: failed build ParamsQueried differ: traced-only [{traced.Input.ParamsQueried.Except(plain.Input.ParamsQueried).JoinString(",")}], untraced-only [{plain.Input.ParamsQueried.Except(traced.Input.ParamsQueried).JoinString(",")}]");
+        }
+        if (traced.Input.ParamReadTracker is not null)
+        {
+            failures.Add($"{label}: parameter read tracker still attached after a failed build");
+        }
+        WorkflowTrace trace = traced.Generator.Trace;
+        if (trace.Error is null || !trace.Error.StartsWith($"{traced.Error.GetType().Name}: "))
+        {
+            failures.Add($"{label}: trace did not record the failure (Error = {trace.Error ?? "null"})");
+        }
+        try
+        {
+            trace.Build();
+            trace.BuildDetail();
+        }
+        catch (Exception ex)
+        {
+            failures.Add($"{label}: partial trace of a failed build cannot be built: {ex}");
+        }
+    }
+
+    /// <summary>Builds one request untraced and traced, and checks the traced build, or that tracing is a no-op on the failure path when the generator rejects the request.</summary>
     public static CaseOutcome RunCase(string label, Func<Request> make)
     {
         List<string> failures = [];
-        Build plain;
         long start = Stopwatch.GetTimestamp();
-        try
-        {
-            plain = Generate(make(), false);
-        }
-        catch (SwarmReadableErrorException ex)
-        {
-            return new(label, ex.Message, null, failures, Stopwatch.GetTimestamp() - start, 0);
-        }
-        catch (Exception ex)
-        {
-            return new(label, null, $"{ex.GetType().Name}: {ex.Message}", failures, Stopwatch.GetTimestamp() - start, 0);
-        }
+        Attempt plainAttempt = TryGenerate(make(), false);
         long plainTicks = Stopwatch.GetTimestamp() - start;
         start = Stopwatch.GetTimestamp();
-        Build traced;
-        try
-        {
-            traced = Generate(make(), true);
-        }
-        catch (Exception ex)
-        {
-            failures.Add($"{label}: untraced build succeeded but traced build threw {ex}");
-            return new(label, null, null, failures, plainTicks, Stopwatch.GetTimestamp() - start);
-        }
+        Attempt tracedAttempt = TryGenerate(make(), true);
         long tracedTicks = Stopwatch.GetTimestamp() - start;
+        if (plainAttempt.Error is not null)
+        {
+            CheckFailureIsNoOp(plainAttempt, tracedAttempt, label, failures);
+            bool readable = plainAttempt.Error is SwarmReadableErrorException;
+            return new(label, readable ? plainAttempt.Error.Message : null, readable ? null : $"{plainAttempt.Error.GetType().Name}: {plainAttempt.Error.Message}", failures, plainTicks, tracedTicks);
+        }
+        if (tracedAttempt.Error is not null)
+        {
+            failures.Add($"{label}: untraced build succeeded but traced build threw {tracedAttempt.Error}");
+            return new(label, null, null, failures, plainTicks, tracedTicks);
+        }
+        Build plain = new(plainAttempt.Input, plainAttempt.Generator.Workflow, plainAttempt.Generator.Workflow.ToString(), null);
+        Build traced = new(tracedAttempt.Input, tracedAttempt.Generator.Workflow, tracedAttempt.Generator.Workflow.ToString(), tracedAttempt.Generator.Trace);
         if (!SameWorkflow(traced, plain))
         {
             failures.Add($"{label}: tracing changed the workflow");
@@ -283,7 +328,7 @@ public class WorkflowTraceTests : SwarmUITest
         List<CaseOutcome> upstreamCrashes = [.. outcomes.Where(o => o.Crash is not null)];
         int built = outcomes.Count(o => o.Rejected is null && o.Crash is null);
         static long ms(long ticks) => ticks * 1000 / Stopwatch.Frequency;
-        TestContext.Out.WriteLine($"{cases.Count} cases in {timer.ElapsedMilliseconds} ms wall: {built} traced and checked, {rejected.Count} rejected by the generator, {upstreamCrashes.Count} upstream crashes. Summed build time: untraced {ms(outcomes.Sum(o => o.PlainTicks))} ms, traced {ms(outcomes.Sum(o => o.TracedTicks))} ms.");
+        TestContext.Out.WriteLine($"{cases.Count} cases in {timer.ElapsedMilliseconds} ms wall: {built} traced and checked, {rejected.Count} rejected by the generator ({rejected.Count(o => o.Failures.Count == 0)} confirmed identical with tracing on: same exception, partial workflow, input state), {upstreamCrashes.Count} upstream crashes ({upstreamCrashes.Count(o => o.Failures.Count == 0)} confirmed identical). Summed build time: untraced {ms(outcomes.Sum(o => o.PlainTicks))} ms, traced {ms(outcomes.Sum(o => o.TracedTicks))} ms.");
         List<CaseOutcome> checkedOutcomes = [.. outcomes.Where(o => o.Rejected is null && o.Crash is null).OrderBy(o => o.SummaryChars)];
         if (checkedOutcomes.Count > 0)
         {
