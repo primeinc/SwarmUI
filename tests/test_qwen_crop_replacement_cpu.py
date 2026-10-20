@@ -75,5 +75,49 @@ class CropReplacementTests(unittest.TestCase):
         self.assertTrue(torch.allclose(result[0, :8, :8], source[0, :8, :8], atol=0.0001))
 
 
+    def test_native_context_filter_rejects_weak_background_speckles(self):
+        """Native CropAndStitch filters optional context too: do not invent a bug."""
+        image = torch.ones((1, 256, 256, 3), dtype=torch.float32)
+        subject = torch.zeros((1, 256, 256), dtype=torch.float32)
+        subject[:, 112:145, 112:145] = 1.0
+        weak_context = subject.clone()
+        weak_context[:, :8, :8] = 0.1
+        weak_context[:, -8:, -8:] = 0.2
+        strong_context = weak_context.clone()
+        strong_context[:, :8, :8] = 0.8
+
+        args = dict(
+            image=image, mask=subject,
+            downscale_algorithm="bilinear", upscale_algorithm="bicubic",
+            preresize=False, preresize_mode="ensure minimum resolution",
+            preresize_min_width=1024, preresize_min_height=1024,
+            preresize_max_width=16384, preresize_max_height=16384,
+            mask_fill_holes=True, mask_expand_pixels=0,
+            mask_invert=False, mask_blend_pixels=0, mask_hipass_filter=0.5,
+            extend_for_outpainting=False, extend_up_factor=1.0,
+            extend_down_factor=1.0, extend_left_factor=1.0,
+            extend_right_factor=1.0, context_from_mask_extend_factor=1.2,
+            output_resize_to_target_size=True, output_target_width=128,
+            output_target_height=128, output_padding="32",
+            device_mode="cpu (compatible)",
+        )
+        crop = InpaintCropImproved()
+        def bounds(context):
+            stitcher, _, _ = crop.inpaint_crop(
+                **{**args, "optional_context_mask": context})[:3]
+            return tuple(stitcher[k][0] for k in (
+                "cropped_to_canvas_x", "cropped_to_canvas_y",
+                "cropped_to_canvas_w", "cropped_to_canvas_h"))
+        baseline = bounds(subject)
+        self.assertEqual(bounds(weak_context), baseline,
+                         "Upstream filters confidence below the hipass cutoff")
+        # A false positive ABOVE the cutoff can legitimately expand context.
+        # That is a detector-quality issue, not evidence that subthreshold
+        # mask confidence evades the native crop filter.
+        noisy = bounds(strong_context)
+        self.assertNotEqual(noisy, baseline,
+                            "Strong remote context must change native bounds")
+
+
 if __name__ == "__main__":
     unittest.main()
