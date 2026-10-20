@@ -63,7 +63,9 @@ public partial class WorkflowGenerator
             for (int i = FirstQwen21AdditionalReferenceIndex(useOriginal, hasInitImage);
                 i < references.Count; i++)
             {
-                JArray image = GetPromptImage(true, true, i);
+                // Qwen accepts separate native-size references; preserve the
+                // user's image rather than applying generic text-encoder resizing.
+                JArray image = GetPromptImage(false, false, i);
                 if (image is not null)
                 {
                     referenceImages.Add(image);
