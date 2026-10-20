@@ -6,7 +6,7 @@ metric used when real Qwen LoRA OFF/ON/OFF images are supplied.
 import unittest
 from PIL import Image, ImageDraw
 from integration.qwen_segment_lora_confinement import (
-    region_rms, assert_same_detector_mask,
+    region_rms, assert_same_detector_mask, normalized_lora_path,
 )
 
 
@@ -138,6 +138,14 @@ class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
         mask = Image.new("L", base.size, 0)
         ImageDraw.Draw(mask).rectangle((104, 104, 151, 151), fill=255)
         return base, mask
+
+    def test_lora_paths_match_separators_but_not_filename_case(self):
+        self.assertEqual(normalized_lora_path("subjects\\portrait.safetensors"),
+                         "subjects/portrait")
+        self.assertEqual(normalized_lora_path("subjects/portrait.SAFETENSORS"),
+                         "subjects/portrait")
+        self.assertNotEqual(normalized_lora_path("subjects/Portrait.safetensors"),
+                            normalized_lora_path("subjects/portrait.safetensors"))
 
     def test_change_on_detected_subject_is_measured_inside_only(self):
         base, mask = self.sample()
