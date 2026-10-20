@@ -214,6 +214,10 @@ def join_text(leaves, weighted):
 
 
 def token_batches_have_weights(batches):
+    if batches is None or isinstance(batches, (bool, int, float, str)):
+        # Multimodal tokenizers (Qwen 2.1 included) carry scalar flags such as
+        # keep_vision beside actual token batches. Those are not weighted tokens.
+        return False
     if not batches:
         return False
     if isinstance(batches, dict):
