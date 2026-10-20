@@ -17,6 +17,8 @@ class SwarmQwenImage21SegmentEncode:
             },
             "optional": {
                 "use_original_reference": ("BOOLEAN", {"default": True}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "lora_hooks": ("HOOKS",),
                 "reference_tile_size": ("INT", {"default": 0, "min": 0, "max": 4096}),
                 "reference_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 4096}),
                 "reference_temporal_tile_size": ("INT", {"default": 32, "min": 8, "max": 4096}),
@@ -35,7 +37,7 @@ class SwarmQwenImage21SegmentEncode:
         self, clip, vae, image, prompt, negative_prompt,
         use_original_reference=True, reference_tile_size=0, reference_tile_overlap=64,
         reference_temporal_tile_size=32, reference_temporal_tile_overlap=4,
-        **reference_images,
+        steps=20, lora_hooks=None, **reference_images,
     ):
         # TextEncodeQwenImage21 supports one image per native vision slot. The C# workflow
         # isolates batch items before this node, preventing one source image from
@@ -81,12 +83,34 @@ class SwarmQwenImage21SegmentEncode:
                 ref_latents.append(vae.encode(ref_image))
 
         keep_vision = not ref_latents
-        positive = clip.encode_from_tokens_scheduled(
-            clip.tokenize(prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
+        # Route Swarm-specific syntax and step-scheduled LoRA hooks through the
+        # same parser as ordinary Swarm conditioning, preserving Qwen's image
+        # slots and keep_vision behavior in each scheduled token sequence.
+        advanced_markers = ("<weight", "<embed", "<embedding", "<break", "<fromto", "<alternate",
+                            "<alt:", "<alt[", "<lora:", "(")
+        use_advanced = lora_hooks is not None or any(
+            marker in text for text in (prompt or "", negative_prompt or "")
+            for marker in advanced_markers
         )
-        negative = clip.encode_from_tokens_scheduled(
-            clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
-        )
+        if use_advanced:
+            from .SwarmText import SwarmTextEncodeAdvanced
+            tokenizer_flags = {"keep_vision": keep_vision, "prevent_empty_text": True}
+            advanced = SwarmTextEncodeAdvanced()
+            def encode_prompt(text):
+                return advanced.encode(
+                    clip, steps, text or "", width, height, width, height,
+                    images=images_vl, lora_hooks=lora_hooks,
+                    tokenize_kwargs=tokenizer_flags,
+                )[0]
+            positive = encode_prompt(prompt)
+            negative = encode_prompt(negative_prompt)
+        else:
+            positive = clip.encode_from_tokens_scheduled(
+                clip.tokenize(prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
+            )
+            negative = clip.encode_from_tokens_scheduled(
+                clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
+            )
 
         if ref_latents:
             positive = node_helpers.conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
