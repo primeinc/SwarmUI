@@ -230,6 +230,29 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
     }
 
+
+    [Test]
+    public void SegmentScopedLoraLoadsBeforeLaterModelWrappers()
+    {
+        WorkflowGenerator g = Prepare();
+        g.LoadingModel = new JArray("base-model", 0);
+        g.LoadingClip = new JArray("base-clip", 0);
+        g.LoadingModelType = "Base";
+        g.LoadingAdditionalLoraConfinement = 11;
+
+        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -10).Action(g);
+        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
+
+        string wrapperId = g.CreateNode("TorchCompileModel", new JObject()
+        {
+            ["model"] = g.LoadingModel,
+            ["backend"] = "inductor"
+        });
+        JProperty wrapper = g.Workflow.Property(wrapperId)!;
+        Assert.That(wrapper.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
+            "Segment-confined Qwen LoRA must be inside any later compile/cache/model wrapper.");
+    }
+
     [Test]
     public void KreaKeepsItsExistingSegmentPath()
     {
