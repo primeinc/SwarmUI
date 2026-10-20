@@ -9,8 +9,10 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Builds Qwen Image 2.1 segment conditioning from the actual crop using a Swarm-owned
-    /// compatibility node that mirrors the upstream edit contract and emits a fresh latent.
+    /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
+    /// Reference Edit follows the same edit-stage sampling shape used by the working Base2Edit Qwen path:
+    /// native-style Qwen conditioning plus a plain VAE encoding of the current crop, with edit strength
+    /// expressed through start_at_step. It deliberately does not sample from a fresh latent.
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
@@ -36,10 +38,22 @@ public partial class WorkflowGenerator
             ["negative_prompt"] = negativePrompt ?? ""
         });
 
-        JArray latent = mode == "Reference Edit" ? NodePath(encoder, 2) : NodePath(crop.MaskedLatent, 0);
-        int startStep = mode == "Reference Edit" ? 0 : (int)Math.Round(steps * (1 - creativity));
+        JArray latent;
+        int startStep = (int)Math.Round(steps * (1 - creativity));
+        if (mode == "Reference Edit")
+        {
+            // Match the proven Base2Edit Qwen 2.1 sampler contract: current image latent as the edit anchor.
+            // Do not attach the segment mask to the latent here; the existing pixel-space composite confines
+            // the regenerated crop to the selected segment after decode.
+            string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
+            latent = NodePath(encodedCrop, 0);
+        }
+        else
+        {
+            latent = NodePath(crop.MaskedLatent, 0);
+        }
 
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder}");
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
         return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
     }
 }
