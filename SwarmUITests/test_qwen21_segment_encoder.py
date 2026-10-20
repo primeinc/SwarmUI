@@ -113,7 +113,7 @@ def load_encoder():
         "SwarmComfyCommon/SwarmQwen.py"
     )
     with patch.dict(sys.modules, stubs):
-        spec = importlib.util.spec_from_file_location("swarm_qwen_contract_test", path)
+        spec = importlib.util.spec_from_file_location("fake_swarm_contract.SwarmQwen", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     return module.SwarmQwenImage21SegmentEncode
@@ -194,6 +194,42 @@ class Qwen21SegmentEncoderTests(unittest.TestCase):
                 self.clip, self.vae, FakeTensor((2, 64, 64, 4)),
                 "person", "negative",
             )
+
+    def test_advanced_prompt_routes_hooks_steps_and_qwen_image_slots(self):
+        class FakeAdvanced:
+            calls = []
+
+            def encode(self, clip, steps, prompt, width, height, target_width, target_height, **kwargs):
+                self.calls.append({
+                    "steps": steps, "prompt": prompt, "images": kwargs["images"],
+                    "lora_hooks": kwargs["lora_hooks"],
+                    "tokenize_kwargs": kwargs["tokenize_kwargs"],
+                })
+                return ({"scheduled_prompt": prompt},)
+
+        pkg = types.ModuleType("fake_swarm_contract")
+        pkg.__path__ = []
+        advanced_module = types.ModuleType("fake_swarm_contract.SwarmText")
+        advanced_module.SwarmTextEncodeAdvanced = FakeAdvanced
+        hooks = object()
+        with patch.dict(sys.modules, {
+            "fake_swarm_contract": pkg,
+            "fake_swarm_contract.SwarmText": advanced_module,
+        }):
+            pos, neg, _ = self.Encoder().encode(
+                self.clip, self.vae, self.image,
+                "<fromto[0.5]:first,second> <lora:face//hook=0>", "negative",
+                steps=12, lora_hooks=hooks,
+            )
+        self.assertEqual(len(FakeAdvanced.calls), 2)
+        self.assertEqual(FakeAdvanced.calls[0]["steps"], 12)
+        self.assertIs(FakeAdvanced.calls[0]["lora_hooks"], hooks)
+        self.assertIn("fromto", FakeAdvanced.calls[0]["prompt"])
+        self.assertEqual(len(FakeAdvanced.calls[0]["images"]), 1)
+        self.assertEqual(FakeAdvanced.calls[0]["tokenize_kwargs"],
+                         {"keep_vision": False, "prevent_empty_text": True})
+        self.assertIn("reference_latents", pos)
+        self.assertIn("reference_latents", neg)
 
     def test_optional_input_preserves_saved_workflow_compatibility(self):
         inputs = self.Encoder.INPUT_TYPES()
