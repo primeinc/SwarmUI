@@ -112,6 +112,17 @@ public class QwenSegmentOriginalSourceTests
             new CommonModels.ModelInfo("qwen-image-2.1-vae", "Qwen Test VAE",
                 "Graph construction only", "https://example.invalid/qwen-vae.safetensors",
                 new string('0', 64), "VAE", "qwen-vae.safetensors"));
+        // Runtime registers the VAE model set before graph generation.
+        // An in-memory entry prevents the source-only test from downloading
+        // a model when the segment override deliberately changes compat class.
+        if (!SwarmUI.Core.Program.T2IModelSets.TryGetValue("VAE", out T2IModelHandler vaeHandler))
+        {
+            vaeHandler = new T2IModelHandler() { ModelType = "VAE" };
+            SwarmUI.Core.Program.T2IModelSets["VAE"] = vaeHandler;
+        }
+        vaeHandler.Models["qwen-vae.safetensors"] = new T2IModel(
+            vaeHandler, "/models/vae", "/models/vae/qwen-vae.safetensors",
+            "qwen-vae.safetensors");
         // Source-only NUnit does not initialize the application extension.
         // Supply inert typed handles for optional extension controls so the
         // real generator can run. Nothing is downloaded or inferred here.
@@ -238,17 +249,29 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(ComfyUIAPIAbstractBackend.ShouldPreserveQwenOriginalInitUpload(graph, input),
             Is.EqualTo(hasInitImage), "Native Qwen Init Image must bypass external canvas resampling");
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
+        string authoredRegionText = new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts
+            .Single(p => p.Type == PromptRegion.PartType.Segment).Prompt;
+        var positiveEncoders = nodes.Where(x => x.Node["class_type"]?.ToString() == "SwarmTextEncodeAdvanced"
+            && x.Node["inputs"]?["prompt"]?.ToString() == authoredRegionText).ToArray();
+        Assert.That(nodes.Any(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21"), Is.False,
+            "The Qwen path delegates Swarm weight/schedule tags to SwarmTextEncodeAdvanced");
         if (referenceEdit)
         {
             var referenceCrop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
-            var referenceEncoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21");
+            var referenceEncoder = positiveEncoders.Single();
             var decoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageDecode");
             string samplerId = decoder.Node["inputs"]?["samples"]?[0]?.ToString();
             var referenceSampler = (Newtonsoft.Json.Linq.JObject)graph[samplerId];
             Assert.That(referenceSampler["class_type"]?.ToString(), Is.EqualTo("KSampler"));
             Assert.That(referenceSampler["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(1));
-            Assert.That(referenceSampler["inputs"]?["latent_image"]?.ToString(),
-                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(referenceEncoder.Id, 2).ToString()));
+            string emptyId = referenceSampler["inputs"]?["latent_image"]?[0]?.ToString();
+            var emptyLatent = graph[emptyId] as Newtonsoft.Json.Linq.JObject;
+            Assert.That(emptyLatent?["class_type"]?.ToString(), Is.EqualTo("LatentMultiply"));
+            Assert.That(emptyLatent?["inputs"]?["multiplier"]?.Value<double>(), Is.Zero);
+            string encodedId = emptyLatent?["inputs"]?["samples"]?[0]?.ToString();
+            Assert.That(graph[encodedId]?["class_type"]?.ToString(), Is.EqualTo("VAEEncode"));
+            Assert.That(graph[encodedId]?["inputs"]?["pixels"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(referenceCrop.Id, 1).ToString()));
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_ImageEncode"),
                 Is.Zero, "Reference Edit must use Qwen's own empty edit latent");
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler"),
@@ -257,7 +280,7 @@ public class QwenSegmentOriginalSourceTests
                 .Node["inputs"]?["stitcher"]?.ToString(),
                 Is.EqualTo(new Newtonsoft.Json.Linq.JArray(referenceCrop.Id, 0).ToString()));
             Assert.That(referenceEncoder.Node["inputs"]?["prompt"]?.ToString(),
-                Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
+                Is.EqualTo(authoredRegionText));
             Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() is "SaveImage" or "SwarmSaveImageWS"),
                 Is.EqualTo(1));
             return;
@@ -267,7 +290,7 @@ public class QwenSegmentOriginalSourceTests
             var cropNodes = nodes.Where(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved").ToArray();
             var detectors = nodes.Where(x => x.Node["class_type"]?.ToString() == "SwarmClipSeg").ToArray();
             var samplers = nodes.Where(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler").ToArray();
-            var encoders = nodes.Where(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21").ToArray();
+            var encoders = positiveEncoders;
             var stitches = nodes.Where(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved").ToArray();
             var splitNodes = nodes.Where(x => x.Node["class_type"]?.ToString() == "ImageFromBatch").ToArray();
             Assert.That(cropNodes, Has.Length.EqualTo(batchSize), "Each batch item needs its own crop");
@@ -285,8 +308,8 @@ public class QwenSegmentOriginalSourceTests
                 Assert.That(detectors[i].Node["inputs"]?["images"]?.ToString(),
                     Is.EqualTo(cropNodes[i].Node["inputs"]?["image"]?.ToString()));
                 Assert.That(encoders[i].Node["inputs"]?["prompt"]?.ToString(),
-                    Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
-                Assert.That(encoders[i].Node["inputs"]?["images.image_1"]?.ToString(),
+                    Is.EqualTo(authoredRegionText));
+                Assert.That(encoders[i].Node["inputs"]?["images"]?.ToString(),
                     Is.EqualTo(new Newtonsoft.Json.Linq.JArray(cropNodes[i].Id, 1).ToString()));
                 Assert.That(stitches[i].Node["inputs"]?["stitcher"]?.ToString(),
                     Is.EqualTo(new Newtonsoft.Json.Linq.JArray(cropNodes[i].Id, 0).ToString()));
@@ -300,7 +323,7 @@ public class QwenSegmentOriginalSourceTests
         var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
         var detector = nodes.Single(x => x.Node["class_type"]?.ToString() == "SwarmClipSeg");
         var sampler = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler");
-        var encoder = nodes.Single(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21");
+        var encoder = positiveEncoders.Single();
         var stitch = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved");
         var mask = nodes.Single(x => x.Node["class_type"]?.ToString() == "ThresholdMask");
         string sourceId = crop.Node["inputs"]?["image"]?[0]?.ToString();
@@ -317,18 +340,23 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(detector.Node["inputs"]?["images"]?.ToString(), Is.EqualTo(crop.Node["inputs"]?["image"]?.ToString()));
         Assert.That(crop.Node["inputs"]?["mask"]?.ToString(),
             Is.EqualTo(new Newtonsoft.Json.Linq.JArray(mask.Id, 0).ToString()));
-        Assert.That(encoder.Node["inputs"]?["images.image_1"]?.ToString(),
-            Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()),
-            "The original crop occupies the first native Qwen reference slot");
-        Assert.That(encoder.Node["inputs"]?["images.image_2"] is not null,
-            Is.EqualTo(hasInitImage && independentPromptImage),
-            "An independent PromptImages[0] must not be discarded or substituted for the source");
+        var visionPath = encoder.Node["inputs"]?["images"] as Newtonsoft.Json.Linq.JArray;
+        Assert.That(visionPath, Is.Not.Null, "The subject crop must reach the native Swarm vision encoder");
         if (hasInitImage && independentPromptImage)
         {
-            Assert.That(encoder.Node["inputs"]?["images.image_2"]?[0]?.ToString(), Is.Not.EqualTo(sourceId));
+            var batchedVision = graph[visionPath[0]?.ToString()] as Newtonsoft.Json.Linq.JObject;
+            Assert.That(batchedVision?["class_type"]?.ToString(), Is.EqualTo("ImageBatch"));
+            Assert.That(batchedVision?["inputs"]?["image1"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()));
+            Assert.That(batchedVision?["inputs"]?["image2"]?[0]?.ToString(), Is.Not.EqualTo(sourceId));
+        }
+        else
+        {
+            Assert.That(visionPath.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()));
         }
         Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
-            Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
+            Is.EqualTo(authoredRegionText));
         Assert.That(sampler.Node["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(0.8).Within(0.000001));
         if (sectionLoraWeight >= 0)
         {
