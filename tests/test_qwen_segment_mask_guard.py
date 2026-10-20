@@ -69,6 +69,23 @@ class MaskGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.node.validate(mask, minimum_confidence=0.5)
 
+    def test_authored_low_clipseg_threshold_preserves_all_selected_pixels(self):
+        # SwarmClipSeg already thresholds confidence at the user's 0.1.
+        # Its subsequent normalization leaves valid selected pixels at 0.25
+        # and 0.5; a second hard 0.5 cutoff silently deletes both.
+        scores = torch.tensor([0.0, 0.2, 0.4, 0.8], dtype=torch.float32).reshape(1, 1, 4)
+        detected = torch.nn.functional.threshold(scores, 0.1, 0.0)
+        detected -= detected.min()
+        detected /= detected.max()
+        output, = self.node.validate(detected, minimum_confidence=0.0)
+        self.assertIs(output, detected)
+        binary = (output > 0.0).float()  # production ThresholdMask(value=0)
+        self.assertEqual(binary.flatten().tolist(), [0.0, 1.0, 1.0, 1.0])
+        self.assertEqual((binary > 0.5).float().flatten().tolist(),
+                         [0.0, 1.0, 1.0, 1.0])  # upstream crop hipass=0.5 is unchanged
+        self.assertEqual((output > 0.5).float().flatten().tolist(),
+                         [0.0, 0.0, 0.0, 1.0])  # negative control: old graph lost pixels
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))
