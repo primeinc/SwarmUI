@@ -49,13 +49,15 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -140,6 +142,28 @@ public class QwenSegmentOriginalSourceTests
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
         input.PreparsePromptLikes();
+        // Production prompt parsing assigns the segment's confinement context.
+        // A model-only LoRA OFF and ON still must reach this segment sampler.
+        if (sectionLoraWeight >= 0)
+        {
+            int section = new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts
+                .Single(p => p.Type == PromptRegion.PartType.Segment).ContextID;
+            Assert.That(section, Is.GreaterThan(0));
+            const string path = "Audit/HannahLynn.safetensors";
+            if (!SwarmUI.Core.Program.T2IModelSets.TryGetValue("LoRA", out T2IModelHandler loraHandler))
+            {
+                loraHandler = new T2IModelHandler() { ModelType = "LoRA" };
+                SwarmUI.Core.Program.T2IModelSets["LoRA"] = loraHandler;
+            }
+            loraHandler.Models[path] = new T2IModel(loraHandler, "/models/loras",
+                "/models/loras/" + path, path);
+            input.Set(T2IParamTypes.Loras, new System.Collections.Generic.List<string> { "Audit/HannahLynn" });
+            input.Set(T2IParamTypes.LoraWeights, new System.Collections.Generic.List<string>
+                { sectionLoraWeight.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+            input.Set(T2IParamTypes.LoraTencWeights, new System.Collections.Generic.List<string> { "0" });
+            input.Set(T2IParamTypes.LoraSectionConfinement,
+                new System.Collections.Generic.List<string> { section.ToString() });
+        }
         WorkflowGenerator generator = new() { UserInput = input };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
@@ -169,6 +193,31 @@ public class QwenSegmentOriginalSourceTests
         Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
             Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
         Assert.That(sampler.Node["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(0.8).Within(0.000001));
+        if (sectionLoraWeight >= 0)
+        {
+            var loraLoaders = nodes.Where(x => x.Node["class_type"]?.ToString()
+                is "LoraLoaderModelOnly" or "LoraLoader").ToArray();
+            Assert.That(loraLoaders, Has.Length.EqualTo(1),
+                "Only one confined LoRA loader may exist in a single-segment graph");
+            var loader = loraLoaders.Single();
+            Assert.That(loader.Node["inputs"]?["lora_name"]?.ToString().Replace('\\', '/'),
+                Does.EndWith("Audit/HannahLynn.safetensors"));
+            Assert.That(loader.Node["inputs"]?["strength_model"]?.ToObject<double>(),
+                Is.EqualTo(sectionLoraWeight).Within(0.000001));
+            string cursor = sampler.Node["inputs"]?["model"]?[0]?.ToString();
+            bool samplerUsesLoader = false;
+            for (int hop = 0; hop < 20 && cursor is not null; hop++)
+            {
+                if (cursor == loader.Id)
+                {
+                    samplerUsesLoader = true;
+                    break;
+                }
+                cursor = graph[cursor]?["inputs"]?["model"]?[0]?.ToString();
+            }
+            Assert.That(samplerUsesLoader, Is.True,
+                "Confined LoRA must be on the sampler model path, not an orphan loader");
+        }
         Assert.That(sampler.Node["inputs"]?["LanPaint_Info"]?.ToString(), Is.EqualTo("LanPaint KSampler."));
         Assert.That(sampler.Node["inputs"]?["Inpainting_mode"]?.ToString(), Is.EqualTo("🖼️ Image Inpainting"));
         Assert.That(stitch.Node["inputs"]?["stitcher"]?.ToString(),
