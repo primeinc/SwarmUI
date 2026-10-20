@@ -197,8 +197,8 @@ public class QwenSegmentOriginalSourceTests
             Assert.That(indexes, Is.EquivalentTo(new int?[] { 0, 1 }));
             for (int i = 0; i < batchSize; i++)
             {
-                string sourceId = cropNodes[i].Node["inputs"]?["image"]?[0]?.ToString();
-                Assert.That(graph[sourceId]?["class_type"]?.ToString(), Is.EqualTo("ImageFromBatch"));
+                string batchSourceId = cropNodes[i].Node["inputs"]?["image"]?[0]?.ToString();
+                Assert.That(graph[batchSourceId]?["class_type"]?.ToString(), Is.EqualTo("ImageFromBatch"));
                 Assert.That(detectors[i].Node["inputs"]?["images"]?.ToString(),
                     Is.EqualTo(cropNodes[i].Node["inputs"]?["image"]?.ToString()));
                 Assert.That(encoders[i].Node["inputs"]?["prompt"]?.ToString(),
