@@ -12,8 +12,14 @@ Usage:
    --workflow /path/to/actual-swarm-comfy-api-graph.json \
    --comfy-url http://127.0.0.1:8188 --outdir /path/to/evidence --attempts 1
 
-A positive pixel-change result is not semantic acceptance. The output remains
-NOT_CLOSED until reviewed against the requested subject transformation.
+Graph preflight also works without Comfy, Qwen weights, or a GPU:
+
+ python tests/integration/qwen_segment_text_replacement.py \
+   --workflow /path/to/actual-swarm-comfy-api-graph.json --preflight-only
+
+A passing preflight is graph-contract evidence, not a model-backed image
+test. A positive pixel-change result is not semantic acceptance. The output
+remains NOT_CLOSED until reviewed against the requested subject transformation.
 """
 from __future__ import annotations
 
@@ -306,8 +312,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", type=Path, required=True,
                         help="Genuine SwarmUI-exported Comfy API workflow for the reported failure")
-    parser.add_argument("--comfy-url", required=True, help="Real Comfy test backend, explicitly selected")
-    parser.add_argument("--outdir", type=Path, required=True)
+    parser.add_argument("--comfy-url", help="Real Comfy test backend, required for inference only")
+    parser.add_argument("--outdir", type=Path, help="Image evidence directory (required for inference only)")
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="Validate the actual exported graph offline; no backend, models, network, or GPU required")
     parser.add_argument("--attempts", type=int, default=1,
                         help="Number of real inference attempts with different segment seeds (1-10)")
     parser.add_argument("--timeout", type=int, default=900)
@@ -318,10 +326,24 @@ def main(argv=None):
     if isinstance(original, dict) and "prompt" in original and isinstance(original["prompt"], dict):
         original = original["prompt"]
     graph, spec = inspect_and_instrument(original)
+    if args.preflight_only:
+        print(json.dumps({
+            "verdict": "GRAPH_PREFLIGHT_PASSED_NOT_IMAGE_ACCEPTANCE",
+            "mode": "offline",
+            "node_count": len(original),
+            "structural_invariants": spec,
+            "model_inference_runs": 0,
+            "semantic_subject_replacement_verified": False,
+            "image_space_lora_effect_verified": False,
+            "runtime_node_registration_verified": False,
+        }, indent=2))
+        return 0
+    if not args.comfy_url or args.outdir is None:
+        parser.error("--comfy-url and --outdir are required for model-backed inference")
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
-    # Probe EVERY load-bearing runtime node before scheduling expensive GPU work.
+    # Probe EVERY load-bearing runtime node before scheduling model-backed inference.
     # A checked-in plugin does not prove Comfy loaded or registered it.
     for expected_node in (
         "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
