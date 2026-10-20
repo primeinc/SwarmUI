@@ -159,20 +159,17 @@ def graph_variant(original, case, stage, strength):
             raise AssertionError("Segment must use one upstream CropAndStitch adapter pair")
         if graph[stitches[0]]["inputs"].get("stitcher") != [crops[0], 0]:
             raise AssertionError("Stitch must receive the metadata from its matching upstream crop")
-        refs = [(node_id, n) for node_id, n in graph.items()
-                if n["class_type"] == "JoinImageWithAlpha"
-                and n["inputs"].get("image") == [crops[0], 1]
-                and n["inputs"].get("alpha") == [crops[0], 2]]
-        if len(refs) != 1:
-            raise AssertionError("Expected the native Comfy Qwen image+mask RGBA adapter")
-        rgba = [refs[0][0], 0]
+        if any(n["class_type"] == "JoinImageWithAlpha" and
+                   n["inputs"].get("image") == [crops[0], 1] and
+                   n["inputs"].get("alpha") == [crops[0], 2] for n in graph.values()):
+            raise AssertionError("Inpaint target mask was misused as input source alpha")
         encoders = [n for n in graph.values() if n["class_type"] == "TextEncodeQwenImage21"]
-        if len(encoders) != 1 or encoders[0]["inputs"].get("images.image_1") != rgba:
-            raise AssertionError("Native Qwen must see the masked RGBA reference, not an unmasked RGB crop")
+        if len(encoders) != 1 or encoders[0]["inputs"].get("images.image_1") != [crops[0], 1]:
+            raise AssertionError("Native Qwen must see the upstream cropped source image")
         if not any(n["class_type"] == "LanPaint_ImageEncode" and
-                   n["inputs"].get("image") == rgba and
+                   n["inputs"].get("image") == [crops[0], 1] and
                    n["inputs"].get("mask") == [crops[0], 2] for n in graph.values()):
-            raise AssertionError("LanPaint encode must see the SAME RGBA reference and mask")
+            raise AssertionError("LanPaint encode must reuse exactly the same source crop and distinct inpaint mask")
     ref = case.get(f"{stage}_output_image_ref")
     if ref is None:
         outputs = [n["inputs"]["images"] for n in graph.values()
