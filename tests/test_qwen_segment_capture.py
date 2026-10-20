@@ -77,6 +77,22 @@ class GraphTests(unittest.TestCase):
         g['segtext']['inputs']['images'] = ['crop', 0]
         self.assertFalse(any(w.startswith('REFERENCE_WITHOUT') for w in c.analyze(g)['segments'][0]['warnings']))
 
+    def test_shipped_qwen_encoder_is_recognized_as_conditioning_leaf(self):
+        graph = fixture()
+        graph['segtext'] = {
+            'class_type': 'SwarmQwenImage21SegmentEncode',
+            'inputs': {'clip': ['global', 0], 'vae': ['vae', 0],
+                       'image': ['crop', 0], 'image_1': ['basepixels', 0],
+                       'prompt': 'person', 'negative_prompt': '',
+                       'use_original_reference': True},
+        }
+        graph['segment']['inputs']['positive'] = ['segtext', 0]
+        graph['segment']['inputs']['negative'] = ['segtext', 1]
+        report = c.analyze(graph)['segments'][0]
+        self.assertEqual([n['id'] for n in report['conditioning_encoders']], ['segtext'])
+        self.assertEqual(report['conditioning_encoders'][0]['inputs']['image'], ['crop', 0])
+        self.assertEqual(report['conditioning_encoders'][0]['inputs']['image_1'], ['basepixels', 0])
+
     def test_actual_start_step_and_disabled_noise(self):
         g = fixture()
         g['segment']['inputs'].update(start_at_step=20, add_noise='disable')
