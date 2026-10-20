@@ -16,7 +16,7 @@ public partial class WorkflowGenerator
     /// PromptRegion already removed the segment directive and the request
     /// parser already resolved Swarm wildcards and dynamic prompt tags.
     /// </summary>
-    public static string FlattenQwen21SegmentPrompt(string prompt)
+    public static string FlattenQwen21SegmentPrompt(string prompt, bool allowEmpty = false)
     {
         string raw = prompt ?? "";
         // ProcessPromptLikeForLength is Swarm's existing tag flattener,
@@ -49,7 +49,7 @@ public partial class WorkflowGenerator
             }
         }
         string text = T2IPromptHandling.ProcessPromptLikeForLength(raw);
-        if (string.IsNullOrWhiteSpace(text))
+        if (!allowEmpty && string.IsNullOrWhiteSpace(text))
         {
             throw new SwarmUserErrorException("Qwen segment prompt has no text after Swarm markup processing.");
         }
@@ -101,7 +101,7 @@ public partial class WorkflowGenerator
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
             ["prompt"] = FlattenQwen21SegmentPrompt(prompt),
-            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? ""),
+            ["negative_prompt"] = FlattenQwen21SegmentPrompt(negativePrompt, allowEmpty: true),
             ["resolution"] = 0
         };
         int slot = 1;
