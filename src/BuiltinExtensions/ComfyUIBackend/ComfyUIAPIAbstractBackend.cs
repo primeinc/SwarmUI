@@ -1031,16 +1031,23 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return workflow;
         }
-        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
-        ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+        // CreateWorkflow may upload init/prompt images via initImageFixer.
+        // Include both construction and backend node validation in the same
+        // cleanup scope, otherwise any early error leaks those temporary files.
+        string workflow = null;
         try
         {
+            workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+            ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);
         }
         catch (Exception ex)
         {
             Logs.Verbose($"Error: {ex.ReadableString()}");
-            Logs.Debug($"Failed to process comfy workflow for inputs {user_input} with raw workflow {JObject.Parse(workflow).ToDenseDebugString(noSpacing: true)}");
+            string diagnosticGraph = workflow is null
+                ? "(workflow generation incomplete)"
+                : JObject.Parse(workflow).ToDenseDebugString(noSpacing: true);
+            Logs.Debug($"Failed to process comfy workflow for inputs {user_input} with raw workflow {diagnosticGraph}");
             throw;
         }
         finally
