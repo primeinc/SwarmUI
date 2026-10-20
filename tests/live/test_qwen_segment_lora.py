@@ -163,8 +163,10 @@ def graph_variant(original, case, stage, strength):
     if stage == "segment":
         if any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
             raise AssertionError("Obsolete homemade Qwen encoder still present in exported graph")
-        if not any(n["class_type"] == "TextEncodeQwenImage21" for n in graph.values()):
-            raise AssertionError("Segment workflow must use native ComfyUI TextEncodeQwenImage21")
+        if not any(n["class_type"] == "SwarmTextEncodeAdvanced" for n in graph.values()):
+            raise AssertionError("Segment workflow must use native SwarmTextEncodeAdvanced for Qwen tags")
+        if any(n["class_type"] == "TextEncodeQwenImage21" for n in graph.values()):
+            raise AssertionError("Segment unexpectedly uses the legacy tag-flattening Qwen encoder")
         crops = [key for key, node in graph.items() if node["class_type"] == "InpaintCropImproved"]
         stitches = [key for key, node in graph.items() if node["class_type"] == "InpaintStitchImproved"]
         if len(crops) != 1 or len(stitches) != 1:
@@ -198,22 +200,65 @@ def graph_variant(original, case, stage, strength):
                    n["inputs"].get("image") == [crops[0], 1] and
                    n["inputs"].get("alpha") == [crops[0], 2] for n in graph.values()):
             raise AssertionError("Inpaint target mask was misused as input source alpha")
-        encoders = [(key, n) for key, n in graph.items()
-                    if n["class_type"] == "TextEncodeQwenImage21"]
-        if len(encoders) != 1 or encoders[0][1]["inputs"].get("images.image_1") != [crops[0], 1]:
-            raise AssertionError("Native Qwen must see the upstream cropped source image")
-        encoder_id = encoders[0][0]
         sampler_id = case["segment_sampler_node"]
         sampler = graph[sampler_id]
-        # Swarm's two supported native modes are not interchangeable.
-        # Reference Edit: native Qwen empty edit latent + native KSampler.
-        # Masked Img2Img: upstream LanPaint encoded source + masked sampler.
+        source_ref = [crops[0], 1]
+        reference_encodes = [(key, n) for key, n in graph.items()
+                             if n["class_type"] == "VAEEncode"
+                             and n["inputs"].get("pixels") == source_ref]
+        if len(reference_encodes) != 1:
+            raise AssertionError("Missing or duplicate VAEEncode for the Qwen source crop")
+        vae_ref = [reference_encodes[0][0], 0]
+
+        def conditioning_source(direction):
+            current, visited, refs = sampler["inputs"].get(direction), set(), []
+            while isinstance(current, list) and len(current) == 2 and str(current[0]) in graph:
+                idx = str(current[0])
+                if idx in visited:
+                    raise AssertionError("Cyclic Qwen segment conditioning")
+                visited.add(idx)
+                upstream = graph[idx]
+                kind = upstream["class_type"]
+                if kind == "ReferenceLatent":
+                    refs.append(upstream["inputs"].get("latent"))
+                    current = upstream["inputs"].get("conditioning")
+                elif kind in ("ConditioningMultiply", "ConditioningZeroOut"):
+                    current = upstream["inputs"].get("conditioning")
+                elif kind == "SwarmTextEncodeAdvanced":
+                    return upstream, refs
+                else:
+                    raise AssertionError(f"Unexpected {direction} conditioning stage {kind}")
+            raise AssertionError(f"Missing SwarmTextEncodeAdvanced on sampler {direction} path")
+
+        def vision_contains_source(ref):
+            visited = set()
+            while isinstance(ref, list) and len(ref) == 2:
+                if ref == source_ref:
+                    return True
+                idx = str(ref[0])
+                if idx in visited or idx not in graph or graph[idx]["class_type"] != "ImageBatch":
+                    return False
+                visited.add(idx)
+                ref = graph[idx]["inputs"].get("image1")
+            return False
+
+        for direction in ("positive", "negative"):
+            encoder, latent_refs = conditioning_source(direction)
+            if vae_ref not in latent_refs:
+                raise AssertionError(f"Sampler {direction} lacks its original crop reference latent")
+            if not vision_contains_source(encoder["inputs"].get("images")):
+                raise AssertionError(f"Sampler {direction} vision encoder does not see source crop")
+
+        # The Qwen editing modes do not share the same latent path.
         if sampler["class_type"] == "KSampler":
-            if sampler["inputs"].get("latent_image") != [encoder_id, 2]:
-                raise AssertionError("Reference Edit must sample Qwen's native edit latent")
-            if any(n["class_type"] == "LanPaint_ImageEncode"
-                   for n in graph.values() if n is not sampler):
-                raise AssertionError("Reference Edit must not encode the original crop as LanPaint latent")
+            latent_ref = sampler["inputs"].get("latent_image")
+            empty = graph.get(str(latent_ref[0])) if isinstance(latent_ref, list) and len(latent_ref) == 2 else None
+            if (not empty or empty["class_type"] != "LatentMultiply" or
+                    float(empty["inputs"].get("multiplier", -1)) != 0.0 or
+                    empty["inputs"].get("samples") != vae_ref):
+                raise AssertionError("Reference Edit must sample the zeroed original Qwen crop latent")
+            if any(n["class_type"] == "LanPaint_ImageEncode" for n in graph.values()):
+                raise AssertionError("Reference Edit cannot use masked LanPaint latent encoding")
         elif sampler["class_type"] == "LanPaint_KSampler":
             encoded = [(key, n) for key, n in graph.items()
                        if n["class_type"] == "LanPaint_ImageEncode"
