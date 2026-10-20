@@ -2,6 +2,30 @@
 
 ## Actual native paths
 
+## Ordinary Qwen Image 2.1 generation and edit inputs
+
+The normal (non-segment) text-to-image path uses
+`SwarmEmptyQwenImage21Latent`, a small Swarm Comfy node that allocates the
+same 64-channel, 16x-compressed zero tensor as ComfyUI's
+`TextEncodeQwenImage21.execute`. The generic four-channel `EmptyLatentImage`
+is not a Qwen Image 2.1 latent. The user-selected width, height and batch size
+are passed through unchanged; rectangular canvases remain rectangular.
+
+Ordinary Qwen editing supplies a provided Init Image to both the Swarm text
+vision encoder and the normal `ReferenceLatent` VAE conditioning path. Multiple
+Prompt Images use independent `image_1`...`image_16` inputs rather than
+ComfyUI `ImageBatch`, which resizes later references. Both normal editing and
+segments load each reference with the same Qwen 32-pixel-alignment rule used
+by `TextEncodeQwenImage21(resolution=0)`; neither pathway invents text.
+The native Qwen tokenizer's `prevent_empty_text` flag is set on ordinary
+positive/negative conditioning as well as segments.
+
+`SwarmUITests/Qwen21EmptyLatentTests.cs` checks the real C# dispatch and
+reference graph. `tests/test_qwen21_empty_latent_cpu.py` directly runs the
+registered Python tensor generator and checks rectangular, batch and channel
+geometry against the native ComfyUI Qwen node. These are CPU/graph contracts,
+not evidence that a specific model follows segment prompts or responds to LoRAs.
+
 SwarmUI retains its existing `<segment:...>` prompt parser and CLIPSeg/YOLO
 detection. For Qwen 2.1 text conditioning it routes the author's Swarm tags
 through `SwarmTextEncodeAdvanced` and ComfyUI's unchanged `ReferenceLatent`
