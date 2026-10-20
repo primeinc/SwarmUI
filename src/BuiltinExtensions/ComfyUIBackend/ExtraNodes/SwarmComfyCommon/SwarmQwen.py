@@ -17,6 +17,7 @@ class SwarmQwenImage21SegmentEncode:
             },
             "optional": {
                 "use_original_reference": ("BOOLEAN", {"default": True}),
+                **{f"image_{i}": ("IMAGE",) for i in range(1, 17)},
             },
         }
 
@@ -26,31 +27,44 @@ class SwarmQwenImage21SegmentEncode:
     FUNCTION = "encode"
     DESCRIPTION = "Qwen Image 2.1 segment conditioning compatible with ComfyUI TextEncodeQwenImage21."
 
-    def encode(self, clip, vae, image, prompt, negative_prompt, use_original_reference=True):
-        # Match Qwen 2.1's native edit contract without depending on the newer upstream
-        # TextEncodeQwenImage21 node being registered in the selected Comfy backend.
+    def encode(self, clip, vae, image, prompt, negative_prompt, use_original_reference=True, **reference_images):
+        # TextEncodeQwenImage21 supports one image per native vision slot. The C# workflow
+        # isolates batch items before this node, preventing one source image from
+        # silently providing references for the rest of a batch.
+        if image.shape[0] != 1:
+            raise ValueError("Qwen segment encoder requires one source crop per invocation")
         source = image[:1]
-        samples = source.movedim(-1, 1)
-        width = max(32, round(samples.shape[3] / 32) * 32)
-        height = max(32, round(samples.shape[2] / 32) * 32)
-        if (width, height) == (samples.shape[3], samples.shape[2]):
-            resized = source
-        else:
-            resized = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
 
-        # Match TextEncodeQwenImage21 in both supported modes: the source crop
-        # supplies vision/reference conditioning only when requested. Without it,
-        # native Qwen tokenization keeps vision tokens and attaches no reference latents.
+        def resize_reference(ref_image):
+            samples = ref_image[:1].movedim(-1, 1)
+            width = max(32, round(samples.shape[3] / 32) * 32)
+            height = max(32, round(samples.shape[2] / 32) * 32)
+            if (width, height) == (samples.shape[3], samples.shape[2]):
+                return ref_image[:1]
+            return comfy.utils.common_upscale(
+                samples, width, height, "lanczos", "disabled"
+            ).movedim(1, -1)
+
+        resized = resize_reference(source)
+        height, width = resized.shape[1:3]
+        references = [resized] if use_original_reference else []
+        for key in sorted(reference_images, key=lambda key: int(key.rsplit("_", 1)[-1])):
+            ref_image = reference_images[key]
+            if ref_image is not None:
+                if len(references) >= 16:
+                    raise ValueError("Qwen Image 2.1 supports at most sixteen reference images")
+                references.append(resize_reference(ref_image))
+
         images_vl = []
-        reference = None
-        if use_original_reference:
-            rgb = resized[:, :, :, :3]
-            if resized.shape[-1] > 3:
-                rgb = rgb * resized[:, :, :, 3:] + (1.0 - resized[:, :, :, 3:])
-            images_vl = [rgb]
-            reference = vae.encode(resized)
+        ref_latents = []
+        for ref_image in references:
+            rgb = ref_image[:, :, :, :3]
+            if ref_image.shape[-1] > 3:
+                rgb = rgb * ref_image[:, :, :, 3:] + (1.0 - ref_image[:, :, :, 3:])
+            images_vl.append(rgb)
+            ref_latents.append(vae.encode(ref_image))
 
-        keep_vision = reference is None
+        keep_vision = not ref_latents
         positive = clip.encode_from_tokens_scheduled(
             clip.tokenize(prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
         )
@@ -58,9 +72,9 @@ class SwarmQwenImage21SegmentEncode:
             clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
         )
 
-        if reference is not None:
-            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [reference]}, append=True)
-            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [reference]}, append=True)
+        if ref_latents:
+            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
+            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
 
         # Keep the native-compatible third output for workflow/debug parity. Segment Reference Edit
         # intentionally does not sample from it; it uses a VAE encoding of the crop as its edit anchor.
@@ -73,7 +87,7 @@ class SwarmQwenImage21SegmentEncode:
 
         print(
             f"[QWEN21-SEG] encoder crop={tuple(resized.shape)} "
-            f"reference_latent={tuple(reference.shape) if reference is not None else None} "
+            f"reference_latents={len(ref_latents)} "
             f"original_reference={use_original_reference} prompt={repr((prompt or '')[:160])} "
             f"negative={repr((negative_prompt or '')[:120])}",
             flush=True,
