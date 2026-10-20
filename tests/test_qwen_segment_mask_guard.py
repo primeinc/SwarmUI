@@ -41,6 +41,12 @@ class MaskGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no subject detected"):
             self.node.validate(torch.zeros((1, 64, 80), dtype=torch.float32))
 
+    def test_mixed_batch_rejects_even_if_another_image_detects_subject(self):
+        mask = torch.zeros((2, 32, 32), dtype=torch.float32)
+        mask[0, 8:16, 8:16] = 0.8
+        with self.assertRaisesRegex(ValueError, "one or more masks"):
+            self.node.validate(mask)
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))

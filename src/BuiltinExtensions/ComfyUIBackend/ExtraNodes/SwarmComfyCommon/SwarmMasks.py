@@ -146,8 +146,12 @@ class SwarmRequireNonEmptyMask:
     CATEGORY = "SwarmUI/masks"
 
     def validate(self, mask):
-        if not torch.any(mask > 0).item():
-            raise ValueError("Qwen segment: no subject detected by the mask; refusing full-frame fallback")
+        # A batched edit cannot silently fall back to a whole-frame crop
+        # on one empty item just because some OTHER item has a valid mask.
+        frames = mask.unsqueeze(0) if mask.ndim == 2 else mask.reshape(-1, *mask.shape[-2:])
+        has_subject = torch.any(frames > 0, dim=(-2, -1))
+        if not torch.all(has_subject).item():
+            raise ValueError("Qwen segment: no subject detected in one or more masks; refusing full-frame fallback")
         return (mask,)
 
 
