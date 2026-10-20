@@ -15,6 +15,9 @@ PINNED_UPSTREAM_GIT_BLOB = "4e7a150a23f9235e48c8fb1d8f18bf759eb33916"
 CROP_PLUGIN = BACKEND / "ExtraNodes/ComfyInpaintCropAndStitch"
 PINNED_CROP_GIT_BLOB = "89d4c43593d3d5ec1ee131bd6dbdbce666fe425f"
 PINNED_CROP_INIT_BLOB = "d24dd44d381507953fc59f7a593c36f94179bf85"
+LANPAINT_PLUGIN = BACKEND / "ExtraNodes/LanPaintUpstream"
+PINNED_LANPAINT_NODES_BLOB = "6c2f8e4a7ebf238da66d2e3c885e82685880f78d"
+PINNED_LANPAINT_INIT_BLOB = "057359402c29c697197d643fd499825209684592"
 
 
 class NativeQwenBundleTest(unittest.TestCase):
@@ -45,6 +48,16 @@ class NativeQwenBundleTest(unittest.TestCase):
         registrations = (CROP_PLUGIN / "__init__.py").read_text(encoding="utf-8")
         self.assertIn('"InpaintCropImproved"', registrations)
         self.assertIn('"InpaintStitchImproved"', registrations)
+
+    def test_verbatim_upstream_masked_sampler_adapter_is_shipped(self):
+        for relative, blob in (
+            ("src/LanPaint/nodes.py", PINNED_LANPAINT_NODES_BLOB),
+            ("__init__.py", PINNED_LANPAINT_INIT_BLOB),
+        ):
+            contents = (LANPAINT_PLUGIN / relative).read_bytes()
+            git_blob = b"blob " + str(len(contents)).encode("ascii") + b"\x00" + contents
+            self.assertEqual(hashlib.sha1(git_blob).hexdigest(), blob, relative)
+        self.assertTrue((LANPAINT_PLUGIN / "LICENSE").is_file())
 
     def test_generation_uses_the_original_adapters_end_to_end(self):
         helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
