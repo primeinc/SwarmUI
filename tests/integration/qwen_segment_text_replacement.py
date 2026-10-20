@@ -113,10 +113,16 @@ def inspect_and_instrument(original):
     if "images.image_2" in encoder:
         raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
 
+    masked_encoder_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "LanPaint_ImageEncode"
+         and v["inputs"].get("image") == [crop_id, 1]
+         and v["inputs"].get("mask") == [crop_id, 2]],
+        "upstream LanPaint mask+image latent encoder",
+    )
     sampler_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "KSampler"
-         and v["inputs"].get("latent_image") == [enc_id, 2]],
-        "native KSampler on upstream Qwen edit latent",
+        [k for k, v in graph.items() if v["class_type"] == "LanPaint_KSampler"
+         and v["inputs"].get("latent_image") == [masked_encoder_id, 0]],
+        "upstream LanPaint masked sampler",
     )
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", -1))
@@ -135,8 +141,15 @@ def inspect_and_instrument(original):
     stitch_input_id = capture.link(stitch_input, graph)
     if stitch_input_id is None or graph[stitch_input_id]["class_type"] != "SplitImageWithAlpha":
         raise AssertionError("Stitch must receive the decoded sampled crop without unexpected alpha")
-    if sampler_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
-        raise AssertionError("Stitch image must actually originate from the segment KSampler")
+    decoder_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "LanPaint_ImageDecode"
+         and v["inputs"].get("samples") == [sampler_id, 0]
+         and v["inputs"].get("image") == [crop_id, 1]
+         and v["inputs"].get("mask") == [crop_id, 2]],
+        "upstream LanPaint masked image decoder",
+    )
+    if decoder_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
+        raise AssertionError("Stitch image must originate from the LanPaint masked decoder")
 
     for node_id in NODE_IDS.values():
         if node_id in graph:
