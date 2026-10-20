@@ -51,22 +51,28 @@ public partial class WorkflowGenerator
             encoderInputs["reference_temporal_tile_size"] = UserInput.Get(T2IParamTypes.VAETemporalTileSize, 32);
             encoderInputs["reference_temporal_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETemporalTileOverlap, 4);
         }
-        // Qwen supports sixteen individual references; the segment crop consumes one
-        // when enabled. Keep every optional prompt image in its own native vision slot.
+        // In an InitEdit request the first Prompt Image is the original whole
+        // image, which is already represented here by the selected crop.
+        // Passing both would condition the model on the same original person
+        // twice, and strongly resist a requested identity replacement.
+        // Preserve additional Prompt Images, or every explicitly supplied image
+        // when the dedicated Original Reference option is disabled.
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out System.Collections.Generic.List<Image> referenceImages)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            int maxPromptImages = useOriginalReference ? 15 : 16;
-            if (referenceImages.Count > maxPromptImages)
+            int firstExtra = useOriginalReference ? 1 : 0;
+            int maxExtras = useOriginalReference ? 15 : 16;
+            int extraCount = Math.Max(0, referenceImages.Count - firstExtra);
+            if (extraCount > maxExtras)
             {
-                throw new SwarmUserErrorException($"Qwen Image 2.1 segment accepts at most {maxPromptImages} Prompt Images with the current Original Reference setting; got {referenceImages.Count}.");
+                throw new SwarmUserErrorException($"Qwen Image 2.1 segment accepts at most {maxExtras} additional Prompt Images with Original Reference {(useOriginalReference ? "enabled" : "disabled")}; got {extraCount}.");
             }
-            for (int i = 0; i < referenceImages.Count; i++)
+            for (int i = firstExtra; i < referenceImages.Count; i++)
             {
                 JArray referenceImage = GetPromptImage(true, true, i);
                 if (referenceImage is not null)
                 {
-                    encoderInputs[$"image_{i + 1}"] = referenceImage;
+                    encoderInputs[$"image_{i - firstExtra + 1}"] = referenceImage;
                 }
             }
         }
