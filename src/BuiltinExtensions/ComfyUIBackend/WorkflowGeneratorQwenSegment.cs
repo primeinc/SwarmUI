@@ -29,13 +29,15 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException($"Unknown Qwen Image 2.1 segment sampling mode '{mode}'.");
         }
 
+        bool useOriginalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         string encoder = CreateNode("SwarmQwenImage21SegmentEncode", new JObject()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
             ["image"] = NodePath(crop.ScaledImage, 0),
             ["prompt"] = prompt ?? "",
-            ["negative_prompt"] = negativePrompt ?? ""
+            ["negative_prompt"] = negativePrompt ?? "",
+            ["use_original_reference"] = useOriginalReference
         });
 
         int startStep = (int)Math.Round(steps * (1 - creativity));
@@ -53,7 +55,7 @@ public partial class WorkflowGenerator
             latent = NodePath(crop.MaskedLatent, 0);
         }
 
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} original_reference={useOriginalReference} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
         return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
     }
 }
