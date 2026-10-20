@@ -30,6 +30,28 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
+        // CreateModelLoader executes the full Comfy model-generation pipeline. These tests need
+        // the extension params that pipeline reads, even when each feature remains disabled/default.
+        ComfyUIBackendExtension.SetClipDevice ??= new(new T2IParamType("Set CLIP Device", "", "cpu", ID: "setclipdevice"));
+        ComfyUIBackendExtension.SelfAttentionGuidanceScale ??= new(new T2IParamType("Self-Attention Guidance Scale", "", "0.5", ID: "selfattentionguidancescale"));
+        ComfyUIBackendExtension.SelfAttentionGuidanceSigmaBlur ??= new(new T2IParamType("Self-Attention Guidance Sigma Blur", "", "2", ID: "selfattentionguidancesigmablur"));
+        ComfyUIBackendExtension.PerturbedAttentionGuidanceScale ??= new(new T2IParamType("Perturbed Attention Guidance Scale", "", "3", ID: "perturbedattentionguidancescale"));
+        ComfyUIBackendExtension.RescaleCFGMultiplier ??= new(new T2IParamType("Rescale CFG Multiplier", "", "0.7", ID: "rescalecfgmultiplier"));
+        ComfyUIBackendExtension.RenormCFG ??= new(new T2IParamType("Renorm CFG", "", "0", ID: "renormcfg"));
+        ComfyUIBackendExtension.UseCfgZeroStar ??= new(new T2IParamType("Use CFG Zero Star", "", "false", ID: "usecfgzerostar"));
+        ComfyUIBackendExtension.UseTCFG ??= new(new T2IParamType("Use TCFG", "", "false", ID: "usetcfg"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceScale ??= new(new T2IParamType("Normalized Attention Guidance Scale", "", "0", ID: "normalizedattentionguidancescale"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceAlpha ??= new(new T2IParamType("Normalized Attention Guidance Alpha", "", "0.5", ID: "normalizedattentionguidancealpha"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceTau ??= new(new T2IParamType("Normalized Attention Guidance Tau", "", "1.5", ID: "normalizedattentionguidancetau"));
+        ComfyUIBackendExtension.TeaCacheMode ??= new(new T2IParamType("TeaCache Mode", "", "disabled", ID: "teacachemode"));
+        ComfyUIBackendExtension.TeaCacheThreshold ??= new(new T2IParamType("TeaCache Threshold", "", "0.25", ID: "teacachethreshold"));
+        ComfyUIBackendExtension.TeaCacheStart ??= new(new T2IParamType("TeaCache Start", "", "0", ID: "teacachestart"));
+        ComfyUIBackendExtension.EasyCacheMode ??= new(new T2IParamType("EasyCache Mode", "", "disabled", ID: "easycachemode"));
+        ComfyUIBackendExtension.EasyCacheThreshold ??= new(new T2IParamType("EasyCache Threshold", "", "0", ID: "easycachethreshold"));
+        ComfyUIBackendExtension.EasyCacheStart ??= new(new T2IParamType("EasyCache Start", "", "0", ID: "easycachestart"));
+        ComfyUIBackendExtension.EasyCacheEnd ??= new(new T2IParamType("EasyCache End", "", "1", ID: "easycacheend"));
+        ComfyUIBackendExtension.ModelAttentionBackend ??= new(new T2IParamType("Model Attention Backend", "", "pytorch attention", ID: "modelattentionbackend"));
+        ComfyUIBackendExtension.UseSparseAttention ??= new(new T2IParamType("Use Sparse Attention", "", "None", ID: "usesparseattention"));
     }
 
     [SetUp]
