@@ -1971,27 +1971,12 @@ public class WorkflowGeneratorSteps
                     // Bounds based on the latter can swallow the entire image and defeat cropping.
                     string detectedMaskNode = segmentNode;
                     int blurAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskBlur, 10);
-                    if (blurAmt > 0)
+                    int growAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskGrow, 16);
+                    // Existing non-Qwen pipeline is unchanged. The upstream
+                    // InpaintCropImproved node owns these operations for Qwen.
+                    if (!g.IsQwenImage21())
                     {
-                        if (g.IsQwenImage21())
-                        {
-                            string maskImage = g.CreateNode("MaskToImage", new JObject()
-                            {
-                                ["mask"] = NodePath(segmentNode, 0)
-                            });
-                            string blurred = g.CreateNode("ImageBlur", new JObject()
-                            {
-                                ["image"] = NodePath(maskImage, 0),
-                                ["blur_radius"] = blurAmt, // Comfy validates its native 1..31 range; never silently clamp user input.
-                                ["sigma"] = 1.0
-                            });
-                            segmentNode = g.CreateNode("ImageToMask", new JObject()
-                            {
-                                ["image"] = NodePath(blurred, 0),
-                                ["channel"] = "red"
-                            });
-                        }
-                        else
+                        if (blurAmt > 0)
                         {
                             segmentNode = g.CreateNode("SwarmMaskBlur", new JObject()
                             {
@@ -2000,16 +1985,15 @@ public class WorkflowGeneratorSteps
                                 ["sigma"] = 1
                             });
                         }
-                    }
-                    int growAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskGrow, 16);
-                    if (growAmt > 0)
-                    {
-                        segmentNode = g.CreateNode("GrowMask", new JObject()
+                        if (growAmt > 0)
                         {
-                            ["mask"] = NodePath(segmentNode, 0),
-                            ["expand"] = growAmt,
-                            ["tapered_corners"] = true
-                        });
+                            segmentNode = g.CreateNode("GrowMask", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0),
+                                ["expand"] = growAmt,
+                                ["tapered_corners"] = true
+                            });
+                        }
                     }
                     if (g.UserInput.Get(T2IParamTypes.SaveSegmentMask, false))
                     {
@@ -2026,10 +2010,73 @@ public class WorkflowGeneratorSteps
                     }
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
-                    g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel,
-                        thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1),
-                        boundsMask: g.IsQwenImage21() ? NodePath(detectedMaskNode, 0) : null);
                     bool nativeQwenSegment = g.IsQwenImage21();
+                    JArray cropStitcher = null, qwenCrop = null, qwenCropMask = null;
+                    if (nativeQwenSegment)
+                    {
+                        // The upstream, separately GPL-licensed, unmodified
+                        // ComfyUI-Inpaint-CropAndStitch plugin owns crop context,
+                        // sizing, mask edge handling and reassembly. Swarm only
+                        // connects the existing text detector and user settings.
+                        string desiredRes = g.UserInput.Get(T2IParamTypes.SegmentTargetResolution, "0x0");
+                        (string sx, string sy) = desiredRes.BeforeAndAfter('x');
+                        int rw = int.Parse(sx), rh = int.Parse(sy);
+                        int targetW = rw > 0 && rh > 0 ? rw : g.FinalLoadedModel?.StandardWidth > 0
+                            ? g.FinalLoadedModel.StandardWidth : g.UserInput.GetImageWidth();
+                        int targetH = rw > 0 && rh > 0 ? rh : g.FinalLoadedModel?.StandardHeight > 0
+                            ? g.FinalLoadedModel.StandardHeight : g.UserInput.GetImageHeight();
+                        JObject cropInputs = new()
+                        {
+                            ["image"] = g.CurrentMedia.Path,
+                            ["mask"] = NodePath(detectedMaskNode, 0),
+                            ["downscale_algorithm"] = "bilinear",
+                            ["upscale_algorithm"] = "bicubic",
+                            ["preresize"] = false,
+                            ["preresize_mode"] = "ensure minimum resolution",
+                            ["preresize_min_width"] = 1024,
+                            ["preresize_min_height"] = 1024,
+                            ["preresize_max_width"] = 16384,
+                            ["preresize_max_height"] = 16384,
+                            ["mask_fill_holes"] = true,
+                            ["mask_expand_pixels"] = growAmt,
+                            ["mask_invert"] = false,
+                            ["mask_blend_pixels"] = blurAmt,
+                            ["mask_hipass_filter"] = 0.5,
+                            ["extend_for_outpainting"] = false,
+                            ["extend_up_factor"] = 1.0,
+                            ["extend_down_factor"] = 1.0,
+                            ["extend_left_factor"] = 1.0,
+                            ["extend_right_factor"] = 1.0,
+                            ["context_from_mask_extend_factor"] = 1.2,
+                            ["output_resize_to_target_size"] = true,
+                            ["output_target_width"] = targetW,
+                            ["output_target_height"] = targetH,
+                            ["output_padding"] = "32",
+                            ["device_mode"] = "cpu (compatible)"
+                        };
+                        if (oversize > 0)
+                        {
+                            // Native GrowMask is an optional CONTEXT selector;
+                            // it does not enlarge the region overwritten.
+                            string context = g.CreateNode("GrowMask", new JObject()
+                            {
+                                ["mask"] = NodePath(detectedMaskNode, 0),
+                                ["expand"] = oversize,
+                                ["tapered_corners"] = true
+                            });
+                            cropInputs["optional_context_mask"] = NodePath(context, 0);
+                        }
+                        string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
+                        cropStitcher = NodePath(cropNode, 0);
+                        qwenCrop = NodePath(cropNode, 1);
+                        qwenCropMask = NodePath(cropNode, 2);
+                    }
+                    else
+                    {
+                        g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path,
+                            oversize, vae.Path, g.FinalLoadedModel,
+                            thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
+                    }
                     string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
                     // Start every segment from the same unmodified stage model/CLIP/VAE.
                     model = segmentBaseModel;
@@ -2084,11 +2131,11 @@ public class WorkflowGeneratorSteps
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
                     JArray prompt, negPrompt;
-                    JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
+                    JArray segmentLatent = nativeQwenSegment ? null : NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
                     if (nativeQwenSegment)
                     {
                         (prompt, negPrompt, segmentLatent) = g.CreateQwen21SegmentConditioning(
-                            part.Prompt, neg, clip, vae, g.MaskShrunkInfo, part.ContextID);
+                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID);
                     }
                     else
                     {
