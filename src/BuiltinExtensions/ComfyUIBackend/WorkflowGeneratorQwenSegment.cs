@@ -10,30 +10,34 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Qwen edits consume instructions, not SD-style noun-only trigger
-    /// prompts. Leave an explicit edit instruction intact; otherwise explain
-    /// what the requested LoRA-triggered replacement targets.
+    /// Preserve a user's multiword natural-language edit request verbatim.
+    /// Only a bare trigger (a single token or weighted LoRA markup) is
+    /// sufficiently unambiguous to turn into a replacement instruction.
+    /// No fixed English verb allowlist can safely classify every instruction.
     /// </summary>
-    public static string BuildQwen21SegmentEditInstruction(string prompt, string target)
+    public static string BuildQwen21SegmentEditInstruction(
+        string prompt, string target, bool hasCroppedReference = true)
     {
-        string text = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "").Trim();
+        string raw = (prompt ?? "").Trim();
+        string text = T2IPromptHandling.ProcessPromptLikeForLength(raw).Trim();
         if (string.IsNullOrWhiteSpace(text))
         {
             throw new SwarmUserErrorException("Qwen segment edit requires an instruction or replacement description.");
         }
-        string[] commands = ["Edit ", "Replace ", "Change ", "Transform ", "Turn ", "Make ",
-            "Remove ", "Swap ", "Repaint ", "Redraw ", "Convert "];
-        if (Array.Exists(commands, command =>
-            text.StartsWith(command, StringComparison.OrdinalIgnoreCase) ||
-            text.StartsWith("Please " + command, StringComparison.OrdinalIgnoreCase) ||
-            text.Contains(" " + command, StringComparison.OrdinalIgnoreCase)))
+        bool hasSwarmWeightMarkup = raw.Contains("<weight[", StringComparison.OrdinalIgnoreCase);
+        if (!hasSwarmWeightMarkup && text.Any(char.IsWhiteSpace))
         {
+            // "Give the girl blue eyes" must not become "Replace ... with Give ...".
+            // Descriptive multiword phrases are also left untouched rather than
+            // making up an edit intention. For targeted replacement, the user
+            // may supply a complete instruction, as in the known reproduction.
             return text;
         }
         string subject = string.IsNullOrWhiteSpace(target) ||
             target.StartsWith("yolo-", StringComparison.OrdinalIgnoreCase) || target.Contains('|')
                 ? "selected subject" : target.Trim();
-        return $"Replace the {subject} in <image1> with {text}. Keep the rest of the image unchanged.";
+        string reference = hasCroppedReference ? " in <image1>" : "";
+        return $"Replace the {subject}{reference} with {text}. Keep the rest of the image unchanged.";
     }
 
     /// <summary>
@@ -75,15 +79,15 @@ public partial class WorkflowGenerator
         // Swarm weight tags are parsed by SwarmTextEncodeAdvanced, not by the
         // native Qwen encoder. Reuse Swarm\'s existing prompt-text flattener
         // so Qwen sees the actual subject and LoRA trigger, not literal markup.
+        bool useOriginal = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         JObject inputs = new()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["prompt"] = BuildQwen21SegmentEditInstruction(prompt, segmentTarget),
+            ["prompt"] = BuildQwen21SegmentEditInstruction(prompt, segmentTarget, hasCroppedReference: useOriginal),
             ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? "").Trim(),
             ["resolution"] = 0
         };
-        bool useOriginal = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         int slot = 1;
         if (useOriginal)
         {
