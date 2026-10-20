@@ -2170,7 +2170,7 @@ public class WorkflowGeneratorSteps
                             $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 " +
                             $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
-                            $"steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
+                            $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
                             $"diagnostics=always");
                         TraceQwenImage("00_source_full_frame", beforeImage.Path);
                         string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
@@ -2188,10 +2188,14 @@ public class WorkflowGeneratorSteps
                     string sampler;
                     if (nativeQwenSegment)
                     {
-                        // ComfyUI's own KSampler uses 'steps' as actual evaluations
-                        // and expands the denoise sigma schedule internally.
-                        // No Swarm-specific sampler or hand-computed start index.
-                        sampler = g.CreateNode("LanPaint_KSampler", new JObject()
+                        // Reference Edit deliberately reuses ComfyUI's ordinary
+                        // Qwen edit latent and stock KSampler. Using LanPaint's
+                        // masked latent/sampler here instead re-encodes the
+                        // original subject and changes an instruction-based
+                        // replacement into masked image preservation.
+                        // The *separate* Masked Img2Img mode invokes LanPaint
+                        // and its unchanged official masked sampler.
+                        JObject samplerInputs = new()
                         {
                             ["model"] = model.Path,
                             ["seed"] = seed,
@@ -2202,10 +2206,18 @@ public class WorkflowGeneratorSteps
                             ["positive"] = prompt,
                             ["negative"] = negPrompt,
                             ["latent_image"] = segmentLatent,
-                            ["denoise"] = part.Strength2,
-                            ["LanPaint_NumSteps"] = 5,
-                            ["LanPaint_PromptMode"] = "Image First"
-                        });
+                            ["denoise"] = part.Strength2
+                        };
+                        if (qwenSegmentMode == "Reference Edit")
+                        {
+                            sampler = g.CreateNode("KSampler", samplerInputs);
+                        }
+                        else
+                        {
+                            samplerInputs["LanPaint_NumSteps"] = 5;
+                            samplerInputs["LanPaint_PromptMode"] = "Image First";
+                            sampler = g.CreateNode("LanPaint_KSampler", samplerInputs);
+                        }
                     }
                     else
                     {
