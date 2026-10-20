@@ -105,9 +105,15 @@ public partial class WorkflowGenerator
                 ["conditioning"] = negative
             }), 0);
         }
-        JArray latent = mode == "Reference Edit"
-            ? NodePath(native, 2)
-            : DoMaskedVAEEncode(vae.Path, croppedImage, croppedMask, null);
+        // Follow upstream LanPaint's Qwen 2.1 masked editing adapter instead
+        // of sampling an unmasked, empty Qwen latent.
+        string maskedEncode = CreateNode("LanPaint_ImageEncode", new JObject()
+        {
+            ["image"] = croppedImage,
+            ["vae"] = vae.Path,
+            ["mask"] = croppedMask
+        });
+        JArray latent = NodePath(maskedEncode, 0);
         return (positive, negative, latent);
     }
 }
