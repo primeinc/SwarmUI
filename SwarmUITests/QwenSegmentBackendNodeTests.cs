@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
+using SwarmUI.Utils;
 
 namespace SwarmUITests;
 
@@ -63,7 +64,7 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     public static void MissingAllBackendNodeInventoryFailsForNativeSegments()
     {
         Assert.Throws<SwarmUserErrorException>(() =>
-            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(NativeGraph(), []));
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(NativeGraph(), new HashSet<string>()));
     }
 
     [Test]
@@ -71,7 +72,7 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     {
         JObject graph = new() { ["save"] = Node("SaveImage") };
         Assert.DoesNotThrow(() =>
-            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, []));
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, new HashSet<string>()));
     }
 
     [Test]
