@@ -59,10 +59,9 @@ public class WorkflowGeneratorSteps
     public static void VerifyQwenSegmentLoraChain(WorkflowGenerator g, JArray modelPath, int sectionId, bool isRefiner)
     {
         List<string> selected = g.UserInput.Get(T2IParamTypes.Loras, []);
-        if (selected.Count == 0)
-        {
-            return;
-        }
+        // Even when no LoRA is requested, traverse the sampler MODEL path:
+        // unexpected active loaders and DifferentialDiffusion must not become
+        // invisible simply because the expected LoRA set is empty.
         List<string> weights = g.UserInput.Get(T2IParamTypes.LoraWeights, []);
         List<string> confinements = g.UserInput.Get(T2IParamTypes.LoraSectionConfinement, []);
         static string normalized(string name)
