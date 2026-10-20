@@ -246,8 +246,11 @@ def graph_variant(original, case, stage, strength):
             encoder, latent_refs = conditioning_source(direction)
             if vae_ref not in latent_refs:
                 raise AssertionError(f"Sampler {direction} lacks its original crop reference latent")
-            if not vision_contains_source(encoder["inputs"].get("images")):
+            vision = encoder["inputs"].get("image_1", encoder["inputs"].get("images"))
+            if not vision_contains_source(vision):
                 raise AssertionError(f"Sampler {direction} vision encoder does not see source crop")
+            if encoder["inputs"].get("image_2") is not None and encoder["inputs"].get("images") is not None:
+                raise AssertionError("Independent Qwen references must not share a resized ImageBatch")
 
         # The Qwen editing modes do not share the same latent path.
         if sampler["class_type"] == "KSampler":
