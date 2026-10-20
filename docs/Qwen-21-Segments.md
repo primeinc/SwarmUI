@@ -18,15 +18,19 @@ optional TorchCompile, and dynamic prompt LoRA hooks are passed to the condition
 
 `Segment Param Overrides` > `Segment Qwen 2.1 Sampling`:
 
-- **Reference Edit** (default): samples a plain VAE encoding of the cropped image
-  (without a latent noise mask). The configured `Steps` count is the number of
-  actual denoising iterations, **not** the total length of a schedule whose initial
-  iterations are discarded. For `0 < Segment Creativity < 1`, it follows ComfyUI's
+- **Reference Edit** (default): samples the **native Qwen empty latent** returned
+  by `SwarmQwenImage21SegmentEncode` (output 2), with the cropped original supplied
+  separately as vision/reference conditioning. This matches the working
+  non-segmented Qwen image-reference editing contract: the input girl's pixels
+  are **not** re-encoded as the starting latent to be reconstructed. The configured
+  `Steps` count is the number of actual denoising iterations. For `0 < Segment Creativity < 1`, it follows ComfyUI's
   `KSampler.set_steps(steps, denoise)` convention: build
   `scheduled_steps = int(steps / creativity)` and begin at
   `start_at_step = scheduled_steps - steps`. At four steps and 0.8 creativity,
   ComfyUI executes **four** iterations from a five-step schedule, not three from
-  a four-step schedule. The final pixel composite confines the result.
+  a four-step schedule. The final pixel composite confines the result, using
+  the original CLIPSeg **soft** mask rather than turning all barely nonzero
+  mask pixels into a hard opaque rectangle.
 - **Masked Img2Img**: samples the masked crop latent and retains the older
   `start_at_step = round(steps * (1 - Segment Creativity))` partial-iteration
   behavior, with DifferentialDiffusion when configured.
@@ -36,8 +40,8 @@ the mask is still generated and saved.
 
 `Segment Qwen 2.1 Original Reference` controls whether the cropped source
 image is also supplied as vision/reference conditioning. Disabling it does **not**
-remove the plain or masked crop latent used as the sampler's starting state,
-and does not disable other optional Prompt Images. The default is enabled.
+change Reference Edit's fresh output latent or Masked Img2Img's masked crop
+latent, and does not disable other optional Prompt Images. The default is enabled.
 
 Optional `Prompt Images` are retained as individual Qwen references when Text
 Encoded Image is not `none`; each reference retains its aspect ratio and its
@@ -58,13 +62,14 @@ Other model families, including Krea, retain their existing segment workflow.
 
 ## Verification and remaining acceptance
 
-`QwenReferenceEditStepScheduleTests` verifies the *production* step-plan
-arithmetic, not image fidelity. Regular CI also runs a reduced-size **real
-upstream ComfyUI Qwen transformer, loader, and model patcher** with synthetic
-weights under `tests/integration/test_real_comfy_qwen_lora.py`. Those tests
-show that ComfyUI itself can match and apply a LoRA to a Qwen forward pass.
-They do not prove SwarmUI's real generated segment image has the desired
-semantic edit.
+`QwenReferenceEditStepScheduleTests` verifies production step-plan arithmetic,
+not image fidelity. The former reduced-size synthetic Qwen/LoRA test file and
+its CI workflow were removed; they must **not** be reported as proof.
+`tests/integration/qwen_segment_text_replacement.py` instead instruments
+a real Swarm-exported Comfy workflow for the exact failed text-only prompt:
+it saves the actual CLIPSeg mask, source crop, generated crop, and composite.
+Only a live backend and semantic inspection can determine whether the subject
+was actually replaced. Its normal syntax check in CI is not a runtime pass.
 
 `tests/live/test_qwen_segment_lora.py` requires real exported workflows,
 installed LoRA files, and a live ComfyUI backend. Its on/off controls compare
