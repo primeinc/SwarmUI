@@ -163,10 +163,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
         Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
-        JProperty[] vaeEncodes = Nodes(g, "VAEEncode");
-        JProperty plainCropEncode = vaeEncodes.Single(p => p.Value["inputs"]!["pixels"] is JArray pixels
-            && JToken.DeepEquals(pixels, new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
-        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(plainCropEncode.Name, 0)));
+        string samplerLatentNodeId = sampler.Value["inputs"]!["latent_image"]![0]!.Value<string>()!;
+        JProperty plainCropEncode = g.Workflow.Property(samplerLatentNodeId)!;
+        Assert.That(plainCropEncode.Value["class_type"]!.Value<string>(), Is.EqualTo("VAEEncode"));
+        Assert.That(plainCropEncode.Value["inputs"]!["pixels"],
+            Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(encoder.Name, 2)));
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Plain-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
