@@ -660,7 +660,8 @@ public partial class WorkflowGenerator
             ["mask"] = maskForBounds,
             ["grow"] = growBy,
             ["aspect_x"] = isCustomRes ? targetX : 0,
-            ["aspect_y"] = isCustomRes ? targetY : 0
+            ["aspect_y"] = isCustomRes ? targetY : 0,
+            ["reject_empty"] = boundsMask is not null
         });
         string croppedImage = CreateNode(boundsMask is null ? "SwarmImageCrop" : "ImageCrop", new JObject()
         {
