@@ -18,9 +18,13 @@ frame.
 The two selectable segment sampling modes are intentionally different:
 
 ```
-Original source -> SwarmClipSeg(text) -> detected mask
-        |                                 |
-        +--------> InpaintCropImproved(image, detected mask)
+Original source -> SwarmClipSeg(text) -> normalized detector mask
+        |                                      |
+        |                 SwarmRequireNonEmptyMask (>0.5 support)
+        |                                      |
+        |                      native ThresholdMask (value=0.5)
+        |                                      |
+        +--------> InpaintCropImproved(image, binary subject mask)
                                |0 stitcher   |1 cropped image   |2 cropped mask
                                                 |
                          TextEncodeQwenImage21.images.image_1
@@ -51,7 +55,7 @@ explicit advanced option for users who specifically want unmasked crop edits.
 A bare regional LoRA trigger is first flattened from Swarm markup into plain
 text, then presented to the native Qwen encoder as a targeted image-edit
 instruction rather than a stand-alone noun phrase. Explicit edit instructions
-are passed through without rewording. CLIPSeg detections at or below the native crop's 0.5 hipass cutoff fail
+are passed through without rewording. Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
 before upstream CropAndStitch can fall back to the entire image. Accepted
 fractional confidence values are converted to a solid subject mask using
 ComfyUI's native ThresholdMask before the unchanged crop adapter. Its own
@@ -124,9 +128,20 @@ graphs whose crop source contains an upstream base sampler, validates native
 Qwen Reference Edit sampler links and parameters, queues a real Comfy backend,
 and captures before/crop/mask/after images for semantic review.
 `tests/live/test_qwen_segment_lora.py` checks an actual LoRA node is on the
-sampler model path and compares OFF/ON/OFF GPU output from real global and
-segment workflows.
+sampler model path and compares OFF/ON/OFF model-backed output from real global
+and segment workflows.
+
+**Testability does not require a GPU as a blanket rule.** C# graph generation,
+prompt/LoRA-path invariants, native node contracts, exported-graph preflight,
+the actual PyTorch CPU mask guard, and unchanged upstream CPU crop/stitch
+operations are executable without Qwen weights or GPU hardware. The pixel tests
+include failing controls for old-subject ghosting and empty masks. These do
+not establish what Qwen *generates*: semantic replacement of the target,
+actual detector recognition, and image-space LoRA effectiveness require running
+the corresponding model weights and inspecting inference results. A capable CPU
+backend is theoretically acceptable; a GPU is a performance/resource choice,
+not a logical prerequisite. Ordinary CI has not run model-backed Qwen inference.
 
 **Status: semantic subject replacement and LoRA effect remain UNVERIFIED**
-until these real GPU workflows succeed with the user's model/image/LoRAs.
-A valid graph and passing CI do not prove image correctness.
+until the real model-backed workflows succeed with the user's source image and
+LoRAs. A valid graph and passing CI do not prove image correctness.
