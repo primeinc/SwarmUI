@@ -365,15 +365,25 @@ def test_real_global_and_segment_lora_effect(case):
         if stage == "segment":
             detector_mask = assert_same_detector_mask(
                 mask_off_first, mask_on, mask_off_again)
+            crop_node = next(node for node in off.values()
+                             if node["class_type"] == "InpaintCropImproved")
+            # The native crop expands/feathers the binary mask. Do not
+            # misclassify that expected blend halo as a background LoRA leak.
+            # Honor user-configured mask grow/blur, not a fixed magic radius.
+            crop_inputs = crop_node["inputs"]
+            blend_margin = max(
+                48, int(math.ceil(float(crop_inputs.get("mask_expand_pixels", 0)) +
+                                  float(crop_inputs.get("mask_blend_pixels", 0)) + 8)))
             baseline_inside, baseline_outside = region_rms(
-                image_off_first, image_off_again, detector_mask)
+                image_off_first, image_off_again, detector_mask, margin=blend_margin)
             effect_inside, effect_outside = region_rms(
-                image_off_first, image_on, detector_mask)
+                image_off_first, image_on, detector_mask, margin=blend_margin)
             threshold = max(case["_min_rms"], baseline_inside * 8)
             leakage_limit = max(1.0, baseline_outside * 8)
             print(f"{case['name']} segment: LoRA inside RMS {effect_inside:.3f} "
                   f"(required > {threshold:.3f}); outside RMS {effect_outside:.3f} "
-                  f"(allowed <= {leakage_limit:.3f}); detector mask stable")
+                  f"(allowed <= {leakage_limit:.3f}); mask stable; "
+                  f"blend exclusion margin={blend_margin}px")
             assert effect_inside > threshold, (
                 f"{case['name']}: SEGMENT LORA INEFFECTIVE INSIDE THE SUBJECT. "
                 f"Actual image-space RMS={effect_inside:.3f}.")
