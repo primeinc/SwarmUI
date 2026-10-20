@@ -26,7 +26,7 @@ Original source -> SwarmClipSeg(text) -> detected mask
                                               |
 Reference Edit [default]: KSampler(model, Qwen output-2 latent, denoise=1)
                                               |
-                             LanPaint_ImageDecode(image=crop, mask=cropped mask)
+                             LanPaint_ImageDecode(image=crop, no mask)
                                               |
                            SplitImageWithAlpha -> InpaintStitchImproved(stitcher)
                                               |
@@ -42,8 +42,12 @@ The Qwen native edit encoder returns a **zero-filled** output-2 latent, not
 the original image encoded as an img2img latent. Therefore Reference Edit
 uses `denoise=1`, a full native noise schedule. The segment tag's creativity
 value remains the `denoise` control of **Masked Img2Img**, not of the
-empty-latent Reference Edit sampler. Both use the native crop's mask for
-blending and stitching. Switching modes is explicit.
+empty-latent Reference Edit sampler. InpaintStitchImproved owns the
+only pixel-space blend into the source image. Masked Img2Img additionally
+feeds the crop mask to LanPaint_ImageEncode. LanPaint_ImageDecode
+only decodes and size-matches; giving it the mask as well causes a
+second blend and ghosts the original pixels around the edited subject.
+Switching modes is explicit.
 
 Comfy-Org's Qwen 2.1 documentation specifies `cfg=1`, `euler`, `simple`
 and 25 steps for the base edit workflow. CFG 5 is explicitly described as

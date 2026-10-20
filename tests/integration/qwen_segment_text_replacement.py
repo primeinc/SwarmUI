@@ -179,11 +179,11 @@ def inspect_and_instrument(original):
         [k for k, v in graph.items() if v["class_type"] == "LanPaint_ImageDecode"
          and v["inputs"].get("samples") == [sampler_id, 0]
          and v["inputs"].get("image") == masked_reference
-         and v["inputs"].get("mask") == [crop_id, 2]],
-        "upstream LanPaint image-space blend decoder fed by stock Qwen sampler",
+         and "mask" not in v["inputs"]],
+        "upstream LanPaint decoder without a second mask blend, fed by stock Qwen sampler",
     )
     if decoder_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
-        raise AssertionError("Stitch image must originate from the LanPaint masked decoder")
+        raise AssertionError("Stitch image must originate from the unmasked native decoder")
 
     for node_id in NODE_IDS.values():
         if node_id in graph:

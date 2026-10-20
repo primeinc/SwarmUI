@@ -2389,15 +2389,15 @@ public class WorkflowGeneratorSteps
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     if (nativeQwenSegment)
                     {
-                        // Upstream LanPaint_ImageDecode performs crop-space
-                        // source-preserving mask blend before upstream stitch.
+                        // Decode and size-match the native sampled crop, but DO NOT
+                        // mask-blend here. Upstream InpaintStitchImproved already
+                        // applies the crop's blending mask against the original
+                        // canvas; doing both composites ghosts the old subject.
                         string decoder = g.CreateNode("LanPaint_ImageDecode", new JObject()
                         {
                             ["samples"] = NodePath(sampler, 0),
                             ["vae"] = vae.Path,
-                            ["image"] = qwenCrop,
-                            ["mask"] = qwenCropMask,
-                            ["blend_overlap"] = 9
+                            ["image"] = qwenCrop
                         });
                         g.CurrentMedia = g.CurrentMedia.WithPath(NodePath(decoder, 0), WGNodeData.DT_IMAGE);
                     }

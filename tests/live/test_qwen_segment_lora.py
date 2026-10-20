@@ -192,9 +192,9 @@ def graph_variant(original, case, stage, strength):
                    if n["class_type"] == "LanPaint_ImageDecode"
                    and n["inputs"].get("samples") == [sampler_id, 0]
                    and n["inputs"].get("image") == [crops[0], 1]
-                   and n["inputs"].get("mask") == [crops[0], 2]]
+                   and "mask" not in n["inputs"]]
         if len(decoded) != 1:
-            raise AssertionError("Native Qwen sampler must decode against the real mask and source crop")
+            raise AssertionError("Native Qwen decoder must size-match the source crop without blending a second time")
         split = [(key, n) for key, n in graph.items()
                  if n["class_type"] == "SplitImageWithAlpha"
                  and n["inputs"].get("image") == [decoded[0][0], 0]]
