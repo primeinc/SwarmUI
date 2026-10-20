@@ -1948,7 +1948,7 @@ public class WorkflowGeneratorSteps
                         // Confined Qwen LoRAs must enter the same model-load pipeline as global LoRAs,
                         // before cache/attention/torch.compile wrappers are constructed. Applying the
                         // LoRA to CurrentModel here is too late for compiled model graphs.
-                        if (part.ContextID > 0)
+                        if (g.HasLorasForConfinement(part.ContextID))
                         {
                             string loaderType = hasSegmentModelOverride ? "Refiner" : "Base";
                             (t2iModel, model, clip, vae) = g.CreateModelLoader(
