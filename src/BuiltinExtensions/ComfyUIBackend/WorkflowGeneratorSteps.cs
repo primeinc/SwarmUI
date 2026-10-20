@@ -2222,7 +2222,7 @@ public class WorkflowGeneratorSteps
                             oversize, vae.Path, g.FinalLoadedModel,
                             thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
                     }
-                    string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
+                    string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Masked Img2Img", sectionId: part.ContextID) : null;
                     // Start every segment from the same unmodified stage model/CLIP/VAE.
                     model = segmentBaseModel;
                     clip = segmentBaseClip;
