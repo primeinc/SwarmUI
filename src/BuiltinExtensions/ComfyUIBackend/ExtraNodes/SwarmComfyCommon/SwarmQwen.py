@@ -193,7 +193,62 @@ class SwarmQwen21SegmentDiagnostics:
         return (generated,)
 
 
+class SwarmQwen21CompositeDiagnostics:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "before": ("IMAGE",),
+                "after": ("IMAGE",),
+                "mask": ("MASK",),
+                "section_id": ("INT", {"default": 0, "min": 0, "max": 2147483647}),
+            }
+        }
+
+    CATEGORY = "SwarmUI/qwen"
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "diagnose"
+    DESCRIPTION = "Pass through the final composite while reporting actual before/after changes."
+
+    def diagnose(self, before, after, mask, section_id):
+        src = before[:1, :, :, :3].detach().float()
+        final = after[:1, :, :, :3].detach().float()
+        if src.shape != final.shape:
+            raise ValueError(
+                f"[QWEN21-SEG] Final compositor changed spatial shape: "
+                f"source={tuple(src.shape)}, final={tuple(final.shape)}"
+            )
+        diff = (final - src).abs().mean(dim=-1)
+        m = mask[:1].detach().float().to(diff.device)
+        if m.dim() == 4:
+            m = m[:, 0]
+        if m.shape[-2:] != diff.shape[-2:]:
+            m = torch.nn.functional.interpolate(
+                m.unsqueeze(1), size=diff.shape[-2:], mode="bilinear", align_corners=False
+            )[:, 0]
+        m = m.clamp(0, 1)
+        mask_weight = m.sum().item()
+        mask_coverage = (m > 0.05).float().mean().item()
+        masked_mae = ((diff * m).sum() / max(mask_weight, 1e-8)).item()
+        full_mae = diff.mean().item()
+        masked_changed = (
+            ((diff > (1.0 / 255)).float() * (m > 0.05)).sum()
+            / max((m > 0.05).sum().item(), 1.0)
+        ).item()
+        level = "WARNING" if masked_mae < 0.002 else "INFO"
+        print(
+            f"[QWEN21-SEG] COMPOSITE {level} section={section_id} "
+            f"before={tuple(before.shape)} after={tuple(after.shape)} "
+            f"mask_mean={m.mean().item():.4f} mask_coverage={mask_coverage:.4f} "
+            f"full_mae={full_mae:.6f} masked_mae={masked_mae:.6f} "
+            f"masked_changed_fraction={masked_changed:.4f}",
+            flush=True,
+        )
+        return (after,)
+
+
 NODE_CLASS_MAPPINGS = {
     "SwarmQwenImage21SegmentEncode": SwarmQwenImage21SegmentEncode,
     "SwarmQwen21SegmentDiagnostics": SwarmQwen21SegmentDiagnostics,
+    "SwarmQwen21CompositeDiagnostics": SwarmQwen21CompositeDiagnostics,
 }
