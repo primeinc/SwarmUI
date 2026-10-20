@@ -16,9 +16,9 @@ public partial class WorkflowGenerator
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
-        ImageMaskCropData crop, int sectionId)
+        JArray croppedImage, JArray croppedMask, int sectionId)
     {
-        if (crop?.ScaledImage is null || clip is null || vae is null)
+        if (croppedImage is null || croppedMask is null || clip is null || vae is null)
         {
             throw new SwarmUserErrorException("Qwen segment requires a source crop, text encoder and VAE.");
         }
@@ -56,7 +56,7 @@ public partial class WorkflowGenerator
             // For InitEdit, this *replaces* the full-frame Prompt Images[0].
             // Feeding both the crop and the full frame duplicates the subject
             // that is supposed to be replaced.
-            inputs["images.image_1"] = NodePath(crop.ScaledImage, 0);
+            inputs["images.image_1"] = croppedImage;
             slot++;
         }
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> references)
@@ -107,7 +107,7 @@ public partial class WorkflowGenerator
         }
         JArray latent = mode == "Reference Edit"
             ? NodePath(native, 2)
-            : NodePath(crop.MaskedLatent, 0);
+            : DoMaskedVAEEncode(vae.Path, croppedImage, croppedMask, null);
         return (positive, negative, latent);
     }
 }
