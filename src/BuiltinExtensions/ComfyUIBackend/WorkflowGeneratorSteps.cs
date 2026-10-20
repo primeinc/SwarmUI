@@ -95,6 +95,17 @@ public class WorkflowGeneratorSteps
             }
             string type = node["class_type"]?.ToString();
             JObject inputs = node["inputs"] as JObject;
+            // LanPaint's mask-aware sampler already owns the inpainting mask. The
+            // generic DifferentialDiffusion model patch rewrites that mask by
+            // timestep before LanPaint sees it, defeating a stable region mask.
+            // The stock ComfyUI/LanPaint Qwen masked workflow does not use it.
+            if (type == "DifferentialDiffusion"
+                && g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Masked Img2Img", sectionId: sectionId) == "Masked Img2Img")
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: DifferentialDiffusion on LanPaint's model path changes the inpaint mask during sampling. " +
+                    "Use LanPaint's own latent noise mask without a differential-diffusion wrapper.");
+            }
             if (type is "LoraLoader" or "LoraLoaderModelOnly" or "NunchakuFluxLoraLoader")
             {
                 string name = inputs?["lora_name"]?.ToString() ?? "";
@@ -2255,16 +2266,12 @@ public class WorkflowGeneratorSteps
                                 g.IsRefinerStage = previousRefinerStage;
                             }
                         }
-                        // Reference Edit samples a native empty Qwen latent; the detected crop is a vision reference and pixel-space mask only.
-                        // Masked Img2Img still needs DifferentialDiffusion on this segment model.
-                        if (qwenSegmentMode != "Reference Edit" && g.UserInput.Get(T2IParamTypes.MaskBehavior, "Differential") == "Differential")
-                        {
-                            string diffNode = g.CreateNode("DifferentialDiffusion", new JObject()
-                            {
-                                ["model"] = model.Path
-                            });
-                            model = model.WithPath([diffNode, 0]);
-                        }
+                        // LanPaint_ImageEncode supplies the inpaint mask through
+                        // the latent's noise_mask. Do not also wrap this model in
+                        // DifferentialDiffusion: that patch replaces the stable
+                        // mask with a sigma-dependent threshold at each step,
+                        // unlike upstream LanPaint's Qwen masked example.
+                        // Reference Edit deliberately has no latent noise mask.
                     }
                     else
                     {
