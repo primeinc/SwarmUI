@@ -2098,6 +2098,43 @@ public class WorkflowGeneratorSteps
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     WGNodeData beforeImage = g.CurrentMedia;
+                    // Capture the real source/encoder/sampler/compositor boundaries,
+                    // using Swarm's EXISTING intermediate output path. No custom
+                    // Comfy node or synthetic tensor can establish image provenance.
+                    // Only when the user has enabled Output Intermediate Images.
+                    bool traceQwen = nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false);
+                    void TraceQwenImage(string stage, JArray imagePath)
+                    {
+                        if (!traceQwen)
+                        {
+                            return;
+                        }
+                        string outputId = g.GetStableDynamicID(50000, 0);
+                        new WGNodeData(imagePath, g, WGNodeData.DT_IMAGE, g.CurrentCompat())
+                            .SaveOutput(null, null, outputId);
+                        Logs.Info($"[QWEN21-SEG] DIAG section={part.ContextID} stage={stage} intermediate_output={outputId} source_node={imagePath[0]}:{imagePath[1]}");
+                    }
+                    if (nativeQwenSegment)
+                    {
+                        Logs.Info($"[QWEN21-SEG] graph section={part.ContextID} region='{part.DataText}' prompt='{part.Prompt?.Trim()}' " +
+                            $"source_frame={beforeImage.Path[0]} crop_bounds={g.MaskShrunkInfo.BoundsNode} " +
+                            $"crop_raw={g.MaskShrunkInfo.SourceCrop} crop_scaled={g.MaskShrunkInfo.ScaledImage} " +
+                            $"detected_mask={detectedMaskNode} cropped_mask={g.MaskShrunkInfo.CroppedMask} " +
+                            $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
+                            $"steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
+                            $"trace_intermediates={traceQwen}");
+                        if (traceQwen)
+                        {
+                            TraceQwenImage("00_source_full_frame", beforeImage.Path);
+                            string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
+                            {
+                                ["mask"] = NodePath(detectedMaskNode, 0)
+                            });
+                            TraceQwenImage("01_raw_detection_mask", NodePath(rawMaskImage, 0));
+                            TraceQwenImage("02_crop_before_resize", NodePath(g.MaskShrunkInfo.SourceCrop, 0));
+                            TraceQwenImage("03_exact_qwen_vision_input", NodePath(g.MaskShrunkInfo.ScaledImage, 0));
+                        }
+                    }
                     string sampler;
                     if (nativeQwenSegment)
                     {
@@ -2126,8 +2163,35 @@ public class WorkflowGeneratorSteps
                     }
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
-                    g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
+                    if (nativeQwenSegment)
+                    {
+                        TraceQwenImage("04_sampler_decoded_crop", g.CurrentMedia.Path);
+                    }
+                    else
+                    {
+                        g.SaveOptionalIntermediate();
+                    }
                     JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: nativeQwenSegment, preserveSoftMask: nativeQwenSegment, useNativeComposite: nativeQwenSegment);
+                    if (nativeQwenSegment)
+                    {
+                        JObject actualCompositeInputs = g.Workflow[$"{composited[0]}"]["inputs"] as JObject;
+                        JArray actualSource = actualCompositeInputs["source"] as JArray;
+                        JArray actualMask = actualCompositeInputs["mask"] as JArray;
+                        Logs.Info($"[QWEN21-SEG] composite section={part.ContextID} sampler={sampler} " +
+                            $"class=ImageCompositeMasked source={actualSource?[0]}:{actualSource?[1]} " +
+                            $"mask={actualMask?[0]}:{actualMask?[1]} destination={beforeImage.Path[0]} " +
+                            $"bounds={g.MaskShrunkInfo.BoundsNode} result={composited[0]}");
+                        if (traceQwen)
+                        {
+                            TraceQwenImage("05_exact_compositor_source", actualSource);
+                            string appliedMaskImage = g.CreateNode("MaskToImage", new JObject()
+                            {
+                                ["mask"] = actualMask
+                            });
+                            TraceQwenImage("06_exact_compositor_mask", NodePath(appliedMaskImage, 0));
+                            TraceQwenImage("07_full_frame_composite", composited);
+                        }
+                    }
                     // The sampler preview is the entire generated crop, before
                     // masking. This second preview is the EXACT crop of the final
                     // composited result and therefore shows what was really applied.
