@@ -9,8 +9,9 @@ using SwarmUI.Utils;
 namespace SwarmUITests;
 
 /// <summary>
-/// Checks the actual native Qwen conditioner with the exact segment syntax
-/// saved in a user's image. Swarm weights must not leak into native CLIP text.
+/// The segment parser owns Swarm directives; the native Qwen encoder must
+/// receive exactly the remaining author-supplied text, not a generated
+/// replacement instruction. Graph tests do not prove rendered edit success.
 /// </summary>
 public class QwenSegmentNativePromptTests : SwarmUITest
 {
@@ -24,53 +25,101 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         }
     }
 
-    [Test]
-    public static void NativeEncoderMustReceiveRealSegmentLoRATriggerInsteadOfWeightMarkup()
+    private static JObject NativeEncoderFor(
+        string prompt, string negativePrompt = "", bool useOriginalReference = true)
     {
-        const string savedPrompt = "sunrise, a 12 year old girl is walking down the street looking at the viewer "
-            + "<segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
-        PromptRegion.Part part = new PromptRegion(savedPrompt).Parts.Single();
-        Assert.That(part.ContextID, Is.EqualTo(11));
-        Assert.That(part.Prompt.Trim(), Is.EqualTo("<weight[1.2]:HannahLynn>"));
-
-        WorkflowGenerator g = new()
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference, useOriginalReference, sectionId: 11);
+        WorkflowGenerator generator = new()
         {
-            UserInput = new T2IParamInput(null),
+            UserInput = input,
             Workflow = new JObject()
         };
-        WGNodeData clip = new(new JArray("clip", 0), g, WGNodeData.DT_TEXTENC, null);
-        WGNodeData vae = new(new JArray("vae", 0), g, WGNodeData.DT_VAE, null);
-        g.CreateQwen21SegmentConditioning(
-            part.Prompt, "<weight[0.5]:blurry>", clip, vae,
-            new JArray("crop", 1), new JArray("crop", 2), part.ContextID, part.DataText);
-
-        JObject encoder = g.Workflow.Properties()
+        WGNodeData clip = new(new JArray("clip", 0), generator, WGNodeData.DT_TEXTENC, null);
+        WGNodeData vae = new(new JArray("vae", 0), generator, WGNodeData.DT_VAE, null);
+        generator.CreateQwen21SegmentConditioning(
+            prompt, negativePrompt, clip, vae,
+            new JArray("crop", 1), new JArray("crop", 2), 11);
+        return generator.Workflow.Properties()
             .Select(p => p.Value as JObject)
             .Single(node => node["class_type"]?.ToString() == "TextEncodeQwenImage21");
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(
-            "Replace the girl in <image1> with HannahLynn. Keep the rest of the image unchanged."));
+    }
+
+    [Test]
+    public static void NativeEncoderMustOnlyFlattenSwarmWeightTags()
+    {
+        const string savedPrompt = "sunrise, a girl is walking down the street "
+            + "<segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
+        PromptRegion.Part segment = new PromptRegion(savedPrompt).Parts.Single();
+        Assert.That(segment.ContextID, Is.EqualTo(11));
+        Assert.That(segment.Prompt, Is.EqualTo(" <weight[1.2]:HannahLynn>"));
+        JObject encoder = NativeEncoderFor(segment.Prompt, "<weight[0.5]:blurry>");
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(" HannahLynn"));
         Assert.That(encoder["inputs"]?["negative_prompt"]?.ToString(), Is.EqualTo("blurry"));
         Assert.That(encoder["inputs"]?["images.image_1"]?.ToString(),
             Is.EqualTo(new JArray("crop", 1).ToString()));
     }
 
-    [Test]
-    public static void ActualNativeEncoderMustNotReferenceAnAbsentCropImage()
+    [TestCase("HannahLynn")]
+    [TestCase("Replace")]
+    [TestCase("Add")]
+    [TestCase("Remove")]
+    [TestCase("Replace the girl with a black boy with blue eyes")]
+    [TestCase("Add sunglasses to the girl")]
+    [TestCase("Put a hat on the subject")]
+    [TestCase("Give the girl blue eyes")]
+    [TestCase("Draw a star on the girl's shirt")]
+    [TestCase("Make the subject smile")]
+    [TestCase("In this picture, replace the girl with a black boy with blue eyes")]
+    [TestCase("  Preserve this punctuation, and spacing!  ")]
+    [TestCase("Replace the girl in <image1> with the boy in <image2>.")]
+    public static void NativeQwenMustPreserveLiteralAuthorText(string prompt)
     {
-        T2IParamInput input = new(null);
-        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference, false, sectionId: 11);
-        WorkflowGenerator g = new() { UserInput = input, Workflow = new JObject() };
-        WGNodeData clip = new(new JArray("clip", 0), g, WGNodeData.DT_TEXTENC, null);
-        WGNodeData vae = new(new JArray("vae", 0), g, WGNodeData.DT_VAE, null);
-        g.CreateQwen21SegmentConditioning(
-            "<weight[1.2]:HannahLynn>", "", clip, vae,
-            new JArray("crop", 1), new JArray("crop", 2), 11, "girl");
-        JObject encoder = g.Workflow.Properties()
-            .Select(p => p.Value as JObject)
-            .Single(n => n["class_type"]?.ToString() == "TextEncodeQwenImage21");
+        Assert.That(WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt), Is.EqualTo(prompt));
+        JObject encoder = NativeEncoderFor(prompt);
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+    }
+
+    [Test]
+    public static void NestedSwarmWeightTagsAreFlattenedWithoutWritingAnInstruction()
+    {
+        const string prompt = "<weight[1.2]:portrait of <weight[1.5]:HannahLynn>>";
+        const string expected = "portrait of HannahLynn";
+        Assert.That(WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt), Is.EqualTo(expected));
+        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public static void WeightedMultilineInstructionIsPreservedAfterMarkupProcessing()
+    {
+        const string prompt = "<weight[1.2]:Add sunglasses to the girl>";
+        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(),
+            Is.EqualTo("Add sunglasses to the girl"));
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public static void CropReferenceSwitchMustNeverInventPromptText(bool cropEnabled)
+    {
+        JObject encoder = NativeEncoderFor("<weight[1.2]:HannahLynn>", useOriginalReference: cropEnabled);
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo("HannahLynn"));
         Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Does.Not.Contain("<image1>"));
-        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Does.Contain("HannahLynn"));
-        Assert.That(encoder["inputs"]?["images.image_1"], Is.Null);
+        Assert.That(encoder["inputs"]?["images.image_1"] is not null, Is.EqualTo(cropEnabled));
+    }
+
+    [Test]
+    public static void AuthorSuppliedImageTokenMustSurviveWithoutRewriting()
+    {
+        JObject encoder = NativeEncoderFor("Replace the subject in <image1>.", useOriginalReference: false);
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(),
+            Is.EqualTo("Replace the subject in <image1>."));
+    }
+
+    [Test]
+    public static void MissingSegmentTextMustFailWithoutInvention()
+    {
+        Assert.Throws<SwarmUserErrorException>(
+            () => WorkflowGenerator.FlattenQwen21SegmentPrompt("  "));
     }
 
     [TestCase(true, true, 0)]
@@ -82,68 +131,5 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     {
         Assert.That(WorkflowGenerator.FirstQwen21AdditionalReferenceIndex(
             useOriginal, hasInitImage), Is.EqualTo(expectedFirstIndex));
-    }
-
-    [Test]
-    public static void NativeQwenPreservesExplicitReplacementInstructions()
-    {
-        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
-            "Edit the image, replace the girl with a black boy with blue eyes", "girl"),
-            Is.EqualTo("Edit the image, replace the girl with a black boy with blue eyes"));
-    }
-
-    [TestCase("Please replace the girl with a black boy with blue eyes")]
-    [TestCase("In this picture, replace the girl with a black boy with blue eyes")]
-    [TestCase("I want to edit the girl's appearance")]
-    public static void NativeQwenPreservesNaturalLanguageEditRequests(string prompt)
-    {
-        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(prompt, "girl"),
-            Is.EqualTo(prompt));
-    }
-
-    [Test]
-    public static void NativeQwenMustNotSendStandaloneLoRATriggerAsEditInstruction()
-    {
-        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
-            "<weight[1.2]:HannahLynn>", "girl"),
-            Is.EqualTo("Replace the girl in <image1> with HannahLynn. Keep the rest of the image unchanged."));
-    }
-
-    [TestCase("Add sunglasses to the girl")]
-    [TestCase("Put a hat on the subject")]
-    [TestCase("Give the girl blue eyes")]
-    [TestCase("<weight[1.2]:Add sunglasses to the girl>")]
-    [TestCase("Draw a star on the girl's shirt")]
-    [TestCase("Make the subject smile")]
-    public static void NativeQwenMustNotConvertInstructionsIntoReplacementNouns(string instruction)
-    {
-        string expected = instruction.StartsWith("<weight[", StringComparison.Ordinal)
-            ? T2IPromptHandling.ProcessPromptLikeForLength(instruction)
-            : instruction;
-        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(instruction, "girl"),
-            Is.EqualTo(expected));
-    }
-
-    [Test]
-    public static void MissingOriginalReferenceMustNotInventImageOneToken()
-    {
-        string edit = WorkflowGenerator.BuildQwen21SegmentEditInstruction(
-            "<weight[1.2]:HannahLynn>", "girl", hasCroppedReference: false);
-        Assert.That(edit, Does.Not.Contain("<image1>"));
-        Assert.That(edit, Does.Contain("HannahLynn"));
-        Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(
-            "<weight[1.2]:HannahLynn>", "girl", hasCroppedReference: true),
-            Does.Contain("<image1>"));
-    }
-
-    [Test]
-    public static void NativeQwenTextFlattenerPreservesNestedSubjectText()
-    {
-        Assert.That(T2IPromptHandling.ProcessPromptLikeForLength(
-            "<weight[1.2]:portrait of <weight[1.5]:HannahLynn>>"),
-            Is.EqualTo("portrait of HannahLynn"));
-        Assert.That(T2IPromptHandling.ProcessPromptLikeForLength(
-            "Edit the image, replace the girl with a black boy with blue eyes"),
-            Is.EqualTo("Edit the image, replace the girl with a black boy with blue eyes"));
     }
 }
