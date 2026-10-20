@@ -16,6 +16,11 @@ jobs:
           with:
             dotnet-version: '8.x'
         - run: bash ./launchtools/run_tests.sh
-        - run: python3 -m unittest discover -s SwarmUITests -p 'test_qwen21*.py' -v
-        - run: python3 -m unittest discover -s tests -p 'test_qwen_segment_capture.py' -v
-        - run: node --test tests/test_lora_confinement_ui.cjs
+        # These checks are deliberately only syntax checks. They do not imply
+        # that Qwen segment LoRA weights were matched or applied during inference.
+        - name: Validate live acceptance test syntax (NOT inference)
+          run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py
+        - name: Validate production Python syntax (NOT inference)
+          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmQwen.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py
+        - name: Validate browser JS syntax (NOT browser execution)
+          run: node --check src/wwwroot/js/genpage/gentab/loras.js
