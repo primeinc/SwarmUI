@@ -16,6 +16,9 @@
     <ProjectReference Include="..\src\SwarmUI.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="NUnit" Version="4.6.1" />
   </ItemGroup>
