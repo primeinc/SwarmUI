@@ -41,7 +41,11 @@ class CropReplacementTests(unittest.TestCase):
         # Source subject must be gone if the sampler emits a truly different
         # crop and the adapter's grown mask fully covers the old subject.
         old_region = result[0, 30:66, 30:66, :]
-        self.assertGreater(old_region.min().item(), 0.05)
+        # The replacement crop is 0.8; accepting >0.05 would let an
+        # 80-percent-visible dark old subject pass as "no ghosting".
+        # Grow exceeds the blend radius, so the entire original subject
+        # should receive mostly replacement pixels.
+        self.assertGreater(old_region.min().item(), 0.65)
         # Preserve untouched context, not a newly generated full frame.
         self.assertTrue(torch.allclose(result[0, :8, :8], source[0, :8, :8], atol=0.0001))
 
