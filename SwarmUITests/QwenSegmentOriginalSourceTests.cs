@@ -351,8 +351,24 @@ public class QwenSegmentOriginalSourceTests
                 Is.EqualTo(new Newtonsoft.Json.Linq.JArray(crop.Id, 1).ToString()));
             string independentId = encoder.Node["inputs"]?["image_2"]?[0]?.ToString();
             Assert.That(independentId, Is.Not.Null.And.Not.EqualTo(sourceId));
-            Assert.That(graph[independentId]?["class_type"]?.ToString(),
+            // Native Qwen rounds 80x96 to 64x96 for BOTH vision and VAE.
+            // Each reference remains independent; it is never forced to
+            // the crop's 1024x1024 size by ImageBatch.
+            var scaled = graph[independentId] as Newtonsoft.Json.Linq.JObject;
+            Assert.That(scaled?["class_type"]?.ToString(), Is.EqualTo("ImageScale"));
+            Assert.That(scaled?["inputs"]?["width"]?.ToObject<int>(), Is.EqualTo(64));
+            Assert.That(scaled?["inputs"]?["height"]?.ToObject<int>(), Is.EqualTo(96));
+            Assert.That(scaled?["inputs"]?["upscale_method"]?.ToString(), Is.EqualTo("lanczos"));
+            string independentLoaderId = scaled?["inputs"]?["image"]?[0]?.ToString();
+            Assert.That(graph[independentLoaderId]?["class_type"]?.ToString(),
                 Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"));
+            var secondVae = nodes.Single(x => x.Node["class_type"]?.ToString() == "VAEEncode"
+                && x.Node["inputs"]?["pixels"]?.ToString()
+                    == new Newtonsoft.Json.Linq.JArray(independentId, 0).ToString());
+            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() == "ReferenceLatent"
+                && x.Node["inputs"]?["latent"]?.ToString()
+                    == new Newtonsoft.Json.Linq.JArray(secondVae.Id, 0).ToString()), Is.EqualTo(2),
+                "The same normalized second image must be used by both Swarm vision and VAE references");
         }
         else
         {
