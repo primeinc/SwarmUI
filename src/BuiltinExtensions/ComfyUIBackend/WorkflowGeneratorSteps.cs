@@ -1796,12 +1796,62 @@ public class WorkflowGeneratorSteps
         }, 1);
         #endregion
         #region Segmentation Processing
-        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner)
+        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner, bool isSingleImage = false)
         {
             PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
+                // Native Qwen image references represent a single source image per conditioning.
+                // Split the source batch before detection so no item can inherit another's crop.
+                int batchSize = g.UserInput.Get(T2IParamTypes.BatchSize, 1);
+                if (!isSingleImage && g.IsQwenImage21() && batchSize > 1)
+                {
+                    WGNodeData sourceBatch = g.CurrentMedia;
+                    T2IModel sourceModel = g.FinalLoadedModel;
+                    WGNodeData sourceModelNode = g.CurrentModel, sourceClipNode = g.CurrentTextEnc, sourceVaeNode = g.CurrentVae;
+                    bool sourceIsRefiner = g.CurrentModelFromRefiner;
+                    bool sourceNoVaeOverride = g.NoVAEOverride;
+                    JArray processedBatch = null;
+                    try
+                    {
+                        for (int imageIndex = 0; imageIndex < batchSize; imageIndex++)
+                        {
+                            string singleImage = g.CreateNode("ImageFromBatch", new JObject()
+                            {
+                                ["image"] = sourceBatch.Path,
+                                ["batch_index"] = imageIndex,
+                                ["length"] = 1
+                            });
+                            g.CurrentMedia = sourceBatch.WithPath([singleImage, 0]);
+                            g.FinalLoadedModel = sourceModel;
+                            g.CurrentModel = sourceModelNode;
+                            g.CurrentTextEnc = sourceClipNode;
+                            g.CurrentVae = sourceVaeNode;
+                            g.CurrentModelFromRefiner = sourceIsRefiner;
+                            g.NoVAEOverride = sourceNoVaeOverride;
+                            RunSegmentationProcessing(g, isBeforeRefiner, isSingleImage: true);
+                            processedBatch = processedBatch is null
+                                ? g.CurrentMedia.Path
+                                : NodePath(g.CreateNode("ImageBatch", new JObject()
+                                {
+                                    ["image1"] = processedBatch,
+                                    ["image2"] = g.CurrentMedia.Path
+                                }), 0);
+                        }
+                    }
+                    finally
+                    {
+                        g.FinalLoadedModel = sourceModel;
+                        g.CurrentModel = sourceModelNode;
+                        g.CurrentTextEnc = sourceClipNode;
+                        g.CurrentVae = sourceVaeNode;
+                        g.CurrentModelFromRefiner = sourceIsRefiner;
+                        g.NoVAEOverride = sourceNoVaeOverride;
+                    }
+                    g.CurrentMedia = sourceBatch.WithPath(processedBatch);
+                    return;
+                }
                 g.SaveOptionalIntermediate();
                 T2IModel t2iModel = g.FinalLoadedModel;
                 WGNodeData model = g.CurrentModel, clip = g.CurrentTextEnc, vae = g.CurrentVae;
