@@ -153,8 +153,15 @@ def graph_variant(original, case, stage, strength):
             raise AssertionError("Obsolete homemade Qwen encoder still present in exported graph")
         if not any(n["class_type"] == "TextEncodeQwenImage21" for n in graph.values()):
             raise AssertionError("Segment workflow must use native ComfyUI TextEncodeQwenImage21")
-        if not any(n["class_type"] == "ImageCompositeMasked" for n in graph.values()):
-            raise AssertionError("Segment workflow must use native ImageCompositeMasked")
+        crops = [key for key, node in graph.items() if node["class_type"] == "InpaintCropImproved"]
+        stitches = [key for key, node in graph.items() if node["class_type"] == "InpaintStitchImproved"]
+        if len(crops) != 1 or len(stitches) != 1:
+            raise AssertionError("Segment must use one upstream CropAndStitch adapter pair")
+        if graph[stitches[0]]["inputs"].get("stitcher") != [crops[0], 0]:
+            raise AssertionError("Stitch must receive the metadata from its matching upstream crop")
+        encoders = [n for n in graph.values() if n["class_type"] == "TextEncodeQwenImage21"]
+        if len(encoders) != 1 or encoders[0]["inputs"].get("images.image_1") != [crops[0], 1]:
+            raise AssertionError("Native Qwen must see exactly the crop that the upstream stitcher handles")
     ref = case.get(f"{stage}_output_image_ref")
     if ref is None:
         outputs = [n["inputs"]["images"] for n in graph.values()
