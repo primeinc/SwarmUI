@@ -1037,8 +1037,29 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         string workflow = null;
         try
         {
-            workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
-            ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+            // Standard generated workflows can be validated BEFORE falling
+            // back to uploading init/prompt images. API-by-URL backends cannot
+            // delete remote input files (RemoveInputFile returns false), so
+            // merely enclosing the upload in a finally would NOT prevent
+            // missing-node failures from leaving an uploaded file behind.
+            bool hasRawWorkflow = GetRawWorkflowFrom(user_input) is not null
+                && !user_input.Get(T2IParamTypes.ControlNetPreviewOnly);
+            if (hasRawWorkflow)
+            {
+                // Raw custom workflows expand placeholders in CreateWorkflow.
+                // Keep its established upload/placeholder ordering, with the
+                // cleanup scope also covering validation on failure.
+                workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+                ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+            }
+            else
+            {
+                // Generated graphs are complete before the optional image file
+                // fallback. Reject unavailable Qwen nodes before upload.
+                workflow = CreateWorkflow(user_input, static graph => graph, ModelFolderFormat, [.. SupportedFeatures]);
+                ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+                workflow = initImageFixer(workflow);
+            }
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);
         }
         catch (Exception ex)
