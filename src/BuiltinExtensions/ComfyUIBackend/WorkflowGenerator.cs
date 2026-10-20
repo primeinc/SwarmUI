@@ -706,7 +706,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Recomposites a masked image edit, after <see cref="CreateImageMaskCrop(JArray, JArray, int)"/> was used.</summary>
-    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false)
+    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false, bool keepSoftMask = false)
     {
         // Segment masks govern where an edit is applied. Qwen Image 2.1 can return RGBA pixels,
         // and the compositor otherwise multiplies the segment mask by the generated alpha.
@@ -726,7 +726,10 @@ public partial class WorkflowGenerator
             ["upscale_method"] = "lanczos",
             ["crop"] = "disabled"
         });
-        if (!UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
+        // Segmented Qwen output is composited across a blurred CLIPSeg boundary.
+        // Thresholding a nonzero blur at 0.001 makes the fringe effectively
+        // rectangular/opaque; preserve the antialiased mask for this caller.
+        if (!keepSoftMask && !UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
         {
             string thresholded = CreateNode("ThresholdMask", new JObject()
             {
@@ -2808,20 +2811,26 @@ public partial class WorkflowGenerator
         }
         else if (IsQwenImage21())
         {
-            JArray imageNode = GetPromptImage(true, true, 0);
-            for (int i = 1; i < 16; i++)
+            // A segment supplies its own crop as the vision input. Reusing the
+            // normal Qwen conditioner must not silently replace that crop with
+            // the global first Prompt Image.
+            JArray imageNode = attachImages ?? GetPromptImage(true, true, 0);
+            if (attachImages is null)
             {
-                JArray image2 = GetPromptImage(true, true, i);
-                if (image2 is null)
+                for (int i = 1; i < 16; i++)
                 {
-                    break;
+                    JArray image2 = GetPromptImage(true, true, i);
+                    if (image2 is null)
+                    {
+                        break;
+                    }
+                    string batched = CreateNode("ImageBatch", new JObject()
+                    {
+                        ["image1"] = imageNode,
+                        ["image2"] = image2
+                    });
+                    imageNode = [batched, 0];
                 }
-                string batched = CreateNode("ImageBatch", new JObject()
-                {
-                    ["image1"] = imageNode,
-                    ["image2"] = image2
-                });
-                imageNode = [batched, 0];
             }
             node = CreateNode("SwarmTextEncodeAdvanced", new JObject()
             {
