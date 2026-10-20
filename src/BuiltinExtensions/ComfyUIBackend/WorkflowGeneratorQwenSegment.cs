@@ -16,7 +16,7 @@ public partial class WorkflowGenerator
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
-        ImageMaskCropData crop, int steps, double creativity, int sectionId)
+        ImageMaskCropData crop, int sectionId)
     {
         if (crop?.ScaledImage is null || clip is null || vae is null)
         {
