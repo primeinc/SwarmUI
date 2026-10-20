@@ -34,8 +34,6 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 
-import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "launchtools"))
 import qwen_segment_capture as capture
@@ -357,6 +355,7 @@ def validate_runtime_node_contracts(base_url, graph):
 
 
 def read_result(base, prompt_id, timeout_seconds, final_output_sink):
+    from PIL import Image  # inference-only: offline graph audit needs no Pillow
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         record = fetch_json(base, "history/" + prompt_id).get(prompt_id)
@@ -393,6 +392,7 @@ def read_result(base, prompt_id, timeout_seconds, final_output_sink):
 
 
 def measure(a, b):
+    import numpy as np  # inference-only
     if a.size != b.size:
         raise AssertionError(f"Size mismatch in real image comparison: {a.size} != {b.size}")
     left = np.asarray(a, dtype=np.float32)
@@ -435,6 +435,7 @@ def main(argv=None):
         return 0
     if not args.comfy_url or args.outdir is None:
         parser.error("--comfy-url and --outdir are required for model-backed inference")
+    import numpy as np  # model-backed diagnostics, never needed by --preflight-only
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
