@@ -61,6 +61,13 @@ sentences, classify edit verbs, add a target description, or insert
 `<image1>` unless the user wrote that token. Image references are supplied
 through the encoder's image inputs, not inferred from text. A bare LoRA
 trigger remains a bare LoRA trigger; the user determines any edit instruction.
+Qwen 2.1 itself inserts image references into its tokenizer template when
+reference images are attached: `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
+comfy/text_encoders/qwen_image21.py#QwenImage21Tokenizer.tokenize_with_weights`.
+The inherited `qwen3vl.py#Qwen3VLTokenizer.tokenize_with_weights` calls the
+ordinary token parser with `disable_weights=True`, so residual Swarm
+`<weight[1.2]:...>` formatting is flattened to its text, **not** claimed
+to preserve numerical text emphasis that this native encoder cannot apply.
 Residual scheduled Swarm tags such as `<alternate:...>` and
 `<fromto[...]:...>` are rejected rather than applying
 `ProcessPromptLikeForLength`'s length-estimation substitution (which
