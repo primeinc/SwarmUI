@@ -1,77 +1,96 @@
-# Qwen Image 2.1 segments
+# Qwen Image 2.1 segmentation
 
-Qwen Image 2.1 `<segment:...>` passes use Swarm's bundled
-`SwarmQwenImage21SegmentEncode` ComfyUI node. It takes the selected, resized segment
-crop and optional Prompt Images as separate vision inputs. When enabled, each
-reference is VAE-encoded and attached to both positive and negative Qwen 2.1
-conditioning as `reference_latents`, with matching `image_slots` from the Qwen tokenizer.
-The custom encoder does not require ComfyUI's separately registered
-`TextEncodeQwenImage21` node.
+Swarm's Qwen Image 2.1 `<segment:...>` path uses **the same
+`SwarmTextEncodeAdvanced` CLIP encoder and `ReferenceLatent` inputs as
+ordinary Qwen edit sampling**. There is no separate
+`SwarmQwenImage21SegmentEncode` node.
 
-For `<weight>`, `<fromto>`, `<alternate>`, `<embed>`, and dynamic LoRA hooks,
-the encoder reuses Swarm's advanced prompt parser while retaining Qwen's
-`keep_vision` / image-slot contract. Plain prompts use the native encoder directly.
-Static, section-confined LoRAs are applied in the model-generation pipeline before
-optional TorchCompile, and dynamic prompt LoRA hooks are passed to the conditioner.
+The image to edit at this stage is the detected region of the base/refined
+image. Swarm crops and resizes that region, supplies the **crop** to both the
+vision-token conditioner and VAE reference-latent conditioner, samples the edit,
+and composites the result back over the selected soft segmentation mask.
 
-## Sampling modes and controls
+## Source image and Prompt Images
 
-`Segment Param Overrides` > `Segment Qwen 2.1 Sampling`:
+With **Segment Qwen 2.1 Original Reference** enabled (default), the segment
+crop replaces the first Prompt Image as the edit source. The **first full-frame
+Prompt Image is NOT added a second time**; adding it alongside the crop can
+overconstrain subject replacement and create conflicting image references.
+Additional Prompt Images (indices 1 onward) are still provided unless
+Text Encoded Image is `none`. If Original Reference is disabled, explicitly
+supplied Prompt Images, including index 0, retain their usual meanings.
 
-- **Reference Edit** (default): samples a plain VAE encoding of the cropped image
-  (without a latent noise mask). Edit strength comes from
-  `start_at_step = round(steps * (1 - Segment Creativity))`; the final pixel
-  composite, not a latent noise mask, confines the result to the selected region.
-- **Masked Img2Img**: samples from the masked crop latent, uses the same
-  `start_at_step` calculation, and applies DifferentialDiffusion when configured.
+Swarm's regular Qwen conditioner also supports `<weight>`, `<fromto>`,
+`<alternate>`, `<embed>`, and scheduled `<lora:...//hook=...>` syntax.
+Static segment-confined LoRAs are applied on the model path during the same
+model-loader stage as global adapters. ComfyUI's existing `ReferenceLatent`
+nodes attach VAE references to positive and negative conditioning.
 
-Zero creativity skips Qwen segment sampling. If `Save Segment Mask` is enabled,
-the mask is still generated and saved.
+The regular Qwen conditioner batches multiple image references just as the
+normal Qwen path does, which can rescale extra images to match the first
+reference. Independent-aspect-ratio reference inputs are NOT yet certified for
+this path. The overall reference count is limited to 16.
 
-`Segment Qwen 2.1 Original Reference` controls whether the cropped source
-image is also supplied as vision/reference conditioning. Disabling it does **not**
-remove the plain or masked crop latent used as the sampler's starting state,
-and does not disable other optional Prompt Images. The default is enabled.
+## Segment sampling and effective steps
 
-Optional `Prompt Images` are retained as individual Qwen references when Text
-Encoded Image is not `none`; each reference retains its aspect ratio and its
-own vision slot. Qwen supports at most 16 reference images in this workflow:
-15 additional images when the original crop is a reference, or 16 when it is
-not. VAE tiling settings also apply to reference encoding.
+The segment's **Steps** value means executed denoising passes, rather than the
+total schedule length before skipping. ComfyUI `KSamplerAdvanced` computes
+`steps - start_at_step` passes. For a Qwen segment with `Steps=4` and
+creativity `0.8`, Swarm requests a five-step schedule and starts at step 1:
+**four model evaluations, not three**. This mirrors the relationship between
+the total sigma schedule and denoise ratio in the upstream `KSampler` path.
 
-Batch size greater than one is handled by splitting the source into individual
-images **before** segment detection and conditioning. Each image gets an
-independent crop, sampler, and composite, and the images are rebatched afterward.
+- **Reference Edit** (default): encodes the cropped source to a plain VAE
+  latent; samples with partial-denoise schedule; blends the result back over
+  the detected segment mask
+- **Masked Img2Img**: uses the existing cropped noise-masked latent and applies
+  DifferentialDiffusion when configured
+- **Zero segment creativity**: skip Qwen segment sampling, but preserve a
+  requested Save Segment Mask output
 
-When a segment is placed after an actual refiner, a confined-LoRA model variant
-is rebuilt using the stage that produced the source model. This preserves
-refiner-stage LoRA selection and stage-specific model wrappers. Segments before
-a refiner retain the base-stage model path.
+Qwen segment compositing retains the antialiased/blurred segmentation mask
+instead of applying the legacy `ThresholdMask(value=0.001)` to it.
+Other model families, including Krea, keep their previous composite behavior.
 
-Other model families, including Krea, retain their existing segment workflow.
+Batch size greater than one is handled per input image, with a distinct
+detected crop, sampler, and composite before the output is rebatched.
 
-## Verification and remaining acceptance
+A segment after a refiner uses the refiner-stage model chain when rebuilding
+the confined-LoRA variant. A segment before the refiner uses the base-stage
+chain. Qwen overrides do not replace the original global LoRAs.
 
-The `QwenSegmentPipelineTests` suite tests generated graph connectivity,
-batch isolation, refiner-stage scoped LoRA selection, prompt-image slot limits,
-conditioning transforms, segment masks, and sampling controls. CPU-only Python
-tests exercise the real bundled Qwen encoder, reference modes, tiled encoding,
-and Swarm prompt parsing without running a diffusion model. The read-only
-`qwen_segment_capture.py` script can report a generated workflow's encoder
-inputs, model-loader lineage, reference nodes, sampler settings, and compositor.
+## Verification, scope, and explicit limits
 
-These checks do **not** prove the user's confined LoRA changes the rendered
-identity. That requires observing a real Comfy sampling run and its final image.
-Do not interpret graph tests, reference pixel differences, or model patch counts
-as visual acceptance.
+`SwarmUITests/QwenSegmentPipelineTests.cs` exercises the actual C# workflow
+builder with synthetic model paths. It checks prompt section parsing, scoped
+LoRA node attachment, positive/negative reference lineage, crop-substituted
+vision input, 4 effective steps from the user's failing prompt, batch isolation,
+refiner stage, and no hard-thresholded Qwen composite mask.
 
-## Source contracts reviewed
+These are **graph and C# checks, not rendered acceptance**.
+A green build or node-connection test does not prove that the model has
+replaced the subject in the generated pixels.
 
-- `primeinc/SwarmUI`: `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`,
-  `WorkflowGeneratorQwenSegment.cs#CreateQwen21SegmentConditioning`,
-  `SwarmQwen.py#SwarmQwenImage21SegmentEncode`, and
-  `SwarmText.py#SwarmTextEncodeAdvanced`.
-- `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`:
-  `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21`,
-  `comfy/text_encoders/qwen_image21.py#QwenImage21Tokenizer`, and
-  `nodes.py#VAEEncodeTiled`.
+The user-reported control and failure are:
+
+- Normal Qwen edit: `edit image 1 replace the girl with a black boy with blue eyes`
+  visibly succeeds
+- Segmented Qwen edit: `<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes`
+  visibly fails in 10/10 attempts on the previous code
+- The old segmented log records `steps=4, start=1` and **three effective
+  sampler iterations**, not four
+
+**Runtime proof remains required**: use the same actual model and LoRA with a
+matched no-segment, segmented, no-LoRA, and wrong-section negative control.
+Check both the generated crop and the final composite. The changes here do
+not claim a GPU pass or semantic replacement success without that result.
+
+## References
+
+- Swarm source: `src/BuiltinExtensions/ComfyUIBackend/WorkflowGenerator.cs`
+  (`CreateConditioningDirect`, `BuildInputImageHandling`, `RecompositeCropped`)
+  and `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`
+- ComfyUI `e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`:
+  `nodes.py#KSamplerAdvanced.sample`,
+  `nodes.py#KSampler.sample`, and
+  `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute`
