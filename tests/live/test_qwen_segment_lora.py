@@ -207,6 +207,41 @@ def assert_segment_final_output_path(graph, reference, stitch_id):
         f"InpaintStitchImproved result {stitch_id}")
 
 
+def validate_qwen_subject_mask_chain(graph, crop_id):
+    """Preflight native detector -> guard -> opaque mask -> CropAndStitch.
+
+    CLIPSeg already applies the author's confidence threshold and normalizes.
+    The second native threshold MUST be zero; a legacy 0.5 check falsely
+    rejects valid low-threshold edits. Guard coverage rejects broad detections
+    before zero-threshold binarization can overwrite the full source image.
+    """
+    crop_inputs = graph[crop_id]["inputs"]
+    hipass = float(crop_inputs.get("mask_hipass_filter", -1))
+    threshold_ref = crop_inputs.get("mask")
+    if abs(hipass - 0.5) > 1e-6 or not isinstance(threshold_ref, list) or len(threshold_ref) != 2:
+        raise AssertionError("Native segment crop must consume a checked binary subject mask at hipass 0.5")
+    binary = graph.get(str(threshold_ref[0]))
+    if (not binary or binary["class_type"] != "ThresholdMask"
+            or int(threshold_ref[1]) != 0
+            or abs(float(binary["inputs"].get("value", -1))) > 1e-6):
+        raise AssertionError("Native ThresholdMask must binarize all author-selected CLIPSeg support at zero")
+    guard_ref = binary["inputs"].get("mask")
+    guard = graph.get(str(guard_ref[0])) if isinstance(guard_ref, list) and len(guard_ref) == 2 else None
+    if (not guard or guard["class_type"] != "SwarmRequireNonEmptyMask"
+            or int(guard_ref[1]) != 0
+            or abs(float(guard["inputs"].get("minimum_confidence", -1))) > 1e-6):
+        raise AssertionError("Subject mask must preserve the already-applied authored CLIPSeg threshold")
+    coverage = guard["inputs"].get("maximum_coverage")
+    if not isinstance(coverage, (int, float)) or not (0 < coverage <= 0.99):
+        raise AssertionError("Qwen edit must reject near-full-canvas subject detection")
+    detector_ref = guard["inputs"].get("mask")
+    detector = graph.get(str(detector_ref[0])) if isinstance(detector_ref, list) and len(detector_ref) == 2 else None
+    if (not detector or detector["class_type"] != "SwarmClipSeg"
+            or int(detector_ref[1]) != 0):
+        raise AssertionError("Binary subject mask must derive from the actual text detector")
+    return threshold_ref
+
+
 def graph_variant(original, case, stage, strength):
     graph = copy.deepcopy(original)
     node_id = case[f"{stage}_lora_node"]
@@ -238,29 +273,7 @@ def graph_variant(original, case, stage, strength):
             raise AssertionError("Segment must use one upstream CropAndStitch adapter pair")
         if graph[stitches[0]]["inputs"].get("stitcher") != [crops[0], 0]:
             raise AssertionError("Stitch must receive the metadata from its matching upstream crop")
-        # LoRA effect does not prove the edited subject is cleanly replaced.
-        # Enforce the proven native mask chain before any OFF/ON/OFF GPU runs:
-        # raw detector -> confidence guard -> binary ThresholdMask ->
-        # CropAndStitch's single native blend. Fractional raw confidence
-        # permits old-subject double exposure even with an effective LoRA.
-        crop_inputs = graph[crops[0]]["inputs"]
-        cutoff = float(crop_inputs.get("mask_hipass_filter", -1))
-        threshold_ref = crop_inputs.get("mask")
-        if abs(cutoff - 0.5) > 1e-6 or not isinstance(threshold_ref, list):
-            raise AssertionError("Native segment crop lacks its 0.5-cutoff binary subject mask")
-        threshold_node = graph.get(str(threshold_ref[0])) if len(threshold_ref) == 2 else None
-        if (not threshold_node or threshold_node["class_type"] != "ThresholdMask" or
-                abs(float(threshold_node["inputs"].get("value", -1)) - cutoff) > 1e-6):
-            raise AssertionError("Native subject mask must be binarized before CropAndStitch")
-        guard_ref = threshold_node["inputs"].get("mask")
-        guard = graph.get(str(guard_ref[0])) if isinstance(guard_ref, list) and len(guard_ref) == 2 else None
-        if (not guard or guard["class_type"] != "SwarmRequireNonEmptyMask" or
-                abs(float(guard["inputs"].get("minimum_confidence", -1)) - cutoff) > 1e-6):
-            raise AssertionError("Subject mask must be validated at its native crop cutoff")
-        detector_ref = guard["inputs"].get("mask")
-        detector = graph.get(str(detector_ref[0])) if isinstance(detector_ref, list) and len(detector_ref) == 2 else None
-        if not detector or detector["class_type"] != "SwarmClipSeg":
-            raise AssertionError("Native crop's binary subject mask is not sourced from the actual detector")
+        threshold_ref = validate_qwen_subject_mask_chain(graph, crops[0])
         if any(n["class_type"] == "JoinImageWithAlpha" and
                    n["inputs"].get("image") == [crops[0], 1] and
                    n["inputs"].get("alpha") == [crops[0], 2] for n in graph.values()):
