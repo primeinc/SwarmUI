@@ -219,6 +219,9 @@ public record class T2IParamGroup(string Name, bool Toggles = false, bool Open =
 /// <summary>Central manager of Text2Image parameter types.</summary>
 public class T2IParamTypes
 {
+    /// <summary>Qwen 2.1 segment sampling mode: native reference editing or partial-denoise masked img2img.</summary>
+    public static T2IRegisteredParam<string> SegmentQwen21Sampling;
+
     /// <summary>Map of all currently loaded types, by cleaned name.</summary>
     public static Dictionary<string, T2IParamType> Types = [];
 
@@ -345,7 +348,7 @@ public class T2IParamTypes
     public static T2IRegisteredParam<List<Image>> PromptImages;
     public static T2IRegisteredParam<List<AudioFile>> PromptAudios;
     public static T2IRegisteredParam<List<VideoFile>> PromptVideos;
-    public static T2IRegisteredParam<bool> OutputIntermediateImages, DoNotSave, DoNotSaveIntermediates, ControlNetPreviewOnly, RevisionZeroPrompt, RemoveBackground, NoSeedIncrement, NoPreviews, VideoBoomerang, ModelSpecificEnhancements, UseInpaintingEncode, MaskCompositeUnthresholded, SaveSegmentMask, InitImageRecompositeMask, UseReferenceOnly, RefinerDoTiling, AutomaticVAE, ZeroNegative, FluxDisableGuidance, SmartImagePromptResizing, NoLoadModels, NoInternalSpecialHandling, ForwardRawBackendData, ForwardSwarmData, NegativeModelIncludeLoras, ContinueAfterErrors, JustLoadModel,
+    public static T2IRegisteredParam<bool> OutputIntermediateImages, DoNotSave, DoNotSaveIntermediates, ControlNetPreviewOnly, RevisionZeroPrompt, RemoveBackground, NoSeedIncrement, NoPreviews, VideoBoomerang, ModelSpecificEnhancements, UseInpaintingEncode, MaskCompositeUnthresholded, SaveSegmentMask, SegmentQwenUseOriginalReference, InitImageRecompositeMask, UseReferenceOnly, RefinerDoTiling, AutomaticVAE, ZeroNegative, FluxDisableGuidance, SmartImagePromptResizing, NoLoadModels, NoInternalSpecialHandling, ForwardRawBackendData, ForwardSwarmData, NegativeModelIncludeLoras, ContinueAfterErrors, JustLoadModel,
         PlaceholderParamGroupStarred, PlaceholderParamGroupUser1, PlaceholderParamGroupUser2, PlaceholderParamGroupUser3;
 
     public static T2IParamGroup GroupImagePrompting, GroupCore, GroupVariation, GroupResolution, GroupSampling, GroupInitImage, GroupRefiners, GroupRefinerOverrides,
@@ -892,6 +895,12 @@ public class T2IParamTypes
         SegmentCFGScale = Register<double>(new("Segment CFG Scale", "For the segment model independently of the base model, how strongly to scale prompt input.\nHigher CFG scales tend to produce more contrast, and lower CFG scales produce less contrast.\n"
             + "Too-high values can cause corrupted/burnt images, too-low can cause nonsensical images.\n7 is a good baseline. Normal usages vary between 4 and 9.\nSome model types, such as Turbo, expect CFG around 1.",
             "7", Min: 0, Max: 100, ViewMax: 20, Step: 0.5, Examples: ["5", "6", "7", "8", "9"], OrderPriority: 5, ViewType: ParamViewType.SLIDER, Group: GroupSegmentOverrides, ChangeWeight: -3, Toggleable: true, IsAdvanced: true
+            ));
+        SegmentQwenUseOriginalReference = Register<bool>(new("Segment Qwen 2.1 Original Reference", "",
+            "true", IgnoreIf: "true", FeatureFlag: "comfyui", IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.5
+            ));
+        SegmentQwen21Sampling = Register<string>(new("Segment Qwen 2.1 Sampling", "Masked Img2Img is the native masked Qwen 2.1 inpainting workflow and is the default for segment edits. Reference Edit is unmasked whole-crop image editing, with the segment mask applied only when stitching.",
+            "Masked Img2Img", IgnoreIf: "Masked Img2Img", FeatureFlag: "comfyui", GetValues: _ => ["Masked Img2Img", "Reference Edit"], IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.6
             ));
         // ================================================ Advanced Sampling ================================================
         GroupAdvancedSampling = new("Advanced Sampling", Open: false, OrderPriority: 15, IsAdvanced: true);

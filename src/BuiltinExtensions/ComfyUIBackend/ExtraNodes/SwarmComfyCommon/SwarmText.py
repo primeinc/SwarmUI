@@ -214,6 +214,10 @@ def join_text(leaves, weighted):
 
 
 def token_batches_have_weights(batches):
+    if batches is None or isinstance(batches, (bool, int, float, str)):
+        # Multimodal tokenizers (Qwen 2.1 included) carry scalar flags such as
+        # keep_vision beside actual token batches. Those are not weighted tokens.
+        return False
     if not batches:
         return False
     if isinstance(batches, dict):
@@ -502,7 +506,7 @@ class SwarmTextEncodeAdvanced:
     FUNCTION = "encode"
     DESCRIPTION = "Acts like the regular CLIPTextEncode, but supports Swarm prompt tags such as '<break>', '<fromto[0.5]:a, b>', '<alternate:a, b>', '<weight[2]:text>', '<embed:name>'."
 
-    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None):
+    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None, lora_hooks = None, tokenize_kwargs = None):
         append_images = False
         prepend_images = False
         fix_images = True
@@ -516,13 +520,17 @@ class SwarmTextEncodeAdvanced:
             llama_template = PROMPT_TEMPLATE_QWEN_IMAGE_EDIT_PLUS
             append_images = True
             prepend_images = True
-        if images is not None and images.shape[-1] == 4:
-            images = images[..., :3] * images[..., 3:] + (1.0 - images[..., 3:])
-        if images is not None and fix_images:
-            if len(images.shape) == 3:
-                images = [images]
-            else:
-                images = [i.unsqueeze(0) for i in images]
+        if images is not None and not isinstance(images, list):
+            if images.shape[-1] == 4:
+                images = images[..., :3] * images[..., 3:] + (1.0 - images[..., 3:])
+            if fix_images:
+                if len(images.shape) == 3:
+                    images = [images]
+                else:
+                    images = [i.unsqueeze(0) for i in images]
+        # Qwen 2.1 can supply a list of differently shaped reference images. Do not
+        # concatenate or resize them to the first image's geometry.
+        tokenize_kwargs = tokenize_kwargs or {}
 
         base_hooks = clip.apply_hooks_to_conds
         if lora_hooks is not None:
@@ -536,7 +544,7 @@ class SwarmTextEncodeAdvanced:
             if minimax_refs is not None:
                 extra["minimax_ref_items"] = minimax_refs["ref_items"]
             if clip_vision_output is not None:
-                return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra, **tokenize_kwargs)
             elif images is not None:
                 if append_images:
                     image_prompt = ""
@@ -549,11 +557,11 @@ class SwarmTextEncodeAdvanced:
                         text = image_prompt + text
                     else:
                         text = text + image_prompt
-                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=images, **extra)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=images, **extra, **tokenize_kwargs)
             else:
-                return clip.tokenize(text, **extra)
+                return clip.tokenize(text, **extra, **tokenize_kwargs)
 
-        use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)"))
+        use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)", **tokenize_kwargs))
 
         def encode_leaves(leaves):
             w = uniform_weight(leaves)

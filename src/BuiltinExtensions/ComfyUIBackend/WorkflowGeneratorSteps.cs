@@ -50,6 +50,104 @@ public class WorkflowGeneratorSteps
      * 50,000+: Intermediate Image Saves (Stable-Dynamic)
      */
 
+    /// <summary>
+    /// Fail early if a statically selected LoRA was lost between the model loader
+    /// and the actual Qwen segment sampler. Read-only graph validation: the LoRA
+    /// loader itself remains the standard ComfyUI node. This only verifies graph
+    /// wiring and nonzero patch strength, NOT an image-space LoRA effect.
+    /// </summary>
+    public static void VerifyQwenSegmentLoraChain(WorkflowGenerator g, JArray modelPath, int sectionId, bool isRefiner)
+    {
+        List<string> selected = g.UserInput.Get(T2IParamTypes.Loras, []);
+        if (selected.Count == 0)
+        {
+            return;
+        }
+        List<string> weights = g.UserInput.Get(T2IParamTypes.LoraWeights, []);
+        List<string> confinements = g.UserInput.Get(T2IParamTypes.LoraSectionConfinement, []);
+        static string normalized(string name)
+        {
+            string result = (name ?? "").Replace('\\', '/');
+            if (result.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+            {
+                result = result[..^".safetensors".Length];
+            }
+            return result.Trim().ToLowerInvariant();
+        }
+        static bool sameName(string first, string second)
+        {
+            string a = normalized(first), b = normalized(second);
+            return a == b || a.EndsWith("/" + b, StringComparison.Ordinal)
+                || b.EndsWith("/" + a, StringComparison.Ordinal);
+        }
+
+        // Traverse the real sampler MODEL connection upstream, not the input
+        // form's displayed LoRA list. Wrapper nodes preserve their MODEL input.
+        List<(string Name, double Weight)> actual = [];
+        HashSet<string> visited = [];
+        JArray current = modelPath;
+        while (current is not null && visited.Add(current[0]?.ToString() ?? ""))
+        {
+            JObject node = g.Workflow[current[0]?.ToString() ?? ""] as JObject;
+            if (node is null)
+            {
+                break;
+            }
+            string type = node["class_type"]?.ToString();
+            JObject inputs = node["inputs"] as JObject;
+            // LanPaint's mask-aware sampler already owns the inpainting mask. The
+            // generic DifferentialDiffusion model patch rewrites that mask by
+            // timestep before LanPaint sees it, defeating a stable region mask.
+            // The stock ComfyUI/LanPaint Qwen masked workflow does not use it.
+            if (type == "DifferentialDiffusion"
+                && g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Masked Img2Img", sectionId: sectionId) == "Masked Img2Img")
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: DifferentialDiffusion on LanPaint's model path changes the inpaint mask during sampling. " +
+                    "Use LanPaint's own latent noise mask without a differential-diffusion wrapper.");
+            }
+            if (type is "LoraLoader" or "LoraLoaderModelOnly" or "NunchakuFluxLoraLoader")
+            {
+                string name = inputs?["lora_name"]?.ToString() ?? "";
+                JToken strength = inputs?[type == "NunchakuFluxLoraLoader" ? "lora_strength" : "strength_model"];
+                actual.Add((name, strength?.Value<double>() ?? 0));
+            }
+            current = inputs?["model"] as JArray;
+        }
+
+        List<(string Name, double Weight, int Confinement)> expected = [];
+        for (int i = 0; i < selected.Count; i++)
+        {
+            if (g.UserInput.DynamicLoraIndices.Contains(i))
+            {
+                continue; // Native Qwen's scheduled-hook use is rejected elsewhere.
+            }
+            int confinement = i < confinements.Count && int.TryParse(confinements[i], out int parsed) ? parsed : -1;
+            if (confinement is not (-1 or 0) && confinement != sectionId
+                && confinement != (isRefiner ? T2IParamInput.SectionID_Refiner : T2IParamInput.SectionID_BaseOnly))
+            {
+                continue;
+            }
+            double weight = i < weights.Count ? double.Parse(weights[i]) : 1;
+            if (weight != 0)
+            {
+                expected.Add((selected[i], weight, confinement));
+            }
+        }
+        string chain = string.Join(", ", actual.Select(x => $"{x.Name}@{x.Weight:0.###}"));
+        string requested = string.Join(", ", expected.Select(x => $"{x.Name}@{x.Weight:0.###} (section {x.Confinement})"));
+        Logs.Info($"[QWEN21-SEG] sampler-LoRA-chain section={sectionId} refiner={isRefiner} model_node={modelPath[0]} actual=[{chain}] expected=[{requested}]");
+        foreach ((string name, double weight, int _) in expected)
+        {
+            if (!actual.Any(x => sameName(x.Name, name) && Math.Abs(x.Weight - weight) < 0.00001))
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: selected LoRA '{name}' at strength {weight:0.###} is NOT on the actual sampler model chain. " +
+                    $"Observed chain LoRAs: [{chain}]. Aborting before GPU inference rather than silently ignoring the LoRA.");
+            }
+        }
+    }
+
     public static void Register()
     {
         #region Model Loader
@@ -62,6 +160,7 @@ public class WorkflowGeneratorSteps
             }
             g.FinalLoadedModelList = [g.FinalLoadedModel];
             (g.FinalLoadedModel, g.CurrentModel, g.CurrentTextEnc, g.CurrentVae) = g.CreateModelLoader(g.FinalLoadedModel, "Base", "4", sectionId: T2IParamInput.SectionID_BaseOnly);
+            g.CurrentModelFromRefiner = false;
         }, -15);
         AddModelGenStep(g =>
         {
@@ -127,6 +226,10 @@ public class WorkflowGeneratorSteps
             else // Base
             {
                 (g.LoadingModel, g.LoadingClip) = g.LoadLorasForConfinement(T2IParamInput.SectionID_BaseOnly, g.LoadingModel, g.LoadingClip);
+            }
+            if (g.LoadingAdditionalLoraConfinement > 0)
+            {
+                (g.LoadingModel, g.LoadingClip) = g.LoadLorasForConfinement(g.LoadingAdditionalLoraConfinement, g.LoadingModel, g.LoadingClip);
             }
         }, -10);
         AddModelGenStep(g =>
@@ -1572,6 +1675,7 @@ public class WorkflowGeneratorSteps
                     g.FinalLoadedModel = refineModel;
                     g.FinalLoadedModelList = [refineModel];
                     (g.FinalLoadedModel, g.CurrentModel, g.CurrentTextEnc, g.CurrentVae) = g.CreateModelLoader(refineModel, "Refiner", loaderNodeId, sectionId: T2IParamInput.SectionID_Refiner);
+                    g.CurrentModelFromRefiner = true;
                     g.NoVAEOverride = false;
                     prompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.Prompt), g.CurrentTextEnc.Path, g.FinalLoadedModel, true, isRefiner: true, steps: steps);
                     negPrompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.NegativePrompt), g.CurrentTextEnc.Path, g.FinalLoadedModel, false, isRefiner: true, steps: steps);
@@ -1790,16 +1894,128 @@ public class WorkflowGeneratorSteps
         }, 1);
         #endregion
         #region Segmentation Processing
-        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner)
+        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner, bool isSingleImage = false)
         {
-            PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
+            PromptRegion parsedPrompt = new(g.UserInput.Get(T2IParamTypes.Prompt, ""));
+            PromptRegion.Part[] parts = [.. parsedPrompt.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
+                // A segment-only Qwen edit is an instruction to modify the supplied
+                // source image, NOT a request to generate an unrelated base frame.
+                // The ordinary main sampler has no global/base prompt in this case:
+                // using its output as the crop source destroys the original subject
+                // before CLIPSeg even runs. Use the real original image instead.
+                // Other prompts retain the existing generated-frame segment behavior.
+                bool segmentOnlyQwenEdit = g.IsQwenImage21() && !isSingleImage
+                    && parsedPrompt.Parts.All(p => p.Type == PromptRegion.PartType.Segment)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.GlobalPrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.BasePrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.RefinerPrompt)
+                    && string.IsNullOrWhiteSpace(parsedPrompt.BackgroundPrompt);
+                if (segmentOnlyQwenEdit)
+                {
+                    WGNodeData originalSource = null;
+                    string sourceKind = null;
+                    if (g.UserInput.TryGet(T2IParamTypes.InitImage, out Image originalInit))
+                    {
+                        // Take the actual source dimensions and pixels, not
+                        // BasicInputImage (which may be noised) or a forced
+                        // resample to the unrelated text-to-image canvas size.
+                        // The upstream crop-and-stitch adapter handles arbitrary
+                        // source dimensions and restores that same canvas.
+                        (int sourceWidth, int sourceHeight) = originalInit.GetResolution();
+                        originalSource = g.LoadImage(originalInit, "${initimage}", false,
+                            width: sourceWidth, height: sourceHeight);
+                        sourceKind = "InitImage";
+                    }
+                    else
+                    {
+                        JArray promptSource = g.GetPromptImage(false, false, 0);
+                        if (promptSource is not null)
+                        {
+                            originalSource = new WGNodeData(promptSource, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
+                            sourceKind = "PromptImages[0]";
+                        }
+                    }
+                    if (originalSource is null)
+                    {
+                        throw new SwarmUserErrorException("Qwen Image 2.1 segment-only editing needs an Init Image or at least one Prompt Image. No source image was supplied.");
+                    }
+                    // If the caller requested a batch, replicate the original
+                    // before the existing per-image segment isolation below.
+                    // ImageBatch is a native Comfy node.
+                    int sourceBatchSize = g.UserInput.Get(T2IParamTypes.BatchSize, 1);
+                    JArray originalBatch = originalSource.Path;
+                    for (int repeat = 1; repeat < sourceBatchSize; repeat++)
+                    {
+                        string batchNode = g.CreateNode("ImageBatch", new JObject()
+                        {
+                            ["image1"] = originalBatch,
+                            ["image2"] = originalSource.Path
+                        });
+                        originalBatch = NodePath(batchNode, 0);
+                    }
+                    g.CurrentMedia = originalSource.WithPath(originalBatch);
+                    Logs.Info($"[QWEN21-SEG] segment-only original source={sourceKind} node={g.CurrentMedia.Path[0]} base_sampler_bypassed=true batch={sourceBatchSize}");
+                }
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
+                // Native Qwen image references represent a single source image per conditioning.
+                // Split the source batch before detection so no item can inherit another's crop.
+                int batchSize = g.UserInput.Get(T2IParamTypes.BatchSize, 1);
+                if (!isSingleImage && g.IsQwenImage21() && batchSize > 1)
+                {
+                    WGNodeData sourceBatch = g.CurrentMedia;
+                    T2IModel sourceModel = g.FinalLoadedModel;
+                    WGNodeData sourceModelNode = g.CurrentModel, sourceClipNode = g.CurrentTextEnc, sourceVaeNode = g.CurrentVae;
+                    bool sourceIsRefiner = g.CurrentModelFromRefiner;
+                    bool sourceNoVaeOverride = g.NoVAEOverride;
+                    JArray processedBatch = null;
+                    try
+                    {
+                        for (int imageIndex = 0; imageIndex < batchSize; imageIndex++)
+                        {
+                            string singleImage = g.CreateNode("ImageFromBatch", new JObject()
+                            {
+                                ["image"] = sourceBatch.Path,
+                                ["batch_index"] = imageIndex,
+                                ["length"] = 1
+                            });
+                            g.CurrentMedia = sourceBatch.WithPath([singleImage, 0]);
+                            g.FinalLoadedModel = sourceModel;
+                            g.CurrentModel = sourceModelNode;
+                            g.CurrentTextEnc = sourceClipNode;
+                            g.CurrentVae = sourceVaeNode;
+                            g.CurrentModelFromRefiner = sourceIsRefiner;
+                            g.NoVAEOverride = sourceNoVaeOverride;
+                            RunSegmentationProcessing(g, isBeforeRefiner, isSingleImage: true);
+                            processedBatch = processedBatch is null
+                                ? g.CurrentMedia.Path
+                                : NodePath(g.CreateNode("ImageBatch", new JObject()
+                                {
+                                    ["image1"] = processedBatch,
+                                    ["image2"] = g.CurrentMedia.Path
+                                }), 0);
+                        }
+                    }
+                    finally
+                    {
+                        g.FinalLoadedModel = sourceModel;
+                        g.CurrentModel = sourceModelNode;
+                        g.CurrentTextEnc = sourceClipNode;
+                        g.CurrentVae = sourceVaeNode;
+                        g.CurrentModelFromRefiner = sourceIsRefiner;
+                        g.NoVAEOverride = sourceNoVaeOverride;
+                    }
+                    g.CurrentMedia = sourceBatch.WithPath(processedBatch);
+                    return;
+                }
                 g.SaveOptionalIntermediate();
                 T2IModel t2iModel = g.FinalLoadedModel;
                 WGNodeData model = g.CurrentModel, clip = g.CurrentTextEnc, vae = g.CurrentVae;
-                if (g.UserInput.TryGet(T2IParamTypes.SegmentModel, out T2IModel segmentModel))
+                bool hasSegmentModelOverride = g.UserInput.TryGet(T2IParamTypes.SegmentModel, out T2IModel segmentModel);
+                // Capture the model-producing stage before the segment overrides or any later loaders.
+                bool segmentSourceIsRefiner = g.CurrentModelFromRefiner;
+                if (hasSegmentModelOverride)
                 {
                     if (segmentModel.ModelClass?.CompatClass != t2iModel.ModelClass?.CompatClass)
                     {
@@ -1807,10 +2023,23 @@ public class WorkflowGeneratorSteps
                     }
                     t2iModel = segmentModel;
                     g.FinalLoadedModel = segmentModel;
-                    (t2iModel, model, clip, vae) = g.CreateModelLoader(t2iModel, "Refiner", sectionId: parts[0].ContextID);
+                    bool previousRefinerStage = g.IsRefinerStage;
+                    g.IsRefinerStage = true;
+                    try
+                    {
+                        (t2iModel, model, clip, vae) = g.CreateModelLoader(t2iModel, "Refiner", sectionId: parts[0].ContextID);
+                    }
+                    finally
+                    {
+                        g.IsRefinerStage = previousRefinerStage;
+                    }
+                    segmentSourceIsRefiner = true;
                     g.FinalLoadedModel = t2iModel;
                     g.CurrentModel = model;
                 }
+                WGNodeData segmentBaseModel = model;
+                WGNodeData segmentBaseClip = clip;
+                WGNodeData segmentBaseVae = vae;
                 PromptRegion negativeRegion = new(g.UserInput.Get(T2IParamTypes.NegativePrompt, ""));
                 PromptRegion.Part[] negativeParts = [.. negativeRegion.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
                 for (int i = 0; i < parts.Length; i++)
@@ -1895,25 +2124,33 @@ public class WorkflowGeneratorSteps
                             ["mask"] = NodePath(segmentNode, 0)
                         });
                     }
+                    // Keep detector support separate from the expanded / blurred compositor mask.
+                    // Bounds based on the latter can swallow the entire image and defeat cropping.
+                    string detectedMaskNode = segmentNode;
                     int blurAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskBlur, 10);
-                    if (blurAmt > 0)
-                    {
-                        segmentNode = g.CreateNode("SwarmMaskBlur", new JObject()
-                        {
-                            ["mask"] = NodePath(segmentNode, 0),
-                            ["blur_radius"] = blurAmt,
-                            ["sigma"] = 1
-                        });
-                    }
                     int growAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskGrow, 16);
-                    if (growAmt > 0)
+                    // Existing non-Qwen pipeline is unchanged. The upstream
+                    // InpaintCropImproved node owns these operations for Qwen.
+                    if (!g.IsQwenImage21())
                     {
-                        segmentNode = g.CreateNode("GrowMask", new JObject()
+                        if (blurAmt > 0)
                         {
-                            ["mask"] = NodePath(segmentNode, 0),
-                            ["expand"] = growAmt,
-                            ["tapered_corners"] = true
-                        });
+                            segmentNode = g.CreateNode("SwarmMaskBlur", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0),
+                                ["blur_radius"] = blurAmt,
+                                ["sigma"] = 1
+                            });
+                        }
+                        if (growAmt > 0)
+                        {
+                            segmentNode = g.CreateNode("GrowMask", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0),
+                                ["expand"] = growAmt,
+                                ["tapered_corners"] = true
+                            });
+                        }
                     }
                     if (g.UserInput.Get(T2IParamTypes.SaveSegmentMask, false))
                     {
@@ -1923,28 +2160,268 @@ public class WorkflowGeneratorSteps
                         });
                         new WGNodeData([imageNode, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat()).SaveOutput(null, null, g.GetStableDynamicID(50000, 0));
                     }
+                    // A zero-creativity Qwen edit is a no-op, but the requested mask is still an output.
+                    if (g.IsQwenImage21() && part.Strength2 <= 0)
+                    {
+                        continue;
+                    }
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
-                    g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
-                    g.EnableDifferential();
-                    if (part.ContextID > 0)
+                    bool nativeQwenSegment = g.IsQwenImage21();
+                    JArray cropStitcher = null, qwenCrop = null, qwenCropMask = null;
+                    if (nativeQwenSegment)
                     {
-                        (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, g.CurrentModel.Path, clip.Path);
-                        model = model.WithPath(newModel);
-                        clip = clip.WithPath(newClip);
+                        // The upstream, separately GPL-licensed, unmodified
+                        // ComfyUI-Inpaint-CropAndStitch plugin owns crop context,
+                        // sizing, mask edge handling and reassembly. Swarm only
+                        // connects the existing text detector and user settings.
+                        string desiredRes = g.UserInput.Get(T2IParamTypes.SegmentTargetResolution, "0x0");
+                        (string sx, string sy) = desiredRes.BeforeAndAfter('x');
+                        int rw = int.Parse(sx), rh = int.Parse(sy);
+                        int targetW = rw > 0 && rh > 0 ? rw : g.FinalLoadedModel?.StandardWidth > 0
+                            ? g.FinalLoadedModel.StandardWidth : g.UserInput.GetImageWidth();
+                        int targetH = rw > 0 && rh > 0 ? rh : g.FinalLoadedModel?.StandardHeight > 0
+                            ? g.FinalLoadedModel.StandardHeight : g.UserInput.GetImageHeight();
+                        JObject cropInputs = new()
+                        {
+                            ["image"] = g.CurrentMedia.Path,
+                            ["mask"] = NodePath(detectedMaskNode, 0),
+                            ["downscale_algorithm"] = "bilinear",
+                            ["upscale_algorithm"] = "bicubic",
+                            ["preresize"] = false,
+                            ["preresize_mode"] = "ensure minimum resolution",
+                            ["preresize_min_width"] = 1024,
+                            ["preresize_min_height"] = 1024,
+                            ["preresize_max_width"] = 16384,
+                            ["preresize_max_height"] = 16384,
+                            ["mask_fill_holes"] = true,
+                            ["mask_expand_pixels"] = growAmt,
+                            ["mask_invert"] = false,
+                            ["mask_blend_pixels"] = blurAmt,
+                            ["mask_hipass_filter"] = 0.5,
+                            ["extend_for_outpainting"] = false,
+                            ["extend_up_factor"] = 1.0,
+                            ["extend_down_factor"] = 1.0,
+                            ["extend_left_factor"] = 1.0,
+                            ["extend_right_factor"] = 1.0,
+                            ["context_from_mask_extend_factor"] = 1.2,
+                            ["output_resize_to_target_size"] = true,
+                            ["output_target_width"] = targetW,
+                            ["output_target_height"] = targetH,
+                            ["output_padding"] = "32",
+                            ["device_mode"] = "cpu (compatible)"
+                        };
+                        if (oversize > 0)
+                        {
+                            // Native GrowMask is an optional CONTEXT selector;
+                            // it does not enlarge the region overwritten.
+                            string context = g.CreateNode("GrowMask", new JObject()
+                            {
+                                ["mask"] = NodePath(detectedMaskNode, 0),
+                                ["expand"] = oversize,
+                                ["tapered_corners"] = true
+                            });
+                            cropInputs["optional_context_mask"] = NodePath(context, 0);
+                        }
+                        string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
+                        cropStitcher = NodePath(cropNode, 0);
+                        qwenCrop = NodePath(cropNode, 1);
+                        qwenCropMask = NodePath(cropNode, 2);
+                        // Preserve the source crop's own alpha, if any.
+                        // The inpainting mask must remain separate. LanPaint's
+                        // official Qwen example combines LoadImage's source
+                        // alpha, not the separate LoadImageMask inpaint mask.
+                    }
+                    else
+                    {
+                        g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path,
+                            oversize, vae.Path, g.FinalLoadedModel,
+                            thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
+                    }
+                    string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Masked Img2Img", sectionId: part.ContextID) : null;
+                    // Start every segment from the same unmodified stage model/CLIP/VAE.
+                    model = segmentBaseModel;
+                    clip = segmentBaseClip;
+                    vae = segmentBaseVae;
+                    if (nativeQwenSegment)
+                    {
+                        // Confined Qwen LoRAs need their own model-load cache entry so they can be
+                        // applied at the same model-generation stage as ordinary/global LoRAs,
+                        // before any later cache/attention/compile wrappers are constructed.
+                        if (g.HasLorasForConfinement(part.ContextID))
+                        {
+                            string loaderType = segmentSourceIsRefiner ? "Refiner" : "Base";
+                            bool previousRefinerStage = g.IsRefinerStage;
+                            g.IsRefinerStage = segmentSourceIsRefiner;
+                            try
+                            {
+                                (t2iModel, model, clip, vae) = g.CreateModelLoader(
+                                    t2iModel,
+                                    loaderType,
+                                    sectionId: part.ContextID,
+                                    additionalLoraConfinement: part.ContextID);
+                            }
+                            finally
+                            {
+                                g.IsRefinerStage = previousRefinerStage;
+                            }
+                        }
+                        // LanPaint_ImageEncode supplies the inpaint mask through
+                        // the latent's noise_mask. Do not also wrap this model in
+                        // DifferentialDiffusion: that patch replaces the stable
+                        // mask with a sigma-dependent threshold at each step,
+                        // unlike upstream LanPaint's Qwen masked example.
+                        // Reference Edit deliberately has no latent noise mask.
+                    }
+                    else
+                    {
+                        g.EnableDifferential();
+                        model = g.CurrentModel;
+                        if (part.ContextID > 0)
+                        {
+                            (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
+                            model = model.WithPath(newModel);
+                            clip = clip.WithPath(newClip);
+                        }
                     }
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
-                    JArray prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
-                    JArray negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
+                    JArray prompt, negPrompt;
+                    JArray segmentLatent = nativeQwenSegment ? null : NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
+                    if (nativeQwenSegment)
+                    {
+                        (prompt, negPrompt, segmentLatent) = g.CreateQwen21SegmentConditioning(
+                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID);
+                    }
+                    else
+                    {
+                        prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
+                        negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
+                    }
+                    if (nativeQwenSegment)
+                    {
+                        VerifyQwenSegmentLoraChain(g, model.Path, part.ContextID, segmentSourceIsRefiner);
+                    }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
-                    double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
+                    // ComfyUI's Qwen Image 2.1 image-edit template publishes CFG=1.
+                    // Swarm's generic CFG default is 7 (degrades Qwen severely).
+                    // Honor explicit section/segment CFG overrides; never inherit
+                    // generic SD/SDXL defaults for Qwen segmented edits.
+                    double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false)
+                        ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID)
+                        ?? (nativeQwenSegment ? 1.0 :
+                            g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID)
+                            ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID));
                     WGNodeData beforeImage = g.CurrentMedia;
-                    string sampler = g.CreateKSampler(model.Path, prompt, negPrompt, [g.MaskShrunkInfo.MaskedLatent, 0], cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID);
+                    // The intermediate-images setting requests normal stage
+                    // outputs, not seven private debugging frames per segment.
+                    // Only the final stitched image is the Qwen segment result.
+                    if (nativeQwenSegment)
+                    {
+                        Logs.Info($"[QWEN21-SEG] graph section={part.ContextID} region='{part.DataText}' prompt='{part.Prompt?.Trim()}' " +
+                            $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 " +
+                            $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
+                            $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
+                            $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} " +
+                            $"requested_creativity={part.Strength2:0.####} sampler_denoise={(qwenSegmentMode == "Reference Edit" ? 1.0 : part.Strength2):0.####} seed={seed} cfg={cfg:0.####} " +
+                            $"stitch_output_only=true");
+                    }
+                    string sampler;
+                    if (nativeQwenSegment)
+                    {
+                        // Reference Edit deliberately reuses ComfyUI's ordinary
+                        // Qwen edit latent and stock KSampler. Using LanPaint's
+                        // masked latent/sampler here instead re-encodes the
+                        // original subject and changes an instruction-based
+                        // replacement into masked image preservation.
+                        // The *separate* Masked Img2Img mode invokes LanPaint
+                        // and its unchanged official masked sampler.
+                        JObject samplerInputs = new()
+                        {
+                            ["model"] = model.Path,
+                            ["seed"] = seed,
+                            ["steps"] = steps,
+                            ["cfg"] = cfg,
+                            ["sampler_name"] = g.UserInput.Get(ComfyUIBackendExtension.SamplerParam, g.DefaultSampler, sectionId: part.ContextID),
+                            ["scheduler"] = g.UserInput.Get(ComfyUIBackendExtension.SchedulerParam, "simple", sectionId: part.ContextID),
+                            ["positive"] = prompt,
+                            ["negative"] = negPrompt,
+                            ["latent_image"] = segmentLatent,
+                            // Qwen native output 2 is an EMPTY latent. It must run
+                            // the full native noise schedule (denoise=1), not a
+                            // truncated img2img schedule on zero-filled latents.
+                            // Masked Img2Img does use the requested creativity.
+                            ["denoise"] = qwenSegmentMode == "Reference Edit" ? 1.0 : part.Strength2
+                        };
+                        if (qwenSegmentMode == "Reference Edit")
+                        {
+                            sampler = g.CreateNode("KSampler", samplerInputs);
+                        }
+                        else
+                        {
+                            samplerInputs["LanPaint_NumSteps"] = 5;
+                            samplerInputs["LanPaint_PromptMode"] = "Image First";
+                            sampler = g.CreateNode("LanPaint_KSampler", samplerInputs);
+                        }
+                    }
+                    else
+                    {
+                        sampler = g.WithSegmentSamplingVae(vae, () =>
+                            g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep,
+                                10000, seed, false, true, sectionId: part.ContextID));
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
-                    g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
-                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path);
+                    if (nativeQwenSegment)
+                    {
+                        // Decode and size-match the native sampled crop, but DO NOT
+                        // mask-blend here. Upstream InpaintStitchImproved already
+                        // applies the crop's blending mask against the original
+                        // canvas; doing both composites ghosts the old subject.
+                        string decoder = g.CreateNode("LanPaint_ImageDecode", new JObject()
+                        {
+                            ["samples"] = NodePath(sampler, 0),
+                            ["vae"] = vae.Path,
+                            ["image"] = qwenCrop
+                        });
+                        g.CurrentMedia = g.CurrentMedia.WithPath(NodePath(decoder, 0), WGNodeData.DT_IMAGE);
+                    }
+                    else
+                    {
+                        g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
+                    }
+                    if (!nativeQwenSegment)
+                    {
+                        g.SaveOptionalIntermediate();
+                    }
+                    JArray composited;
+                    if (nativeQwenSegment)
+                    {
+                        // Feed the image generated from the exact native Qwen
+                        // reference crop to the matching upstream stitch node.
+                        // The stitcher object retains the real crop transform and
+                        // blending mask, so nothing re-derives coordinates.
+                        string rgb = g.CreateNode("SplitImageWithAlpha", new JObject()
+                        {
+                            ["image"] = g.CurrentMedia.Path
+                        });
+                        JArray stitchInput = NodePath(rgb, 0);
+                        string stitchNode = g.CreateNode("InpaintStitchImproved", new JObject()
+                        {
+                            ["stitcher"] = cropStitcher,
+                            ["inpainted_image"] = stitchInput
+                        });
+                        composited = NodePath(stitchNode, 0);
+                        Logs.Info($"[QWEN21-SEG] stitch section={part.ContextID} class=InpaintStitchImproved " +
+                            $"stitcher={cropStitcher[0]}:0 crop_image={qwenCrop[0]}:1 " +
+                            $"sampler={sampler} sampled_rgb={stitchInput[0]} " +
+                            $"final={stitchNode} result={composited[0]}");
+                    }
+                    else
+                    {
+                        composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode,
+                            [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path);
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }

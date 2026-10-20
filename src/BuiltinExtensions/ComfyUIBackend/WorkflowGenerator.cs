@@ -163,11 +163,20 @@ public partial class WorkflowGenerator
     /// <summary>Type id ('Base', 'Refiner') of the current loading model.</summary>
     public string LoadingModelType;
 
+    /// <summary>Optional extra LoRA confinement to apply while the model-load pipeline is still being constructed.</summary>
+    public int LoadingAdditionalLoraConfinement = 0;
+
     /// <summary>If true, user-selected VAE may be wrong, so ignore it.</summary>
     public bool NoVAEOverride = false;
 
+    /// <summary>If true, the active stage model being segmented was produced by the refiner model-loader pipeline. Unlike IsRefinerStage, this persists after refiner sampling ends.</summary>
+    public bool CurrentModelFromRefiner = false;
+
     /// <summary>If true, the generator is currently working on the refiner stage.</summary>
     public bool IsRefinerStage = false;
+
+    /// <summary>If true, we are building a segment sampler, so the model may need segment-specific conditioning.</summary>
+    public bool IsSegmentSamplerStage = false;
 
     /// <summary>If true, the generator is currently working on the pixel-decoder stage.</summary>
     public bool IsPixelDecoderStage = false;
@@ -404,6 +413,30 @@ public partial class WorkflowGenerator
         return DynamicLoraHooks;
     }
 
+    /// <summary>Whether a non-dynamic LoRA is statically confined to the given prompt section.</summary>
+    public bool HasLorasForConfinement(int confinement)
+    {
+        if (confinement <= 0 || !UserInput.TryGet(T2IParamTypes.Loras, out List<string> loras))
+        {
+            return false;
+        }
+        List<string> confinements = UserInput.Get(T2IParamTypes.LoraSectionConfinement);
+        if (confinements is null)
+        {
+            return false;
+        }
+        for (int i = 0; i < loras.Count && i < confinements.Count; i++)
+        {
+            if (!UserInput.DynamicLoraIndices.Contains(i)
+                && int.TryParse(confinements[i], out int confinementId)
+                && confinementId == confinement)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>Loads and applies LoRAs in the user parameters for the given LoRA confinement ID.</summary>
     public (JArray, JArray) LoadLorasForConfinement(int confinement, JArray model, JArray clip)
     {
@@ -591,9 +624,22 @@ public partial class WorkflowGenerator
     /// <param name="threshold">Optional minimum value threshold.</param>
     /// <param name="thresholdMax">Optional maximum value of the threshold.</param>
     /// <returns>(boundsNode, croppedMask, maskedLatent, scaledImage).</returns>
-    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1)
+    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1, JArray boundsMask = null)
     {
-        if (threshold > 0)
+        // Qwen segment crop bounds are determined by the raw detection, not
+        // the blur / grow that is applied exclusively during compositing.
+        // Upstream ThresholdMask creates stable binary bounds; the original
+        // soft mask is still cropped and used as the final blend mask.
+        JArray maskForBounds = boundsMask ?? mask;
+        if (boundsMask is not null)
+        {
+            maskForBounds = NodePath(CreateNode("ThresholdMask", new JObject()
+            {
+                ["mask"] = maskForBounds,
+                ["value"] = 0.5
+            }), 0);
+        }
+        else if (threshold > 0)
         {
             string thresholded = CreateNode("SwarmMaskThreshold", new JObject()
             {
@@ -602,20 +648,22 @@ public partial class WorkflowGenerator
                 ["max"] = thresholdMax
             });
             mask = [thresholded, 0];
+            maskForBounds = mask;
         }
         string targetRes = UserInput.Get(T2IParamTypes.SegmentTargetResolution, "0x0");
-        (string targetWidth, string targetHeight) = targetRes.BeforeAndAfter('x');
-        int targetX = int.Parse(targetWidth);
-        int targetY = int.Parse(targetHeight);
+        (string targetWidthText, string targetHeightText) = targetRes.BeforeAndAfter('x');
+        int targetX = int.Parse(targetWidthText);
+        int targetY = int.Parse(targetHeightText);
         bool isCustomRes = targetX > 0 && targetY > 0;
         string boundsNode = CreateNode("SwarmMaskBounds", new JObject()
         {
-            ["mask"] = mask,
+            ["mask"] = maskForBounds,
             ["grow"] = growBy,
             ["aspect_x"] = isCustomRes ? targetX : 0,
-            ["aspect_y"] = isCustomRes ? targetY : 0
+            ["aspect_y"] = isCustomRes ? targetY : 0,
+            ["reject_empty"] = boundsMask is not null
         });
-        string croppedImage = CreateNode("SwarmImageCrop", new JObject()
+        string croppedImage = CreateNode(boundsMask is null ? "SwarmImageCrop" : "ImageCrop", new JObject()
         {
             ["image"] = image,
             ["x"] = NodePath(boundsNode, 0),
@@ -631,13 +679,26 @@ public partial class WorkflowGenerator
             ["width"] = NodePath(boundsNode, 2),
             ["height"] = NodePath(boundsNode, 3)
         });
-        string scaledImage = CreateNode("SwarmImageScaleForMP", new JObject()
-        {
-            ["image"] = NodePath(croppedImage, 0),
-            ["width"] = isCustomRes ? targetX : model?.StandardWidth <= 0 ? UserInput.GetImageWidth() : model.StandardWidth,
-            ["height"] = isCustomRes ? targetY : model?.StandardHeight <= 0 ? UserInput.GetImageHeight() : model.StandardHeight,
-            ["can_shrink"] = true
-        });
+        int targetWidth = isCustomRes ? targetX : model?.StandardWidth <= 0 ? UserInput.GetImageWidth() : model.StandardWidth;
+        int targetHeight = isCustomRes ? targetY : model?.StandardHeight <= 0 ? UserInput.GetImageHeight() : model.StandardHeight;
+        // Upstream ComfyUI ImageScaleToTotalPixels matches Swarm's existing
+        // MP-based resize: same bilinear filter and 64-pixel resolution steps.
+        // The standard non-Qwen path keeps its existing exact legacy node.
+        string scaledImage = boundsMask is null
+            ? CreateNode("SwarmImageScaleForMP", new JObject()
+            {
+                ["image"] = NodePath(croppedImage, 0),
+                ["width"] = targetWidth,
+                ["height"] = targetHeight,
+                ["can_shrink"] = true
+            })
+            : CreateNode("ImageScaleToTotalPixels", new JObject()
+            {
+                ["image"] = NodePath(croppedImage, 0),
+                ["upscale_method"] = "bilinear",
+                ["megapixels"] = targetWidth * (double)targetHeight / (1024 * 1024),
+                ["resolution_steps"] = 64
+            });
         JArray encoded = DoMaskedVAEEncode(vae, [scaledImage, 0], [croppedMask, 0], null);
         return new(boundsNode, croppedMask, $"{encoded[0]}", scaledImage);
     }
@@ -673,8 +734,18 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Recomposites a masked image edit, after <see cref="CreateImageMaskCrop(JArray, JArray, int)"/> was used.</summary>
-    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage)
+    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false, bool preserveSoftMask = false, bool useNativeComposite = false)
     {
+        // Segment masks govern where an edit is applied. Qwen Image 2.1 can return RGBA pixels,
+        // and the compositor otherwise multiplies the segment mask by the generated alpha.
+        if (stripSourceAlpha)
+        {
+            string rgbOnly = CreateNode("SplitImageWithAlpha", new JObject()
+            {
+                ["image"] = newImage
+            });
+            newImage = [rgbOnly, 0];
+        }
         string scaledBack = CreateNode("ImageScale", new JObject()
         {
             ["image"] = newImage,
@@ -683,8 +754,42 @@ public partial class WorkflowGenerator
             ["upscale_method"] = "lanczos",
             ["crop"] = "disabled"
         });
-        if (!UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
+        bool useRawMask = UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false);
+        if (preserveSoftMask && !useRawMask)
         {
+            // A raw CLIPSeg confidence mask must not act as a transparency mask over
+            // the entire replacement subject. At fractional confidence the compositor
+            // mixes the old person with the new one, producing double-exposure ghosts.
+            // Make the detected subject opaque, then feather ONLY its boundary.
+            // Do not restore the legacy 0.001 threshold: it turns tiny background
+            // confidence into a full-opacity rectangular image paste.
+            string subjectMask = CreateNode("ThresholdMask", new JObject()
+            {
+                ["mask"] = croppedMask,
+                ["value"] = 0.5
+            });
+            // Soften only the edge of the binarized subject with upstream
+            // ComfyUI MaskToImage/ImageBlur/ImageToMask nodes. Do not mix the
+            // original subject throughout the mask, which caused ghosting.
+            string maskImage = CreateNode("MaskToImage", new JObject()
+            {
+                ["mask"] = NodePath(subjectMask, 0)
+            });
+            string blurImage = CreateNode("ImageBlur", new JObject()
+            {
+                ["image"] = NodePath(maskImage, 0),
+                ["blur_radius"] = 2,
+                ["sigma"] = 1.0
+            });
+            croppedMask = NodePath(CreateNode("ImageToMask", new JObject()
+            {
+                ["image"] = NodePath(blurImage, 0),
+                ["channel"] = "red"
+            }), 0);
+        }
+        else if (!preserveSoftMask && !useRawMask)
+        {
+            // Preserve existing non-Qwen segment behavior.
             string thresholded = CreateNode("ThresholdMask", new JObject()
             {
                 ["mask"] = croppedMask,
@@ -692,21 +797,23 @@ public partial class WorkflowGenerator
             });
             croppedMask = [thresholded, 0];
         }
-        string nodeClass = "ImageCompositeMasked";
-        if (Features.Contains("variation_seed") && !RestrictCustomNodes)
-        {
-            nodeClass = "SwarmImageCompositeMaskedColorCorrecting";
-        }
-        string composited = CreateNode(nodeClass, new JObject()
+        // The Qwen path uses the unchanged ComfyUI ImageCompositeMasked node.
+        // Other model families retain Swarm's optional color correction behavior.
+        bool customComposite = !useNativeComposite && Features.Contains("variation_seed") && !RestrictCustomNodes;
+        JObject compositeInputs = new()
         {
             ["destination"] = firstImage,
             ["source"] = NodePath(scaledBack, 0),
             ["mask"] = croppedMask,
             ["x"] = NodePath(boundsNode, 0),
             ["y"] = NodePath(boundsNode, 1),
-            ["resize_source"] = false,
-            ["correction_method"] = UserInput.Get(T2IParamTypes.ColorCorrectionBehavior, "None")
-        });
+            ["resize_source"] = false
+        };
+        if (customComposite)
+        {
+            compositeInputs["correction_method"] = UserInput.Get(T2IParamTypes.ColorCorrectionBehavior, "None");
+        }
+        string composited = CreateNode(customComposite ? "SwarmImageCompositeMaskedColorCorrecting" : "ImageCompositeMasked", compositeInputs);
         return [composited, 0];
     }
 
@@ -829,6 +936,30 @@ public partial class WorkflowGenerator
             result.Add(imgNode);
         }
         return result;
+    }
+
+    /// <summary>Temporarily scopes the segment VAE and model-specific reference behavior to one sampler, restoring both afterward.</summary>
+    public T WithSegmentSamplingVae<T>(WGNodeData vae, Func<T> action)
+    {
+        WGNodeData previousVae = CurrentVae;
+        bool previousStage = IsSegmentSamplerStage;
+        try
+        {
+            CurrentVae = vae;
+            IsSegmentSamplerStage = true;
+            return action();
+        }
+        finally
+        {
+            CurrentVae = previousVae;
+            IsSegmentSamplerStage = previousStage;
+        }
+    }
+
+    /// <summary>Whether Qwen Image 2.1 should receive the automatically inferred original-image reference during sampling.</summary>
+    public bool ShouldUseQwen21AutomaticReference()
+    {
+        return IsQwenImage21() && (!IsSegmentSamplerStage || UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true));
     }
 
     public (JArray, JArray, JArray, JArray) BuildInputImageHandling(List<JArray> images, JArray pos, JArray neg, JArray latent)
@@ -956,7 +1087,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Creates a KSampler and returns its node ID.</summary>
-    public string CreateKSampler(JArray model, JArray pos, JArray neg, JArray latent, double cfg, int steps, int startStep, int endStep, long seed, bool returnWithLeftoverNoise, bool addNoise, double sigmin = -1, double sigmax = -1, string previews = null, string defsampler = null, string defscheduler = null, string id = null, bool rawSampler = false, bool doTiled = false, bool isFirstSampler = false, bool hadSpecialCond = false, string explicitSampler = null, string explicitScheduler = null, int sectionId = 0, WGNodeData negativeModel = null)
+    public string CreateKSampler(JArray model, JArray pos, JArray neg, JArray latent, double cfg, int steps, int startStep, int endStep, long seed, bool returnWithLeftoverNoise, bool addNoise, double sigmin = -1, double sigmax = -1, string previews = null, string defsampler = null, string defscheduler = null, string id = null, bool rawSampler = false, bool doTiled = false, bool isFirstSampler = false, bool hadSpecialCond = false, string explicitSampler = null, string explicitScheduler = null, int sectionId = 0, WGNodeData negativeModel = null, bool referenceConditioningHandled = false)
     {
         if (negativeModel is null && UserInput.TryGet(T2IParamTypes.NegativeModel, out T2IModel negModel, sectionId: sectionId))
         {
@@ -1167,13 +1298,15 @@ public partial class WorkflowGenerator
             neg = [disabledNeg, 0];
         }
         JArray imgNeg = null;
-        if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images) && images.Count > 0)
+        // Native paired encoders have already attached matching vision/reference conditioning.
+        // Do not append global or inferred crop references for a second time.
+        if (!referenceConditioningHandled && UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images) && images.Count > 0)
         {
             (pos, neg, latent, imgNeg) = BuildInputImageHandling(LoadPromptImagesForMainRef(images), pos, neg, latent);
         }
-        else
+        else if (!referenceConditioningHandled)
         {
-            if (IsKontext() || (IsQwenImage() && IsQwenImageEdit()) || IsQwenImage21())
+            if (IsKontext() || (IsQwenImage() && IsQwenImageEdit()) || ShouldUseQwen21AutomaticReference())
             {
                 if (MaskShrunkInfo is not null && MaskShrunkInfo.ScaledImage is not null)
                 {
