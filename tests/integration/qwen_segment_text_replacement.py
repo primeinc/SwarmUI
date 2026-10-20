@@ -43,9 +43,11 @@ NODE_IDS = {
     "crop_after": "__swarm_text_probe_crop_after",
     "mask_image": "__swarm_text_probe_mask_image",
     "mask": "__swarm_text_probe_mask",
+    "mask_used_image": "__swarm_text_probe_mask_used_image",
+    "mask_used": "__swarm_text_probe_mask_used",
     "after": "__swarm_text_probe_after",
 }
-OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "after")
+OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "mask_used", "after")
 _HTTP = build_opener(ProxyHandler({}))
 
 
@@ -143,6 +145,13 @@ def inspect_and_instrument(original):
         "inputs": {"mask": [detector_id, 0]},
     }
     preview("mask", [NODE_IDS["mask_image"], 0])
+    # The detector output and the mask actually fed to the final compositor
+    # can differ after thresholding and cropping. Capture BOTH from real nodes.
+    graph[NODE_IDS["mask_used_image"]] = {
+        "class_type": "MaskToImage",
+        "inputs": {"mask": compositor["mask"]},
+    }
+    preview("mask_used", [NODE_IDS["mask_used_image"], 0])
     preview("after", [compositor_id, 0])
     return graph, {"detector": detector_id, "encoder": enc_id,
                    "sampler": sampler_id, "compositor": compositor_id,
@@ -238,6 +247,8 @@ def main(argv=None):
             image.save(args.outdir / f"run-{i+1:02d}-{kind}.png")
         mask = np.asarray(images["mask"].convert("L"), dtype=np.float32) / 255
         mask_coverage = float(np.mean(mask > 0.05))
+        used_mask = np.asarray(images["mask_used"].convert("L"), dtype=np.float32) / 255
+        used_mask_coverage = float(np.mean(used_mask > 0.05))
         crop_change = measure(images["crop_before"], images["crop_after"])
         composite_change = measure(images["before"], images["after"])
         failure = ("EMPTY_DETECTION" if mask_coverage < 0.005 else
@@ -248,6 +259,7 @@ def main(argv=None):
         result = {
             "attempt": i+1, "segment_seed": sampler[seed_key], "prompt_id": pid,
             "mask_fraction_above_5_percent": mask_coverage,
+            "compositor_mask_fraction_above_5_percent": used_mask_coverage,
             "crop_mean_absolute_rgb_difference": crop_change,
             "final_mean_absolute_rgb_difference": composite_change,
             "diagnostic": failure,
