@@ -64,7 +64,8 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     public static void RegionParserRemovesOnlyTheSegmentDirective()
     {
         const string saved = "sunrise, a girl on the street <segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
-        PromptRegion.Part part = new(saved);
+        PromptRegion region = new(saved);
+        PromptRegion.Part part = region.Parts.Single();
         Assert.That(part.Prompt, Is.EqualTo(" <weight[1.2]:HannahLynn>"));
         var (positive, negative, _, _) = ConditionersFor(part.Prompt, "<weight[0.5]:blurry>");
         Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo(part.Prompt));
