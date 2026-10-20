@@ -217,7 +217,8 @@ def graph_variant(original, case, stage, strength):
     # basename could silently test a different adapter with the same filename
     # in another folder, falsely passing a rendered ON/OFF comparison.
     def normalize_lora(name):
-        return str(name).replace("\\", "/").strip("/").casefold().removesuffix(".safetensors")
+        normalized = str(name).replace("\\", "/").strip("/")
+        return normalized[:-len(".safetensors")] if normalized.lower().endswith(".safetensors") else normalized
 
     actual = normalize_lora(node["inputs"].get("lora_name", ""))
     expected = normalize_lora(case["lora_name"])
