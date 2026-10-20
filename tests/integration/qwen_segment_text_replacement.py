@@ -108,18 +108,18 @@ def inspect_and_instrument(original):
     encoder = graph[enc_id]["inputs"]
     if encoder.get("prompt", "").strip() != PROMPT:
         raise AssertionError(f"Wrong exact segment instruction {encoder.get('prompt')!r}")
-    # Match LanPaint's official Qwen 2.1 example, not a locally invented
-    # approximation: JoinImageWithAlpha(image=crop, alpha=crop_mask),
-    # then feed that SAME RGBA output to Qwen, LanPaint encode, and decode.
-    join_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "JoinImageWithAlpha"
-         and v["inputs"].get("image") == [crop_id, 1]
-         and v["inputs"].get("alpha") == [crop_id, 2]],
-        "upstream Qwen masked RGBA reference JoinImageWithAlpha",
-    )
-    masked_reference = [join_id, 0]
+    # The official Qwen example joins the source image with the SOURCE's own
+    # transparency, and passes the INPAINT mask separately to LanPaint.
+    # Swarm's RGB crop preserves ordinary RGB image pixels without manufacturing
+    # alpha from the region targeted for replacement.
+    masked_reference = [crop_id, 1]
     if encoder.get("images.image_1") != masked_reference:
-        raise AssertionError("Qwen must see the ORIGINAL cropped pixels PLUS the mask's alpha, not bare RGB")
+        raise AssertionError("Native Qwen must receive the exact CropAndStitch image")
+    if any(v["class_type"] == "JoinImageWithAlpha" and
+           v["inputs"].get("image") == [crop_id, 1] and
+           v["inputs"].get("alpha") == [crop_id, 2]
+           for v in graph.values()):
+        raise AssertionError("Inpainting mask incorrectly reused as source transparency")
     if "images.image_2" in encoder:
         raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
 
@@ -189,7 +189,7 @@ def inspect_and_instrument(original):
     preview("after", [stitch_id, 0])
     return graph, {
         "detector": detector_id, "crop_adapter": crop_id,
-        "alpha_reference": join_id,
+        "source_reference": crop_id,
         "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
         "steps": steps, "native_denoise": denoise, "effective_steps": steps,
         "expected_iterations": 4, "creativity": denoise,
@@ -262,7 +262,7 @@ def main(argv=None):
     for expected_node in (
         "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
         "LanPaint_ImageEncode", "LanPaint_KSampler", "LanPaint_ImageDecode",
-        "JoinImageWithAlpha",
+
     ):
         registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
         if expected_node not in registered:
