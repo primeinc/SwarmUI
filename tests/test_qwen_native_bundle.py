@@ -119,15 +119,20 @@ class NativeQwenBundleTest(unittest.TestCase):
         self.assertIn('["stitcher"] = cropStitcher', steps)
         self.assertIn('["inpainted_image"] = stitchInput', steps)
 
-    def test_nonempty_mask_guard_uses_native_crop_hipass_cutoff(self):
+    def test_detector_guard_preserves_authored_threshold_and_caps_broad_support(self):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
         masks = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmMasks.py").read_text()
-        self.assertIn('["minimum_confidence"] = cropInputs["mask_hipass_filter"]', steps)
-        self.assertIn('("FLOAT", {"default": 0.5', masks)
+        self.assertIn('["minimum_confidence"] = 0.0', steps)
+        self.assertIn('["maximum_coverage"] = 0.99', steps)
+        self.assertIn('"maximum_coverage": ("FLOAT", {"default": 0.99', masks)
         self.assertIn('string solidSubjectMask = g.CreateNode("ThresholdMask"', steps)
         self.assertIn('["mask"] = NodePath(requiredMask, 0)', steps)
-        self.assertIn('["value"] = cropInputs["mask_hipass_filter"]', steps)
+        self.assertIn('["value"] = 0.0', steps)
         self.assertIn('cropInputs["mask"] = NodePath(solidSubjectMask, 0)', steps)
+        # A second 0.5 detector threshold silently discards author-selected
+        # pixels; whole-frame edit prevention belongs in coverage validation.
+        self.assertNotIn('["minimum_confidence"] = cropInputs["mask_hipass_filter"]', steps)
+        self.assertIn('coverage = kept.float().mean(dim=(-2, -1))', masks)
 
     def test_masked_sampler_required_native_inputs_are_supplied(self):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
