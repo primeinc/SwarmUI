@@ -118,6 +118,20 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo("Replace the subject in <image1>."));
     }
 
+    [TestCase("<alternate:red,blue>")]
+    [TestCase("<fromto[0.5]:before,after>")]
+    [TestCase("<random:red,blue>")]
+    [TestCase("<repeat[3]:girl>")]
+    [TestCase("<embed:portrait>")]
+    [TestCase("<break>")]
+    [TestCase("<weight[1.5]:Change <alternate:hat,glasses>>")]
+    public static void UnsupportedResidualSwarmTagsMustFailInsteadOfSilentlyChangingInstruction(string prompt)
+    {
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(
+            () => WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt));
+        Assert.That(error.Message, Does.Contain("cannot be flattened without changing"));
+    }
+
     [Test]
     public static void MissingSegmentTextMustFailWithoutInvention()
     {
