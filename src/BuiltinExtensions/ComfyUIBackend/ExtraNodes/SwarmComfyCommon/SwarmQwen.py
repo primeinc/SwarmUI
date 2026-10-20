@@ -1,5 +1,6 @@
 import torch
 import comfy.utils
+import comfy.model_management
 import node_helpers
 
 
@@ -20,7 +21,7 @@ class SwarmQwenImage21SegmentEncode:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "encode"
-    DESCRIPTION = "Qwen Image 2.1 segment conditioning: vision tokens + reference latent + correctly sized fresh latent."
+    DESCRIPTION = "Qwen Image 2.1 segment conditioning compatible with ComfyUI TextEncodeQwenImage21."
 
     def encode(self, clip, vae, image, prompt, negative_prompt):
         # Match Qwen 2.1's native edit contract without depending on the newer upstream
@@ -38,17 +39,30 @@ class SwarmQwenImage21SegmentEncode:
         if resized.shape[-1] > 3:
             rgb = rgb * resized[:, :, :, 3:] + (1.0 - resized[:, :, :, 3:])
 
-        images_vl = [rgb]
-        positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt or "", images=images_vl))
-        negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt or "", images=images_vl))
-
         reference = vae.encode(resized)
+        images_vl = [rgb]
+
+        # Mirror ComfyUI TextEncodeQwenImage21 at the tokenizer boundary.
+        # Qwen 2.1 drops the vision tokens from the text sequence when matching reference
+        # latents are present, then splices those latents into the DiT at image_slots.
+        positive = clip.encode_from_tokens_scheduled(
+            clip.tokenize(prompt or "", images=images_vl, keep_vision=False, prevent_empty_text=True)
+        )
+        negative = clip.encode_from_tokens_scheduled(
+            clip.tokenize(negative_prompt or "", images=images_vl, keep_vision=False, prevent_empty_text=True)
+        )
+
         positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [reference]}, append=True)
         negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [reference]}, append=True)
 
-        # Derive the fresh latent from the actual VAE result rather than hardcoding channel count.
-        # This keeps the node compatible with the Qwen 2.1 VAE contract present in the runtime.
-        latent = {"samples": reference * 0.0}
+        # Keep the native-compatible third output for workflow/debug parity. Segment Reference Edit
+        # intentionally does not sample from it; it uses a VAE encoding of the crop as its edit anchor.
+        latent = {
+            "samples": torch.zeros(
+                [1, 64, height // 16, width // 16],
+                device=comfy.model_management.intermediate_device(),
+            )
+        }
 
         print(
             f"[QWEN21-SEG] encoder crop={tuple(resized.shape)} "
