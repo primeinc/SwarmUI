@@ -106,13 +106,19 @@ rather than passing literal `<weight...>` strings to the old native Qwen
 is the branch's graph-level implementation of full Swarm segment-tag support;
 this graph construction is not proof of image-space LoRA effectiveness.
 SwarmClipSeg first applies the threshold authored in <segment:...>, then
-normalizes its nonzero detection scores. SwarmRequireNonEmptyMask now rejects
-only an entirely empty post-detector mask (minimum confidence=0). Native
-ThresholdMask(value=0) makes every detector-selected pixel fully opaque,
-rather than discarding pixels below an unrelated second 0.5 cutoff. The
-unchanged CropAndStitch high-pass filter stays 0.5, operating on this binary
-mask, while its own feathering handles the boundary. No original subject
-pixels are blended through a fractional interior confidence mask.
+normalizes its nonzero detection scores. SwarmRequireNonEmptyMask rejects an
+empty detection (minimum confidence=0) **and refuses a nearly whole-canvas
+mask (over 99% selected pixels)**. A weak detector background response can
+otherwise survive normalization; Native ThresholdMask(value=0) would make
+those pixels fully opaque and cause an unintended full-frame replacement.
+The guard fails with an explicit instruction to refine the detection text or
+authored threshold rather than silently substituting a second 0.5 threshold.
+The selected backend must advertise the guard's `maximum_coverage` FLOAT
+input via /object_info before the workflow is submitted. The unchanged
+CropAndStitch high-pass filter stays 0.5, operating on the accepted binary
+mask, while its own feathering handles the boundary. Interior original-subject
+pixels are not blended through a fractional confidence mask. This proves only
+a safety boundary, not that the detected mask belongs to the intended subject.
 
 The Reference Edit branch now constructs its zero-filled native-format latent
 from `VAEEncode(cropped source) -> LatentMultiply(multiplier=0)`.
