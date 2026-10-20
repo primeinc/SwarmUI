@@ -332,12 +332,27 @@ def validate_runtime_node_contracts(base_url, graph):
                 "required by the submitted graph")
         schemas[class_type] = registered[class_type]
     for node_id, node in graph.items():
-        required = set(schemas[node["class_type"]].get("input", {}).get("required", {}))
+        schema_inputs = schemas[node["class_type"]].get("input", {})
+        required = set(schema_inputs.get("required", {}))
         missing = sorted(required - set(node["inputs"]))
         if missing:
             raise AssertionError(
                 f"Native node {node_id} ({node['class_type']}) is missing required "
                 f"Comfy inputs: {missing}")
+        # A stale SwarmTextEncodeAdvanced declares the same class_type but not
+        # the newly added per-reference image_N sockets. Comfy's node schema
+        # must advertise every independently wired image before inference.
+        if node["class_type"] == "SwarmTextEncodeAdvanced":
+            known_sockets = required | set(schema_inputs.get("optional", {}))
+            missing_images = sorted(
+                name for name in node["inputs"]
+                if name.startswith("image_") and name[6:].isdigit()
+                and name not in known_sockets)
+            if missing_images:
+                raise AssertionError(
+                    f"Selected Comfy backend has obsolete SwarmTextEncodeAdvanced "
+                    f"node: missing image sockets {missing_images} in /object_info. "
+                    "Update SwarmText.py on this backend and refresh its schema.")
     return schemas
 
 
