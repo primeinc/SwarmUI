@@ -144,4 +144,21 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         Assert.That(error.Message, Does.Contain("LanPaint_KSampler"));
     }
 
+    [Test]
+    public static void RawQwenPreflightRejectsDynamicClassTypeBeforeUpload()
+    {
+        const string raw = """
+            {
+                "image": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "crop": {"class_type":"InpaintCropImproved","inputs":{"image":["image",0]}},
+                "future": {"class_type":"${unresolved_node_type}","inputs":{"seed":${seed}}}
+            }
+            """;
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                raw, new HashSet<string> { "InpaintCropImproved", "LoadImage" }));
+        Assert.That(error.Message, Does.Contain("class_type"));
+        Assert.That(error.Message, Does.Contain("before image upload"));
+    }
+
 }
