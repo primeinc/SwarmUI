@@ -243,11 +243,20 @@ namespace SwarmUI.Text2Image
                 if (prompt is not null && prompt.Contains("<object:"))
                 {
                     Image multiImg = await T2IMultiStepObjectBuilder.CreateFullImage(prompt, user_input, batchId, claim, output, setError, isWS, backendTimeoutMin);
+                    JObject objectsTrace = user_input.ExtraMeta.GetValueOrDefault(T2IMultiStepObjectBuilder.TraceMetadataKey) as JObject;
+                    if (objectsTrace is not null && multiImg is null)
+                    {
+                        objectsTrace["final"] = "object composition stopped early; the image is a single generation of the full prompt, traced under debug_trace";
+                    }
                     if (multiImg is not null)
                     {
                         user_input = user_input.Clone();
                         user_input.Set(T2IParamTypes.InitImage, multiImg);
                         double cleanup = user_input.Get(T2IParamTypes.RegionalObjectCleanupFactor, 0);
+                        if (objectsTrace is not null)
+                        {
+                            objectsTrace["final"] = cleanup == 0 ? "the composite is the final image" : $"the composite is the init image of a final generation at creativity {cleanup}, traced under debug_trace";
+                        }
                         if (cleanup == 0)
                         {
                             handleFileOutput(new() { File = multiImg, IsReal = true, GenTimeMS = -1, RefuseImage = null });
