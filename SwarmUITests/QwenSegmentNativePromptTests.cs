@@ -135,6 +135,29 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         Assert.That(error.Message, Does.Contain("cannot be flattened without changing"));
     }
 
+    [TestCase("<weight[abc]:Remove the hat>")]
+    [TestCase("<weight[1..2]:Remove the hat>")]
+    [TestCase("<weight[NaN]:Remove the hat>")]
+    [TestCase("<weight[Infinity]:Remove the hat>")]
+    [TestCase("<weight:Remove the hat>")]
+    [TestCase("<weight[1.2]>")]
+    [TestCase("<weight[]:Remove the hat>")]
+    [TestCase("<weight[1.2]Remove the hat>")]
+    public static void MalformedResidualWeightTagsMustNeverBeFlattened(string prompt)
+    {
+        Assert.Throws<SwarmUserErrorException>(
+            () => WorkflowGenerator.FlattenQwen21SegmentPrompt(prompt));
+        Assert.Throws<SwarmUserErrorException>(
+            () => NativeEncoderFor("Replace the subject.", prompt));
+    }
+
+    [Test]
+    public static void LiteralNonTagWordsThatBeginWithWeightArePreserved()
+    {
+        const string prompt = "A <weighted> graph of the replacement";
+        Assert.That(NativeEncoderFor(prompt)["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
+    }
+
     [Test]
     public static void QwenNegativeTextReceivesExactlyTheSameSwarmOnlyProcessing()
     {
