@@ -103,12 +103,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 {
                     continue;
                 }
-                if (backendObjectInfo?["SwarmTextEncodeAdvanced"]?["input"]?["optional"]?[input.Name] is null)
+                // A registered socket name is insufficient: Comfy also
+                // requires its image or boolean TYPE to match the graph input.
+                JToken advertised = backendObjectInfo?["SwarmTextEncodeAdvanced"]?["input"]?["optional"]?[input.Name];
+                string requiredType = isImageSlot ? "IMAGE" : "BOOLEAN";
+                string actualType = advertised is JArray socket && socket.Count > 0
+                    ? socket[0]?.ToString() : null;
+                if (actualType != requiredType)
                 {
                     throw new SwarmUserErrorException(
-                        $"The selected ComfyUI backend has an outdated SwarmTextEncodeAdvanced node: " +
-                        $"its /object_info does not register '{input.Name}' required for Qwen 2.1 segmented editing. " +
-                        "Update SwarmComfyCommon/SwarmText.py on THIS backend and refresh /object_info. " +
+                        $"The selected ComfyUI backend has an incompatible SwarmTextEncodeAdvanced node: " +
+                        $"its /object_info must register '{input.Name}' as {requiredType}, but reports " +
+                        $"'{actualType ?? "missing"}'. Update SwarmComfyCommon/SwarmText.py on THIS backend " +
+                        "and refresh /object_info before Qwen 2.1 segmented editing. " +
                         "Do not batch differently sized Qwen references as a workaround: ImageBatch resizes them.");
                 }
             }
