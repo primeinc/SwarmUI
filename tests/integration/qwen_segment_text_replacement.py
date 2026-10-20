@@ -149,27 +149,48 @@ def inspect_and_instrument(original):
     if not crop.get("output_resize_to_target_size"):
         raise AssertionError("Crop adapter must generate the target-resolution Qwen reference")
 
+    # Swarm's production Qwen 2.1 segment path now uses the standard
+    # SwarmTextEncodeAdvanced parser for weight/schedule/LoRA tags and Comfy's
+    # ReferenceLatent for VAE references. Requiring TextEncodeQwenImage21
+    # here would reject the production graph while blessing an obsolete fixture.
+    if any(v["class_type"] == "TextEncodeQwenImage21" for v in graph.values()):
+        raise AssertionError("Unexpected old Qwen encoder: Swarm segment tags must use the native Swarm parser")
     enc_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "TextEncodeQwenImage21"],
-        "native TextEncodeQwenImage21",
+        [k for k, v in graph.items() if v["class_type"] == "SwarmTextEncodeAdvanced"
+         and v["inputs"].get("prompt", "").strip() == PROMPT],
+        "authored positive SwarmTextEncodeAdvanced instruction",
+    )
+    neg_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "SwarmTextEncodeAdvanced"
+         and v["inputs"].get("prompt") == ""],
+        "native SwarmTextEncodeAdvanced negative conditioning",
     )
     encoder = graph[enc_id]["inputs"]
-    if encoder.get("prompt", "").strip() != PROMPT:
-        raise AssertionError(f"Wrong exact segment instruction {encoder.get('prompt')!r}")
-    # The official Qwen example joins the source image with the SOURCE's own
-    # transparency, and passes the INPAINT mask separately to LanPaint.
-    # Swarm's RGB crop preserves ordinary RGB image pixels without manufacturing
-    # alpha from the region targeted for replacement.
     masked_reference = [crop_id, 1]
-    if encoder.get("images.image_1") != masked_reference:
-        raise AssertionError("Native Qwen must receive the exact CropAndStitch image")
+    if encoder.get("images") != masked_reference or graph[neg_id]["inputs"].get("images") != masked_reference:
+        raise AssertionError("Both Swarm vision encoders must see the exact CropAndStitch source crop")
     if any(v["class_type"] == "JoinImageWithAlpha" and
-           v["inputs"].get("image") == [crop_id, 1] and
+           v["inputs"].get("image") == masked_reference and
            v["inputs"].get("alpha") == [crop_id, 2]
            for v in graph.values()):
         raise AssertionError("Inpainting mask incorrectly reused as source transparency")
-    if "images.image_2" in encoder:
-        raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
+    vae_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "VAEEncode"
+         and v["inputs"].get("pixels") == masked_reference],
+        "original crop VAE reference latent",
+    )
+    positive_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ReferenceLatent"
+         and v["inputs"].get("conditioning") == [enc_id, 0]
+         and v["inputs"].get("latent") == [vae_ref, 0]],
+        "source reference attached to positive conditioning",
+    )
+    negative_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ReferenceLatent"
+         and v["inputs"].get("conditioning") == [neg_id, 0]
+         and v["inputs"].get("latent") == [vae_ref, 0]],
+        "source reference attached to negative conditioning",
+    )
 
     # Segment default is actual native Qwen masked inpainting. The upstream
     # adapter's cropped IMAGE and MASK must both reach LanPaint_ImageEncode,
@@ -187,6 +208,8 @@ def inspect_and_instrument(original):
         "upstream LanPaint_KSampler on the MASKED latent",
     )
     sampler = graph[sampler_id]["inputs"]
+    if sampler.get("positive") != [positive_ref, 0] or sampler.get("negative") != [negative_ref, 0]:
+        raise AssertionError("Source-attached positive and negative conditioning must reach the actual segment sampler")
     steps = int(sampler.get("steps", -1))
     denoise = float(sampler.get("denoise", -1))
     cfg = float(sampler.get("cfg", -1))
@@ -202,10 +225,10 @@ def inspect_and_instrument(original):
         raise AssertionError("LanPaint's required information input is missing")
     if sampler.get("Inpainting_mode") != "🖼️ Image Inpainting":
         raise AssertionError("LanPaint's required native inpainting mode is missing")
-    if any(v["class_type"] == "KSampler" and
-           v["inputs"].get("latent_image") == [enc_id, 2]
+    if any(v["class_type"] == "LatentMultiply" and
+           v["inputs"].get("samples") == [vae_ref, 0]
            for v in graph.values()):
-        raise AssertionError("Unmasked empty-latent sampler remains reachable in masked segment edit")
+        raise AssertionError("Unmasked Reference Edit latent must not be generated for masked segment sampling")
 
     stitch_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "InpaintStitchImproved"],
