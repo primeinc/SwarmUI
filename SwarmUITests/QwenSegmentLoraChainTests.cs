@@ -71,6 +71,50 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void ModelOnlyLoRALoaderOutputOneCannotCountAsModelChain()
+    {
+        WorkflowGenerator g = Prepare();
+        // LoraLoaderModelOnly has only MODEL port 0. A name/weight-only
+        // verifier used to accept this invalid output port.
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 1), 11, false)).Message,
+            Does.Contain("MODEL must use output 0"));
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void ComfyLoRALoaderClipOutputCannotCountAsModelChain()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"])["class_type"] = "LoraLoader";
+        // Comfy's LoraLoader RETURN_TYPES are (MODEL, CLIP). Only port 0
+        // can feed the sampler's MODEL input, even with a matching LoRA name.
+        ((JObject)g.Workflow["patched"]["inputs"])["clip"] = new JArray("clip", 0);
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 1), 11, false)).Message,
+            Does.Contain("MODEL must use output 0"));
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void IndirectClipOutputCannotPassThroughModelWrapper()
+    {
+        WorkflowGenerator g = Prepare();
+        g.Workflow["sampling"] = new JObject
+        {
+            ["class_type"] = "ModelSamplingDiscrete",
+            ["inputs"] = new JObject { ["model"] = new JArray("patched", 1) }
+        };
+        Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("sampling", 0), 11, false));
+    }
+
+    [Test]
     public static void IncorrectPatchStrengthMustFailBeforeGpu()
     {
         WorkflowGenerator g = Prepare(selectedStrength: 0.7);
