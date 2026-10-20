@@ -8,7 +8,8 @@ permissions:
 
 jobs:
   seed-upstream-tags:
-    if: github.repository == 'primeinc/SwarmUI' && github.event.head_commit.message == 'maintenance: seed upstream release tags'
+    if: >-
+      github.repository == 'primeinc/SwarmUI' && github.event.head_commit.message == 'maintenance: seed upstream release tags'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
