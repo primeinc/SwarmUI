@@ -50,6 +50,93 @@ public class WorkflowGeneratorSteps
      * 50,000+: Intermediate Image Saves (Stable-Dynamic)
      */
 
+    /// <summary>
+    /// Fail early if a statically selected LoRA was lost between the model loader
+    /// and the actual Qwen segment sampler. Read-only graph validation: the LoRA
+    /// loader itself remains the standard ComfyUI node. This only verifies graph
+    /// wiring and nonzero patch strength, NOT an image-space LoRA effect.
+    /// </summary>
+    public static void VerifyQwenSegmentLoraChain(WorkflowGenerator g, JArray modelPath, int sectionId, bool isRefiner)
+    {
+        List<string> selected = g.UserInput.Get(T2IParamTypes.Loras, []);
+        if (selected.Count == 0)
+        {
+            return;
+        }
+        List<string> weights = g.UserInput.Get(T2IParamTypes.LoraWeights, []);
+        List<string> confinements = g.UserInput.Get(T2IParamTypes.LoraSectionConfinement, []);
+        static string normalized(string name)
+        {
+            string result = (name ?? "").Replace('\\', '/');
+            if (result.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+            {
+                result = result[..^".safetensors".Length];
+            }
+            return result.Trim().ToLowerInvariant();
+        }
+        static bool sameName(string first, string second)
+        {
+            string a = normalized(first), b = normalized(second);
+            return a == b || a.EndsWith("/" + b, StringComparison.Ordinal)
+                || b.EndsWith("/" + a, StringComparison.Ordinal);
+        }
+
+        // Traverse the real sampler MODEL connection upstream, not the input
+        // form's displayed LoRA list. Wrapper nodes preserve their MODEL input.
+        List<(string Name, double Weight)> actual = [];
+        HashSet<string> visited = [];
+        JArray current = modelPath;
+        while (current is not null && visited.Add(current[0]?.ToString() ?? ""))
+        {
+            JObject node = g.Workflow[current[0]?.ToString() ?? ""] as JObject;
+            if (node is null)
+            {
+                break;
+            }
+            string type = node["class_type"]?.ToString();
+            JObject inputs = node["inputs"] as JObject;
+            if (type is "LoraLoader" or "LoraLoaderModelOnly" or "NunchakuFluxLoraLoader")
+            {
+                string name = inputs?["lora_name"]?.ToString() ?? "";
+                JToken strength = inputs?[type == "NunchakuFluxLoraLoader" ? "lora_strength" : "strength_model"];
+                actual.Add((name, strength?.Value<double>() ?? 0));
+            }
+            current = inputs?["model"] as JArray;
+        }
+
+        List<(string Name, double Weight, int Confinement)> expected = [];
+        for (int i = 0; i < selected.Count; i++)
+        {
+            if (g.UserInput.DynamicLoraIndices.Contains(i))
+            {
+                continue; // Native Qwen's scheduled-hook use is rejected elsewhere.
+            }
+            int confinement = i < confinements.Count && int.TryParse(confinements[i], out int parsed) ? parsed : -1;
+            if (confinement is not (-1 or 0) && confinement != sectionId
+                && confinement != (isRefiner ? T2IParamInput.SectionID_Refiner : T2IParamInput.SectionID_BaseOnly))
+            {
+                continue;
+            }
+            double weight = i < weights.Count ? double.Parse(weights[i]) : 1;
+            if (weight != 0)
+            {
+                expected.Add((selected[i], weight, confinement));
+            }
+        }
+        string chain = string.Join(", ", actual.Select(x => $"{x.Name}@{x.Weight:0.###}"));
+        string requested = string.Join(", ", expected.Select(x => $"{x.Name}@{x.Weight:0.###} (section {x.Confinement})"));
+        Logs.Info($"[QWEN21-SEG] sampler-LoRA-chain section={sectionId} refiner={isRefiner} model_node={modelPath[0]} actual=[{chain}] expected=[{requested}]");
+        foreach ((string name, double weight, int _) in expected)
+        {
+            if (!actual.Any(x => sameName(x.Name, name) && Math.Abs(x.Weight - weight) < 0.00001))
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment {sectionId}: selected LoRA '{name}' at strength {weight:0.###} is NOT on the actual sampler model chain. " +
+                    $"Observed chain LoRAs: [{chain}]. Aborting before GPU inference rather than silently ignoring the LoRA.");
+            }
+        }
+    }
+
     public static void Register()
     {
         #region Model Loader
@@ -2199,6 +2286,10 @@ public class WorkflowGeneratorSteps
                     {
                         prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
                         negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
+                    }
+                    if (nativeQwenSegment)
+                    {
+                        VerifyQwenSegmentLoraChain(g, model.Path, part.ContextID, segmentSourceIsRefiner);
                     }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     // ComfyUI's Qwen Image 2.1 image-edit template publishes CFG=1.
