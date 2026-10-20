@@ -2011,7 +2011,7 @@ public class WorkflowGeneratorSteps
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     bool nativeQwenSegment = g.IsQwenImage21();
-                    JArray cropStitcher = null, qwenCrop = null, qwenCropMask = null, qwenMaskedReference = null;
+                    JArray cropStitcher = null, qwenCrop = null, qwenCropMask = null;
                     if (nativeQwenSegment)
                     {
                         // The upstream, separately GPL-licensed, unmodified
@@ -2070,18 +2070,10 @@ public class WorkflowGeneratorSteps
                         cropStitcher = NodePath(cropNode, 0);
                         qwenCrop = NodePath(cropNode, 1);
                         qwenCropMask = NodePath(cropNode, 2);
-                        // The author's Qwen 2.1 masked-inpaint workflow feeds the
-                        // SAME RGBA image into Qwen conditioning, LanPaint encode,
-                        // and LanPaint decode. JoinImageWithAlpha sets alpha=1-mask
-                        // so Qwen's native vision/VAE pathways know which part to
-                        // regenerate. An ordinary RGB crop loses this information.
-                        // Node is upstream ComfyUI, not a Swarm reimplementation.
-                        string maskedReferenceNode = g.CreateNode("JoinImageWithAlpha", new JObject()
-                        {
-                            ["image"] = qwenCrop,
-                            ["alpha"] = qwenCropMask
-                        });
-                        qwenMaskedReference = NodePath(maskedReferenceNode, 0);
+                        // Preserve the source crop's own alpha, if any.
+                        // The inpainting mask must remain separate. LanPaint's
+                        // official Qwen example combines LoadImage's source
+                        // alpha, not the separate LoadImageMask inpaint mask.
                     }
                     else
                     {
@@ -2147,7 +2139,7 @@ public class WorkflowGeneratorSteps
                     if (nativeQwenSegment)
                     {
                         (prompt, negPrompt, segmentLatent) = g.CreateQwen21SegmentConditioning(
-                            part.Prompt, neg, clip, vae, qwenMaskedReference, qwenCropMask, part.ContextID);
+                            part.Prompt, neg, clip, vae, qwenCrop, qwenCropMask, part.ContextID);
                     }
                     else
                     {
@@ -2175,7 +2167,7 @@ public class WorkflowGeneratorSteps
                     if (nativeQwenSegment)
                     {
                         Logs.Info($"[QWEN21-SEG] graph section={part.ContextID} region='{part.DataText}' prompt='{part.Prompt?.Trim()}' " +
-                            $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 masked_reference={qwenMaskedReference[0]}:0 " +
+                            $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 " +
                             $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
                             $"steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
@@ -2186,8 +2178,7 @@ public class WorkflowGeneratorSteps
                             ["mask"] = NodePath(detectedMaskNode, 0)
                         });
                         TraceQwenImage("01_raw_detector_mask", NodePath(rawMaskImage, 0));
-                        TraceQwenImage("02_unmasked_crop", qwenCrop);
-                        TraceQwenImage("02b_actual_qwen_masked_reference", qwenMaskedReference);
+                        TraceQwenImage("02_exact_qwen_reference_crop", qwenCrop);
                         string adapterMaskImage = g.CreateNode("MaskToImage", new JObject()
                         {
                             ["mask"] = qwenCropMask
@@ -2231,7 +2222,7 @@ public class WorkflowGeneratorSteps
                         {
                             ["samples"] = NodePath(sampler, 0),
                             ["vae"] = vae.Path,
-                            ["image"] = qwenMaskedReference,
+                            ["image"] = qwenCrop,
                             ["mask"] = qwenCropMask,
                             ["blend_overlap"] = 9
                         });
