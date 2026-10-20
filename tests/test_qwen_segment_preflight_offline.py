@@ -151,6 +151,33 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
             probe.require_single_final_image(
                 {}, spec["final_output_sink"], probe.NODE_IDS["final_input"])
 
+    def test_stale_swarm_text_backend_missing_independent_image_sockets_fails(self):
+        graph, _ = probe.inspect_and_instrument(native_contract_fixture())
+        condition = graph["condition"]
+        condition["inputs"]["image_1"] = ["crop", 1]
+        condition["inputs"]["image_2"] = ["source", 0]
+        condition["inputs"]["images"] = None
+        classes = {node["class_type"] for node in graph.values()}
+        declared = {"images": ["IMAGE"], "image_1": ["IMAGE"]}
+        def schema_fetch(_base, route):
+            name = route.removeprefix("object_info/")
+            if name not in classes:
+                return {}
+            optional = declared if name == "SwarmTextEncodeAdvanced" else {}
+            return {name: {"input": {"required": {}, "optional": optional}}}
+        with patch.object(probe, "fetch_json", side_effect=schema_fetch):
+            with self.assertRaisesRegex(AssertionError, "image_2"):
+                probe.validate_runtime_node_contracts("http://example.invalid", graph)
+            declared["image_2"] = ["IMAGE"]
+            self.assertTrue(
+                probe.validate_runtime_node_contracts("http://example.invalid", graph))
+        # The original single-reference IMAGE input remains available.
+        condition["inputs"].pop("image_1")
+        condition["inputs"].pop("image_2")
+        condition["inputs"]["images"] = ["crop", 1]
+        with patch.object(probe, "fetch_json", side_effect=schema_fetch):
+            self.assertTrue(probe.validate_runtime_node_contracts("http://example.invalid", graph))
+
     def test_runtime_preflight_rejects_missing_splitter_and_diagnostic_nodes(self):
         graph, _ = probe.inspect_and_instrument(native_contract_fixture())
         available = {node["class_type"] for node in graph.values()}
