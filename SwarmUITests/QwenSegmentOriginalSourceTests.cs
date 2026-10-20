@@ -116,7 +116,9 @@ public class QwenSegmentOriginalSourceTests
         };
         T2IModel model = new(null, "/models/diffusion_models", "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
         {
-            ModelClass = modelClass, StandardWidth = 1024, StandardHeight = 1024
+            ModelClass = modelClass,
+            StandardWidth = 1024,
+            StandardHeight = 1024
         };
         T2IModel vae = new(null, "/models/vae", "/models/vae/vae.safetensors", "vae.safetensors");
         T2IModel clip = new(null, "/models/text_encoders", "/models/text_encoders/clip.safetensors", "clip.safetensors");
@@ -167,8 +169,11 @@ public class QwenSegmentOriginalSourceTests
             input.Set(T2IParamTypes.LoraSectionConfinement,
                 new System.Collections.Generic.List<string> { section.ToString() });
         }
-        WorkflowGenerator generator = new() { UserInput = input,
-            Features = useBase64Images ? new() { "comfy_loadimage_b64" } : new() };
+        WorkflowGenerator generator = new()
+        {
+            UserInput = input,
+            Features = useBase64Images ? new() { "comfy_loadimage_b64" } : new()
+        };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
         var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
