@@ -81,12 +81,28 @@ public partial class WorkflowGenerator
             attachImages: visionImage, steps: steps);
         if (references.Count > 0)
         {
-            // Attach precisely the same VAE reference latents as normal Qwen
-            // sampling. Qwen consumes them on BOTH positive and negative paths.
+            // ImageBatch rescales additional image slots to the crop geometry.
+            // The VAE must see those exact same pixels/shape as Qwen's vision
+            // encoder; otherwise image_slots and reference_latents disagree.
+            List<JArray> alignedReferences = references;
+            if (references.Count > 1)
+            {
+                alignedReferences = [];
+                for (int i = 0; i < references.Count; i++)
+                {
+                    string slice = CreateNode("ImageFromBatch", new JObject()
+                    {
+                        ["image"] = visionImage,
+                        ["batch_index"] = i,
+                        ["length"] = 1
+                    });
+                    alignedReferences.Add(NodePath(slice, 0));
+                }
+            }
             (positive, negative) = WithSegmentSamplingVae(vae, () =>
             {
                 (JArray p, JArray n, _, _) = BuildInputImageHandling(
-                    references, positive, negative, NodePath(crop.MaskedLatent, 0));
+                    alignedReferences, positive, negative, NodePath(crop.MaskedLatent, 0));
                 return (p, n);
             });
         }
