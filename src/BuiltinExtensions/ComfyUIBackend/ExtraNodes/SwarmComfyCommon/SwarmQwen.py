@@ -17,6 +17,10 @@ class SwarmQwenImage21SegmentEncode:
             },
             "optional": {
                 "use_original_reference": ("BOOLEAN", {"default": True}),
+                "reference_tile_size": ("INT", {"default": 0, "min": 0, "max": 4096}),
+                "reference_tile_overlap": ("INT", {"default": 64, "min": 0, "max": 4096}),
+                "reference_temporal_tile_size": ("INT", {"default": 32, "min": 8, "max": 4096}),
+                "reference_temporal_tile_overlap": ("INT", {"default": 4, "min": 4, "max": 4096}),
                 **{f"image_{i}": ("IMAGE",) for i in range(1, 17)},
             },
         }
@@ -27,7 +31,12 @@ class SwarmQwenImage21SegmentEncode:
     FUNCTION = "encode"
     DESCRIPTION = "Qwen Image 2.1 segment conditioning compatible with ComfyUI TextEncodeQwenImage21."
 
-    def encode(self, clip, vae, image, prompt, negative_prompt, use_original_reference=True, **reference_images):
+    def encode(
+        self, clip, vae, image, prompt, negative_prompt,
+        use_original_reference=True, reference_tile_size=0, reference_tile_overlap=64,
+        reference_temporal_tile_size=32, reference_temporal_tile_overlap=4,
+        **reference_images,
+    ):
         # TextEncodeQwenImage21 supports one image per native vision slot. The C# workflow
         # isolates batch items before this node, preventing one source image from
         # silently providing references for the rest of a batch.
@@ -62,7 +71,14 @@ class SwarmQwenImage21SegmentEncode:
             if ref_image.shape[-1] > 3:
                 rgb = rgb * ref_image[:, :, :, 3:] + (1.0 - ref_image[:, :, :, 3:])
             images_vl.append(rgb)
-            ref_latents.append(vae.encode(ref_image))
+            if reference_tile_size > 0:
+                ref_latents.append(vae.encode_tiled(
+                    ref_image, tile_x=reference_tile_size, tile_y=reference_tile_size,
+                    overlap=reference_tile_overlap, tile_t=reference_temporal_tile_size,
+                    overlap_t=reference_temporal_tile_overlap,
+                ))
+            else:
+                ref_latents.append(vae.encode(ref_image))
 
         keep_vision = not ref_latents
         positive = clip.encode_from_tokens_scheduled(
