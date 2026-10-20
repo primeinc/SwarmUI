@@ -726,11 +726,31 @@ public partial class WorkflowGenerator
             ["upscale_method"] = "lanczos",
             ["crop"] = "disabled"
         });
-        // CLIPSeg confidence masks are continuous. Hard-thresholding at 0.001
-        // turns barely detected background into an opaque rectangular paste.
-        // Preserve those fractional confidences for native Qwen segment edits.
-        if (!preserveSoftMask && !UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false))
+        bool useRawMask = UserInput.Get(T2IParamTypes.MaskCompositeUnthresholded, false);
+        if (preserveSoftMask && !useRawMask)
         {
+            // A raw CLIPSeg confidence mask must not act as a transparency mask over
+            // the entire replacement subject. At fractional confidence the compositor
+            // mixes the old person with the new one, producing double-exposure ghosts.
+            // Make the detected subject opaque, then feather ONLY its boundary.
+            // Do not restore the legacy 0.001 threshold: it turns tiny background
+            // confidence into a full-opacity rectangular image paste.
+            string subjectMask = CreateNode("ThresholdMask", new JObject()
+            {
+                ["mask"] = croppedMask,
+                ["value"] = 0.5
+            });
+            string featheredEdge = CreateNode("SwarmMaskBlur", new JObject()
+            {
+                ["mask"] = NodePath(subjectMask, 0),
+                ["blur_radius"] = 2,
+                ["sigma"] = 1.0
+            });
+            croppedMask = NodePath(featheredEdge, 0);
+        }
+        else if (!preserveSoftMask && !useRawMask)
+        {
+            // Preserve existing non-Qwen segment behavior.
             string thresholded = CreateNode("ThresholdMask", new JObject()
             {
                 ["mask"] = croppedMask,
