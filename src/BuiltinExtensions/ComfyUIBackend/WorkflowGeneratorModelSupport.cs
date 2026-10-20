@@ -1680,10 +1680,16 @@ public partial class WorkflowGenerator
             }
         }
         UserInput.TargetResolutionPrecision = model?.ModelClass?.CompatClass?.ResolutionPrecision ?? 16;
+        JArray postLoraModel = null;
         foreach (WorkflowGenStep step in ModelGenSteps.Where(s => s.Priority > -100))
         {
+            if (postLoraModel is null && step.Priority > -10)
+            {
+                postLoraModel = LoadingModel is null ? null : (JArray)LoadingModel.DeepClone();
+            }
             step.Action(this);
         }
+        postLoraModel ??= LoadingModel is null ? null : (JArray)LoadingModel.DeepClone();
         if (LoadingClip is null && type != "SeedVR2")
         {
             if (string.IsNullOrWhiteSpace(model.Metadata?.ModelClassType))
@@ -1693,6 +1699,10 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException($"Model loader for {model.Name} didn't work - are you sure it has an architecture ID set properly? (Currently set to: '{model.Metadata?.ModelClassType}')");
         }
         NodeHelpers[helper] = $"{LoadingModel[0]}:{LoadingModel[1]}" + (LoadingClip is null ? "::" : $":{LoadingClip[0]}:{LoadingClip[1]}") + (LoadingVAE is null ? "::" : $":{LoadingVAE[0]}:{LoadingVAE[1]}");
+        if (postLoraModel is not null)
+        {
+            LoadedModelLoraAnchors[$"{LoadingModel[0]}:{LoadingModel[1]}"] = postLoraModel;
+        }
         WGNodeData modelNodeData = new(LoadingModel, this, WGNodeData.DT_MODEL, CurrentCompat());
         WGNodeData tencNodeData = LoadingClip is null ? null : new WGNodeData(LoadingClip, this, WGNodeData.DT_TEXTENC, CurrentCompat());
         WGNodeData vaeNodeData = LoadingVAE is null ? null : new WGNodeData(LoadingVAE, this, WGNodeData.DT_VAE, CurrentCompat());
