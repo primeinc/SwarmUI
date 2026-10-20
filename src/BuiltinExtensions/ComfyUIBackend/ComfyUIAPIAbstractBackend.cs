@@ -1015,7 +1015,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// substitutes their values; the same inert-null preprocessing is used by
     /// TryIsValid when deciding whether a custom workflow fits a backend.
     /// </summary>
-    public static void PreflightRawQwenSegmentNodes(string rawWorkflow, IReadOnlySet<string> availableNodeTypes)
+    public static void PreflightRawQwenSegmentNodes(string rawWorkflow, IReadOnlySet<string> availableNodeTypes, JObject backendObjectInfo = null)
     {
         // Use an unmistakable JSON-number sentinel for raw macros, including
         // ones EMBEDDED inside a quoted class_type (eg "Inpaint${kind}").
@@ -1040,6 +1040,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 "Dynamic class_type placeholders cannot be safely preflighted.");
         }
         ValidateNativeQwenSegmentNodes(inventory, availableNodeTypes);
+        // A legacy backend may register SwarmTextEncodeAdvanced by class name
+        // yet lack Qwen's independent image_N sockets. Raw graphs must reject
+        // this BEFORE initImageFixer uploads image files, just like generated.
+        ValidateQwen21IndependentVisionSockets(inventory, backendObjectInfo);
     }
 
     public volatile int ImageIDDedup = 0;
@@ -1142,9 +1146,11 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 // replacing placeholders with inert JSON nulls for parsing.
                 // The expanded graph is validated again after generation.
                 string rawGraph = GetRawWorkflowFrom(user_input);
-                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes);
+                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes, RawObjectInfo);
                 workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
-                ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+                JObject expandedRawGraph = JObject.Parse(workflow);
+                ValidateNativeQwenSegmentNodes(expandedRawGraph, NodeTypes);
+                ValidateQwen21IndependentVisionSockets(expandedRawGraph, RawObjectInfo);
             }
             else
             {
