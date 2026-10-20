@@ -1,0 +1,12 @@
+{
+  "repo": "optimum-intel-internal-testing/tiny-random-qwen-image-2.1",
+  "revision": "main",
+  "fetched": "2026-10-20",
+  "files": [
+    {
+      "path": "transformer/diffusion_pytorch_model.safetensors",
+      "size": 189416,
+      "sha256": "8c571d7b4489f1c3f78afc53f50f8f28e248d2ba0e63b29650413795739bf133"
+    }
+  ]
+}

@@ -142,6 +142,7 @@ public static class NullModels
             "attn.to_q.weight" or "attn.to_k.weight" or "attn.to_v.weight" or "attn.to_out.0.weight" => [d.Inner, d.Inner],
             "attn.norm_q.weight" or "attn.norm_k.weight" => [d.HeadDim],
             "img_mlp.gate_up.weight" => [2 * mlp, d.Inner],
+            "img_mlp.proj.weight" or "img_mlp.gate_layer.weight" => [mlp, d.Inner],
             "img_mlp.out.weight" => [d.Inner, mlp],
             _ => throw new ArgumentException($"No Qwen Image 2.1 DiT shape rule for '{key}'")
         };
@@ -190,10 +191,17 @@ public static class NullModels
         return Write(path, header["__metadata__"] as JObject, [.. Tensors(header).Select(t => t with { Shape = Qwen21LoraShape(t.Key, t.Shape, d, maxRank) })]);
     }
 
-    /// <summary>Returns the real size of a model file listed in a family's manifest.</summary>
-    public static long RealSize(string family, string repoPath)
+    /// <summary>Writes a zero-weight Qwen Image 2.1 DiT with the unfused MLP layout (img_mlp.proj and gate_layer) of the diffusers tiny-random checkpoint's keys, at the given dimensions.</summary>
+    public static long WriteQwen21UnfusedDiT(string path, Qwen21Dims d)
     {
-        JObject manifest = File.ReadAllText(Path.Combine(FixtureDir(family), "manifest.json")).ParseToJson();
+        JObject header = ReadHeader("qwen-image-2.1", "tiny-random-qwen-image-2.1.transformer");
+        return Write(path, header["__metadata__"] as JObject, [.. Tensors(header).Select(t => t with { Dtype = "BF16", Shape = Qwen21Shape(t.Key, d) })]);
+    }
+
+    /// <summary>Returns the real size of a model file listed in a family's manifest.</summary>
+    public static long RealSize(string family, string repoPath, string manifestName = "manifest")
+    {
+        JObject manifest = File.ReadAllText(Path.Combine(FixtureDir(family), $"{manifestName}.json")).ParseToJson();
         return ((JArray)manifest["files"]).Single(f => $"{f["path"]}" == repoPath)["size"].Value<long>();
     }
 }

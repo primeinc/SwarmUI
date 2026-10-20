@@ -60,6 +60,18 @@ public class NullModelTests : SwarmUITest
         Assert.That(mismatches, Is.Empty, string.Join("\n", mismatches));
     }
 
+    /// <summary>The DiT shape rules also reproduce an independent Qwen Image 2.1 checkpoint: the diffusers tiny-random transformer (unfused MLP, 2 blocks, F32), at its own dimensions (inner 32, head 16, text 16).</summary>
+    [Test]
+    public void TestQwen21DiTShapeRulesReproduceTinyRandomHeader()
+    {
+        byte[] headerBytes = ReadHeaderBytes(Family, "tiny-random-qwen-image-2.1.transformer");
+        List<Tensor> tensors = Tensors(ReadHeader(Family, "tiny-random-qwen-image-2.1.transformer"));
+        Assert.That(8 + headerBytes.Length + tensors.Sum(t => t.Bytes), Is.EqualTo(RealSize(Family, "transformer/diffusion_pytorch_model.safetensors", "tiny-random-manifest")));
+        Qwen21Dims tiny = new(32, 16, 16, 3, 64, 64);
+        List<string> mismatches = Mismatches(tensors, t => Qwen21Shape(t.Key, tiny));
+        Assert.That(mismatches, Is.Empty, string.Join("\n", mismatches));
+    }
+
     /// <summary>The committed LoRA header is the released turbo LoRA's header, and the LoRA shape rules, at the released dimensions and uncapped rank, reproduce every one of its tensor shapes.</summary>
     [Test]
     public void TestQwen21LoraShapeRulesReproduceRealHeader()
@@ -90,6 +102,8 @@ public class NullModelTests : SwarmUITest
         try
         {
             long ditSize = WriteQwen21DiT($"{root}/diffusion_models/qwen_image_2.1_bf16.safetensors", Qwen21Dims.Micro);
+            WriteQwen21UnfusedDiT($"{root}/diffusion_models/qwen_image_2.1_unfused.safetensors", Qwen21Dims.Micro);
+            Assert.That(SwarmClassOf("Stable-Diffusion", $"{root}/diffusion_models", "qwen_image_2.1_unfused.safetensors"), Is.EqualTo("qwen-image-2.1"), "the unfused-MLP layout is Qwen Image 2.1 too");
             long loraSize = WriteQwen21Lora($"{root}/loras/qwen_image_2.1_turbo_lora.safetensors", Qwen21Dims.Micro, 4);
             WriteVerbatim($"{root}/vae/qwen_image_2.1_vae_bf16.safetensors", ReadHeaderBytes(Family, "qwen_image_2.1_vae_bf16"), RealSize(Family, "vae/qwen_image_2.1_vae_bf16.safetensors"));
             TestContext.Out.WriteLine($"micro DiT {ditSize} bytes, micro LoRA {loraSize} bytes");
