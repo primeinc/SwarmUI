@@ -565,17 +565,21 @@ class SwarmTextEncodeAdvanced:
             all_hooks = base_hooks.clone_and_combine(lora_hooks) if base_hooks is not None else lora_hooks
             clip.patcher.register_all_hook_patches(all_hooks, comfy.hooks.create_target_dict(comfy.hooks.EnumWeightTarget.Clip))
 
-        def tokenize(text: str):
-            nonlocal images
+        def tokenize(text: str, include_image_references=True):
+            # Qwen reference latents are attached once to the conditioning.
+            # After <break>, do not re-tokenize the same vision images into
+            # subsequent text chunks: their image_slots metadata is not
+            # duplicated and a second vision prefix would shift the text.
+            current_images = images if include_image_references else None
             extra = {}
             if minimax_refs is not None:
                 extra["minimax_ref_items"] = minimax_refs["ref_items"]
             if clip_vision_output is not None:
                 return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra, **tokenize_kwargs)
-            elif images is not None:
+            elif current_images is not None:
                 if append_images:
                     image_prompt = ""
-                    for i, image in enumerate(images):
+                    for i, image in enumerate(current_images):
                         if f"input_image_{i + 1}" in text:
                             text = text.replace(f"input_image_{i + 1}", f"<|vision_start|><|image_pad|><|vision_end|>", 1)
                         else:
@@ -584,17 +588,19 @@ class SwarmTextEncodeAdvanced:
                         text = image_prompt + text
                     else:
                         text = text + image_prompt
-                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=images, **extra, **tokenize_kwargs)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=current_images, **extra, **tokenize_kwargs)
             else:
                 return clip.tokenize(text, **extra, **tokenize_kwargs)
 
         use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)", **tokenize_kwargs))
 
-        def encode_leaves(leaves):
+        def encode_leaves(leaves, include_image_references=True):
             w = uniform_weight(leaves)
             want_weight = any(leaf.weight != 1.0 for leaf in leaves)
             per_leaf = True
-            tokens, weights_applied = combine_leaves(clip, leaves, tokenize, per_leaf=per_leaf)
+            tokens, weights_applied = combine_leaves(
+                clip, leaves, lambda text: tokenize(text, include_image_references),
+                per_leaf=per_leaf)
             if not use_attn_token_weights and not weights_applied and w is not None and w != 1.0:
                 tokens = stamp_token_weight(tokens, w)
                 weights_applied = True
@@ -648,7 +654,11 @@ class SwarmTextEncodeAdvanced:
                 cond_arr = encode_leaves(chunks[0])
                 if len(chunks) > 1:
                     for chunk in chunks[1:]:
-                        cond_arr_chunk = encode_leaves(chunk)
+                        # Qwen Image 2.1 splices reference latents only at the
+                        # first vision-image slots. Swarm <break> extends the
+                        # text; it must not add phantom repeated image slots.
+                        include_images = not (qwen21_prevent_empty_text and images is not None)
+                        cond_arr_chunk = encode_leaves(chunk, include_image_references=include_images)
                         catted_cond = torch.cat([cond_arr[0][0], cond_arr_chunk[0][0]], dim=1)
                         cond_arr[0] = [catted_cond, cond_arr[0][1]]
                 encoding_cache[key] = cond_arr
