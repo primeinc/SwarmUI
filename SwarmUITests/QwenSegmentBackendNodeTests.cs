@@ -149,6 +149,77 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
 
 
     [Test]
+    public static void LegacyRemoteMaskGuardWithoutCoverageSocketMustFailBeforeUpload()
+    {
+        JObject graph = new()
+        {
+            ["crop"] = Node("InpaintCropImproved"),
+            ["guard"] = Node("SwarmRequireNonEmptyMask")
+        };
+        graph["guard"]["inputs"]["minimum_confidence"] = 0.0;
+        graph["guard"]["inputs"]["maximum_coverage"] = 0.99;
+
+        JObject backend = new()
+        {
+            ["SwarmRequireNonEmptyMask"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["required"] = new JObject
+                    {
+                        ["mask"] = new JArray("MASK"),
+                        ["minimum_confidence"] = new JArray("FLOAT")
+                    }
+                }
+            }
+        };
+        SwarmUserErrorException missing = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+        Assert.That(missing.Message, Does.Contain("maximum_coverage"));
+        Assert.That(missing.Message, Does.Contain("THIS backend"));
+
+        JObject required = (JObject)backend["SwarmRequireNonEmptyMask"]["input"]["required"];
+        required["maximum_coverage"] = new JArray("IMAGE");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend))
+            .Message, Does.Contain("FLOAT"),
+            "A name-matching IMAGE socket cannot validate a coverage fraction");
+
+        required["maximum_coverage"] = new JArray("FLOAT");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+
+        const string raw = """
+            {
+                "crop": {"class_type":"InpaintCropImproved","inputs":{}},
+                "guard": {"class_type":"SwarmRequireNonEmptyMask",
+                    "inputs":{"minimum_confidence":0.0,"maximum_coverage":0.99}}
+            }
+            """;
+        HashSet<string> types = ["InpaintCropImproved", "SwarmRequireNonEmptyMask"];
+        required.Remove("maximum_coverage");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, types, backend))
+            .Message, Does.Contain("maximum_coverage"),
+            "Raw external Qwen workflows must reject stale backends before any uploads");
+        required["maximum_coverage"] = new JArray("FLOAT");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, types, backend));
+    }
+
+    [Test]
+    public static void QwenCoverageGuardDoesNotAffectPlainTextToImage()
+    {
+        JObject graph = new()
+        {
+            ["base"] = Node("SwarmEmptyQwenImage21Latent"),
+            ["vision"] = Node("SwarmTextEncodeAdvanced")
+        };
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, new JObject()));
+    }
+
+    [Test]
     public static void RawQwenPreflightRejectsStaleIndependentVisionSocketsBeforeUpload()
     {
         const string raw = """
