@@ -51,8 +51,12 @@ explicit advanced option for users who specifically want unmasked crop edits.
 A bare regional LoRA trigger is first flattened from Swarm markup into plain
 text, then presented to the native Qwen encoder as a targeted image-edit
 instruction rather than a stand-alone noun phrase. Explicit edit instructions
-are passed through without rewording. Empty CLIPSeg detection fails before
-upstream CropAndStitch can fall back to the entire image.
+are passed through without rewording. CLIPSeg detections at or below the native crop's 0.5 hipass cutoff fail
+before upstream CropAndStitch can fall back to the entire image. Accepted
+fractional confidence values are converted to a solid subject mask using
+ComfyUI's native ThresholdMask before the unchanged crop adapter. Its own
+feathering still handles the mask boundary; the subject interior no longer
+blends old and replacement identities.
 
 The Qwen native edit encoder returns a **zero-filled** output-2 latent, not
 the original image encoded as an img2img latent. Therefore Reference Edit

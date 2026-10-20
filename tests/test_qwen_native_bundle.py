@@ -124,6 +124,10 @@ class NativeQwenBundleTest(unittest.TestCase):
         masks = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmMasks.py").read_text()
         self.assertIn('["minimum_confidence"] = cropInputs["mask_hipass_filter"]', steps)
         self.assertIn('("FLOAT", {"default": 0.5', masks)
+        self.assertIn('string solidSubjectMask = g.CreateNode("ThresholdMask"', steps)
+        self.assertIn('["mask"] = NodePath(requiredMask, 0)', steps)
+        self.assertIn('["value"] = cropInputs["mask_hipass_filter"]', steps)
+        self.assertIn('cropInputs["mask"] = NodePath(solidSubjectMask, 0)', steps)
 
     def test_masked_sampler_required_native_inputs_are_supplied(self):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()

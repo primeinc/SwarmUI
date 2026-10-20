@@ -52,9 +52,15 @@ class MaskGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "native crop cutoff"):
             self.node.validate(weak_mask, minimum_confidence=0.5)
 
-    def test_detection_at_native_cutoff_survives(self):
+    def test_exact_cutoff_is_rejected_because_native_threshold_discards_it(self):
         mask = torch.zeros((1, 64, 80), dtype=torch.float32)
         mask[0, 20, 30] = 0.5
+        with self.assertRaises(ValueError):
+            self.node.validate(mask, minimum_confidence=0.5)
+
+    def test_above_cutoff_survives(self):
+        mask = torch.zeros((1, 64, 80), dtype=torch.float32)
+        mask[0, 20, 30] = 0.5001
         self.assertIs(self.node.validate(mask, minimum_confidence=0.5)[0], mask)
 
     def test_batch_with_only_weak_second_detection_fails(self):

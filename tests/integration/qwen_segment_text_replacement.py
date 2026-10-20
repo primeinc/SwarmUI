@@ -130,8 +130,14 @@ def inspect_and_instrument(original):
          and v["inputs"].get("mask") == [detector_id, 0]],
         "nonempty-detector-mask guard",
     )
-    if crop.get("mask") != [guard_id, 0]:
-        raise AssertionError("Crop adapter must consume the checked original detector mask")
+    solid_mask_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ThresholdMask"
+         and v["inputs"].get("mask") == [guard_id, 0]
+         and abs(float(v["inputs"].get("value", -1)) - 0.5) < 1e-6],
+        "native binary subject-mask threshold at crop cutoff",
+    )
+    if crop.get("mask") != [solid_mask_id, 0]:
+        raise AssertionError("Crop adapter must consume the validated BINARY subject mask, not fractional detector confidence")
     if abs(float(crop.get("mask_hipass_filter", -1)) - 0.5) > 1e-6:
         raise AssertionError("Crop adapter must exclude low-confidence detector background")
     if not crop.get("output_resize_to_target_size"):
@@ -243,7 +249,8 @@ def inspect_and_instrument(original):
     preview("mask_used", [NODE_IDS["mask_used_image"], 0])
     preview("after", [stitch_id, 0])
     return graph, {
-        "detector": detector_id, "validated_mask": guard_id, "crop_adapter": crop_id,
+        "detector": detector_id, "validated_mask": guard_id,
+        "solid_subject_mask": solid_mask_id, "crop_adapter": crop_id,
         "source_reference": crop_id,
         "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
         "mode": "Masked Img2Img", "sampler_class": "LanPaint_KSampler",
@@ -318,7 +325,7 @@ def main(argv=None):
     # A checked-in plugin does not prove Comfy loaded or registered it.
     for expected_node in (
         "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
-        "SwarmClipSeg", "SwarmRequireNonEmptyMask", "LanPaint_ImageEncode",
+        "SwarmClipSeg", "SwarmRequireNonEmptyMask", "ThresholdMask", "LanPaint_ImageEncode",
         "LanPaint_KSampler", "LanPaint_ImageDecode",
     ):
         registered = fetch_json(args.comfy_url, "object_info/" + expected_node)

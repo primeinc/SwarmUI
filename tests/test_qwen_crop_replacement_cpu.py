@@ -46,6 +46,18 @@ class CropReplacementTests(unittest.TestCase):
         # Grow exceeds the blend radius, so the entire original subject
         # should receive mostly replacement pixels.
         self.assertGreater(old_region.min().item(), 0.65)
+        # A real CLIPSeg detector produces fractional confidence values.
+        # The native stitcher algebra blends old and new pixels if that
+        # fractional confidence is fed directly into its mask input.
+        # Contrast the native adapter with the unthresholded 0.6 mask to
+        # establish that thresholding is necessary, not cosmetic.
+        soft_mask = mask * 0.6
+        soft_stitcher, soft_image, _ = crop.inpaint_crop(
+            **{**args, "mask": soft_mask})[:3]
+        soft_result = stitch.inpaint_stitch(
+            soft_stitcher, torch.ones_like(soft_image) * 0.8)[0]
+        self.assertLess(soft_result[0, 45, 45, 0].item(), 0.55)
+        self.assertGreater(result[0, 45, 45, 0].item(), 0.7)
         # Preserve untouched context, not a newly generated full frame.
         self.assertTrue(torch.allclose(result[0, :8, :8], source[0, :8, :8], atol=0.0001))
 

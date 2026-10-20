@@ -154,7 +154,7 @@ class SwarmRequireNonEmptyMask:
         # after this guard, silently triggering upstream full-frame fallback.
         # Guard every frame separately so other images do not hide failures.
         frames = mask.unsqueeze(0) if mask.ndim == 2 else mask.reshape(-1, *mask.shape[-2:])
-        kept = torch.isfinite(frames) & (frames >= minimum_confidence)
+        kept = torch.isfinite(frames) & (frames > minimum_confidence)
         has_subject = torch.any(kept, dim=(-2, -1))
         if has_subject.numel() == 0 or not torch.all(has_subject).item():
             raise ValueError("Qwen segment: no subject detected above native crop cutoff in one or more masks; refusing full-frame fallback")

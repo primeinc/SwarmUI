@@ -2267,7 +2267,18 @@ public class WorkflowGeneratorSteps
                             ["mask"] = NodePath(detectedMaskNode, 0),
                             ["minimum_confidence"] = cropInputs["mask_hipass_filter"]
                         });
-                        cropInputs["mask"] = NodePath(requiredMask, 0);
+                        // Native ThresholdMask converts accepted CLIPSeg confidence
+                        // into an opaque subject mask. Without this, the
+                        // upstream stitcher's mask*new + (1-mask)*old blends
+                        // the original person THROUGH a 0.6-confidence mask,
+                        // producing the observed double-exposure ghosting.
+                        // Native CropAndStitch owns the final edge feather.
+                        string solidSubjectMask = g.CreateNode("ThresholdMask", new JObject()
+                        {
+                            ["mask"] = NodePath(requiredMask, 0),
+                            ["value"] = cropInputs["mask_hipass_filter"]
+                        });
+                        cropInputs["mask"] = NodePath(solidSubjectMask, 0);
                         string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
                         cropStitcher = NodePath(cropNode, 0);
                         qwenCrop = NodePath(cropNode, 1);
