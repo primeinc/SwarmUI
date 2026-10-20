@@ -1931,7 +1931,14 @@ public class WorkflowGeneratorSteps
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
-                    g.EnableDifferential();
+                    bool nativeQwenSegment = g.IsQwenImage21();
+                    string qwenSegmentMode = nativeQwenSegment ? g.UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: part.ContextID) : null;
+                    // Qwen 2.1 Reference Edit regenerates from a fresh latent and does not use a denoise mask.
+                    // DifferentialDiffusion only has meaning for the masked partial-denoise mode.
+                    if (!nativeQwenSegment || qwenSegmentMode != "Reference Edit")
+                    {
+                        g.EnableDifferential();
+                    }
                     // Always start each segment from its own selected model and unmodified text encoder.
                     // EnableDifferential may replace CurrentModel; the sampler must use that replacement.
                     model = g.CurrentModel;
@@ -1945,7 +1952,6 @@ public class WorkflowGeneratorSteps
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
-                    bool nativeQwenSegment = g.IsQwenImage21();
                     JArray prompt, negPrompt;
                     JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
                     if (nativeQwenSegment)
@@ -1960,12 +1966,37 @@ public class WorkflowGeneratorSteps
                     }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
+                    if (nativeQwenSegment)
+                    {
+                        (string modelNodeType, JObject modelInputs) = model.SourceNodeData;
+                        string loraName = modelInputs?["lora_name"]?.ToString() ?? "(none)";
+                        string loraStrength = modelInputs?["strength_model"]?.ToString() ?? "(n/a)";
+                        string logPrompt = (part.Prompt ?? "").Replace('\r', ' ').Replace('\n', ' ');
+                        if (logPrompt.Length > 160)
+                        {
+                            logPrompt = logPrompt[..160];
+                        }
+                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_node={modelNodeType ?? "(unknown)"} lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
+                    }
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
                     // When Segment Model differs from the base model, that must be the segment VAE.
                     string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
+                    if (nativeQwenSegment)
+                    {
+                        string diagnostic = g.CreateNode("SwarmQwen21SegmentDiagnostics", new JObject()
+                        {
+                            ["source"] = NodePath(g.MaskShrunkInfo.ScaledImage, 0),
+                            ["generated"] = g.CurrentMedia.Path,
+                            ["mask"] = NodePath(g.MaskShrunkInfo.CroppedMask, 0),
+                            ["section_id"] = Math.Max(0, part.ContextID),
+                            ["prompt"] = part.Prompt ?? "",
+                            ["mode"] = qwenSegmentMode ?? ""
+                        });
+                        g.CurrentMedia = g.CurrentMedia.WithPath([diagnostic, 0]);
+                    }
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
                     JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: g.IsQwenImage21());
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
