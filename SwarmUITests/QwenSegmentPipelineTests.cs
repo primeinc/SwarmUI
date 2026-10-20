@@ -1,17 +1,14 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
-using SwarmUI.Media;
 using SwarmUI.Text2Image;
-using SwarmUI.Utils;
 
 namespace SwarmUITests;
 
-/// <summary>Exercises the registered segment step, not an isolated replacement helper. GPU model execution is not simulated.</summary>
+/// <summary>Exercises the registered segment step, including backend-compat behavior. GPU model execution is not simulated.</summary>
 [NonParallelizable]
 public class QwenSegmentPipelineTests : SwarmUITest
 {
@@ -71,7 +68,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         input.Set(T2IParamTypes.Model, model);
         input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
         input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
-        Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001), "Fixture must use the actual target,creativity,threshold tag order");
+        Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001));
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
         input.Set(T2IParamTypes.Steps, 20);
@@ -80,7 +77,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         input.Set(T2IParamTypes.Loras, secondSegment ? new List<string> { "face", "hair" } : new List<string> { "face" });
         input.Set(T2IParamTypes.LoraWeights, secondSegment ? new List<string> { "0.8", "0.6" } : new List<string> { "0.8" });
         input.Set(T2IParamTypes.LoraSectionConfinement, secondSegment ? new List<string> { "11", "12" } : new List<string> { "11" });
-        WorkflowGenerator g = new() { UserInput = input, Workflow = new(), FinalLoadedModel = model, ModelFolderFormat = "/", Features = ["variation_seed", "qwen21_native_conditioning"] };
+        WorkflowGenerator g = new() { UserInput = input, Workflow = new(), FinalLoadedModel = model, ModelFolderFormat = "/", Features = ["variation_seed"] };
         g.CreateNode("UNETLoader", new JObject() { ["unet_name"] = "model.safetensors" }, "base-model");
         g.CreateNode("CLIPLoader", new JObject() { ["clip_name"] = "text.safetensors" }, "base-clip");
         g.CreateNode("VAELoader", new JObject() { ["vae_name"] = "vae.safetensors" }, "base-vae");
@@ -100,30 +97,39 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
     private static JProperty[] Nodes(WorkflowGenerator g, string type) => g.Workflow.Properties().Where(p => p.Value["class_type"]?.ToString() == type).ToArray();
 
+    private static JProperty EncoderForPrompt(WorkflowGenerator g, string prompt) =>
+        Nodes(g, "SwarmTextEncodeAdvanced").Single(p => p.Value["inputs"]?["prompt"]?.ToString() == prompt);
+
     [TestCase(false)]
     [TestCase(true)]
-    public void NativeSegmentUsesCropPairedConditioningAndFreshLatent(bool beforeRefiner)
+    public void QwenSegmentUsesBundledCropConditioningAndScopedLora(bool beforeRefiner)
     {
         WorkflowGenerator g = Prepare();
         RunSegment(g, beforeRefiner);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(1), "QWEN_NATIVE_SEGMENT_MISSING");
-        JProperty encoder = Nodes(g, "TextEncodeQwenImage21").Single();
+
+        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Is.Empty, "Segment path must not depend on a newer upstream Comfy node.");
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.EqualTo(2));
+        JProperty positiveEncoder = EncoderForPrompt(g, "make the face blue");
+        JProperty negativeEncoder = EncoderForPrompt(g, "segment negative");
+        JArray crop = new(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0);
+        Assert.That(positiveEncoder.Value["inputs"]!["images"], Is.EqualTo(crop));
+        Assert.That(negativeEncoder.Value["inputs"]!["images"], Is.EqualTo(crop));
+
+        JProperty[] refs = Nodes(g, "ReferenceLatent");
+        Assert.That(refs, Has.Length.EqualTo(2));
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
-        JObject inputs = (JObject)encoder.Value["inputs"];
-        Assert.That(inputs["images.image_1"], Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
-        Assert.That(inputs["resolution"]!.Value<int>(), Is.Zero);
-        Assert.That(inputs["prompt"]!.Value<string>()!.Trim(), Is.EqualTo("make the face blue"));
-        Assert.That(inputs["negative_prompt"]!.Value<string>()!.Trim(), Is.EqualTo("segment negative"));
-        Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
-        Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
-        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(encoder.Name, 2)));
+        string posRef = sampler.Value["inputs"]!["positive"]![0]!.Value<string>()!;
+        string negRef = sampler.Value["inputs"]!["negative"]![0]!.Value<string>()!;
+        Assert.That(g.Workflow[posRef]!["class_type"]!.Value<string>(), Is.EqualTo("ReferenceLatent"));
+        Assert.That(g.Workflow[negRef]!["class_type"]!.Value<string>(), Is.EqualTo("ReferenceLatent"));
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
-        Assert.That(Nodes(g, "ReferenceLatent"), Is.Empty, "Native references must not be appended again by CreateKSampler");
-        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Is.Empty);
+
         JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
         Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)));
         Assert.That(lora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(lora.Value["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
+
         JProperty composite = Nodes(g, "SwarmImageCompositeMaskedColorCorrecting").Single();
         Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(composite.Name, 0)));
         Assert.That(composite.Value["inputs"]!["destination"], Is.EqualTo(new JArray("base-image", 0)));
@@ -131,34 +137,36 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
-    public void NativeSegmentCarriesTextWithoutAnyLora()
+    public void QwenSegmentDoesNotRequireNativeComfyEncoderFeature()
+    {
+        WorkflowGenerator g = Prepare();
+        Assert.That(g.Features, Does.Not.Contain("qwen21_native_conditioning"));
+        RunSegment(g);
+        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Is.Empty);
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.EqualTo(2));
+    }
+
+    [Test]
+    public void SegmentCarriesTextWithoutAnyLora()
     {
         WorkflowGenerator g = Prepare();
         g.UserInput.Remove(T2IParamTypes.Loras);
         RunSegment(g);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(1), "QWEN_NATIVE_SEGMENT_MISSING");
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21")[0].Value["inputs"]!["prompt"]!.Value<string>()!.Trim(), Is.EqualTo("make the face blue"));
+        Assert.That(EncoderForPrompt(g, "make the face blue"), Is.Not.Null);
+        Assert.That(EncoderForPrompt(g, "segment negative"), Is.Not.Null);
     }
 
     [Test]
-    public void ExplicitSameModelOverrideUsesSegmentVaeAndScopedLora()
+    public void ExplicitSameModelOverrideStillUsesScopedLora()
     {
         WorkflowGenerator g = Prepare();
         g.UserInput.Set(T2IParamTypes.SegmentModel, g.FinalLoadedModel);
         g.NodeHelpers["modelloader_model.safetensors_Refiner"] = "base-model:0:base-clip:0:base-vae:0";
         RunSegment(g);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(1), "QWEN_NATIVE_SEGMENT_MISSING");
-        Assert.That(Nodes(g, "TextEncodeQwenImage21")[0].Value["inputs"]!["vae"], Is.EqualTo(g.CurrentVae.Path));
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "ReferenceLatent"), Has.Length.EqualTo(2));
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Has.Length.EqualTo(1));
-    }
-
-    [Test]
-    public void MissingNativeBackendNodeFailsExplicitly()
-    {
-        WorkflowGenerator g = Prepare();
-        g.Features.Remove("qwen21_native_conditioning");
-        Assert.Throws<SwarmUserErrorException>(() => RunSegment(g));
     }
 
     [Test]
@@ -176,11 +184,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         WorkflowGenerator g = Prepare(creativity: 0.6);
         g.UserInput.InternalSet.ValuesInput[T2IParamTypes.CleanTypeName("Segment Qwen 2.1 Sampling")] = "Masked Img2Img";
         RunSegment(g);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(1), "QWEN_NATIVE_SEGMENT_MISSING");
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.EqualTo(8));
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
-        Assert.That(Nodes(g, "ReferenceLatent"), Is.Empty);
+        Assert.That(Nodes(g, "ReferenceLatent"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Is.Empty);
     }
 
     [Test]
@@ -188,14 +196,15 @@ public class QwenSegmentPipelineTests : SwarmUITest
     {
         WorkflowGenerator g = Prepare(secondSegment: true);
         RunSegment(g);
-        Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(2), "QWEN_NATIVE_SEGMENT_MISSING");
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.EqualTo(4));
         JProperty[] samplers = Nodes(g, "SwarmKSampler");
         JToken firstModel = g.Workflow[samplers[0].Value["inputs"]!["model"]![0]!.Value<string>()!]!;
         JToken secondModel = g.Workflow[samplers[1].Value["inputs"]!["model"]![0]!.Value<string>()!]!;
         Assert.That(firstModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
-        Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]), "Second segment must not inherit the first segment adapter");
-        Assert.That(Nodes(g, "ReferenceLatent"), Is.Empty);
+        Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
+        Assert.That(EncoderForPrompt(g, "make the face blue"), Is.Not.Null);
+        Assert.That(EncoderForPrompt(g, "make the hair red"), Is.Not.Null);
     }
 
     [Test]
