@@ -2324,23 +2324,26 @@ public class WorkflowGeneratorSteps
                             cropInputs["optional_context_mask"] = NodePath(context, 0);
                         }
                         // The upstream crop adapter falls back to a full-frame
-                        // crop on empty detection. Reject that dangerous fallback
-                        // while preserving the native crop-and-stitch adapter.
+                        // crop on empty detection. Reject an empty detector mask
+                        // after the author's threshold; the binary mask below
+                        // retains 0.5 for the crop adapter's own hipass.
                         string requiredMask = g.CreateNode("SwarmRequireNonEmptyMask", new JObject()
                         {
                             ["mask"] = NodePath(detectedMaskNode, 0),
-                            ["minimum_confidence"] = cropInputs["mask_hipass_filter"]
+                            ["minimum_confidence"] = 0.0
                         });
                         // Native ThresholdMask converts accepted CLIPSeg confidence
                         // into an opaque subject mask. Without this, the
                         // upstream stitcher's mask*new + (1-mask)*old blends
-                        // the original person THROUGH a 0.6-confidence mask,
-                        // producing the observed double-exposure ghosting.
+                        // the original person THROUGH a 0.6-confidence mask.
+                        // CLIPSeg already applied the author's segment threshold.
+                        // Binarize all remaining positive pixels rather than
+                        // discarding those below an unrelated second 0.5 cutoff.
                         // Native CropAndStitch owns the final edge feather.
                         string solidSubjectMask = g.CreateNode("ThresholdMask", new JObject()
                         {
                             ["mask"] = NodePath(requiredMask, 0),
-                            ["value"] = cropInputs["mask_hipass_filter"]
+                            ["value"] = 0.0
                         });
                         cropInputs["mask"] = NodePath(solidSubjectMask, 0);
                         string cropNode = g.CreateNode("InpaintCropImproved", cropInputs);
