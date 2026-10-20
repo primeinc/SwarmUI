@@ -75,98 +75,84 @@ def require_single(nodes, what):
 def inspect_and_instrument(original):
     graph = copy.deepcopy(original)
     if not capture.graph_or_none(graph):
-        raise AssertionError("Not an actual Comfy API graph")
+        raise AssertionError("Not an actual SwarmUI-exported Comfy API workflow")
+
     detector_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "SwarmClipSeg"],
-        "SwarmClipSeg detector",
+        "real SwarmClipSeg detector",
     )
-    detection = graph[detector_id]["inputs"]
-    if detection.get("match_text", "").strip().casefold() != "girl":
-        raise AssertionError(f"Expected CLIPSeg match_text='girl', got {detection.get('match_text')!r}")
-    if abs(float(detection.get("threshold", -1)) - 0.1) > 1e-4:
-        raise AssertionError(f"Expected exact reported detection threshold 0.1, got {detection.get('threshold')!r}")
+    detected = graph[detector_id]["inputs"]
+    if detected.get("match_text", "").strip().casefold() != "girl":
+        raise AssertionError(f"Wrong segment target {detected.get('match_text')!r}")
+    if abs(float(detected.get("threshold", -1)) - 0.1) > 1e-4:
+        raise AssertionError(f"Wrong CLIPSeg detection threshold: {detected.get('threshold')!r}")
 
     if any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
-        raise AssertionError("OBSOLETE HANDROLLED QWEN ENCODER: Swarm must use native TextEncodeQwenImage21")
+        raise AssertionError("Obsolete homemade Qwen encoder remains in actual graph")
+    crop_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "InpaintCropImproved"],
+        "upstream InpaintCropImproved",
+    )
+    crop = graph[crop_id]["inputs"]
+    if crop.get("mask") != [detector_id, 0]:
+        raise AssertionError("Crop adapter isn't consuming the real detector mask")
+    if abs(float(crop.get("mask_hipass_filter", -1)) - 0.5) > 1e-6:
+        raise AssertionError("Crop adapter must exclude low-confidence detector background")
+    if not crop.get("output_resize_to_target_size"):
+        raise AssertionError("Crop adapter must generate the target-resolution Qwen reference")
+
     enc_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "TextEncodeQwenImage21"],
-        "native ComfyUI TextEncodeQwenImage21",
+        "native TextEncodeQwenImage21",
     )
     encoder = graph[enc_id]["inputs"]
     if encoder.get("prompt", "").strip() != PROMPT:
-        raise AssertionError(f"Expected exact segment instruction {PROMPT!r}, got {encoder.get('prompt')!r}")
+        raise AssertionError(f"Wrong exact segment instruction {encoder.get('prompt')!r}")
+    if encoder.get("images.image_1") != [crop_id, 1]:
+        raise AssertionError("Qwen native encoder must consume the SAME cropped image as the stitcher")
     if "images.image_2" in encoder:
-        raise AssertionError(
-            "DUPLICATE EDIT SOURCE: the one-image InitEdit has an extra reference. "
-            "Refusing costly GPU generation on a known-bad graph."
-        )
-    crop_id = capture.link(encoder.get("images.image_1"), graph)
-    if crop_id is None or graph[crop_id]["class_type"] != "ImageScaleToTotalPixels":
-        raise AssertionError("Native Qwen vision input must come from upstream ImageScaleToTotalPixels of the detected crop")
-    raw_crop_ref = graph[crop_id]["inputs"].get("image")
-    raw_crop_id = capture.link(raw_crop_ref, graph)
-    if raw_crop_id is None or graph[raw_crop_id]["class_type"] != "ImageCrop":
-        raise AssertionError("Segment crop preview must use native ImageCrop from the actual source image")
-    native_crop = graph[raw_crop_id]["inputs"]
-    bounds_id = capture.link(native_crop.get("x"), graph)
-    if bounds_id is None or graph[bounds_id]["class_type"] != "SwarmMaskBounds":
-        raise AssertionError("Crop must use actual segment mask bounds, not full image coordinates")
-    if graph[bounds_id]["inputs"].get("reject_empty") is not True:
-        raise AssertionError("Qwen region crop must fail fast on empty detection instead of editing the full frame")
-    # Bounds must not come from the blurred/grown compositor mask. Otherwise
-    # background confidence gets spread across the frame and the preview zooms out.
-    hard_mask = capture.link(graph[bounds_id]["inputs"].get("mask"), graph)
-    if hard_mask is None or graph[hard_mask]["class_type"] != "ThresholdMask":
-        raise AssertionError("Crop bounds must use native ThresholdMask on raw CLIPSeg detection")
-    if capture.link(graph[hard_mask]["inputs"].get("mask"), graph) != detector_id:
-        raise AssertionError("Crop bounds derive from blurred/grown mask instead of raw detector")
-    if abs(float(graph[hard_mask]["inputs"].get("value", 0)) - 0.5) > 1e-6:
-        raise AssertionError("Crop bounds threshold must reject low-confidence background")
+        raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
 
     sampler_id = require_single(
-        [k for k, v in graph.items()
-         if v["class_type"] == "KSampler" and
-         v["inputs"].get("latent_image") == [enc_id, 2]],
-        "native KSampler consuming Qwen's own empty edit latent",
+        [k for k, v in graph.items() if v["class_type"] == "KSampler"
+         and v["inputs"].get("latent_image") == [enc_id, 2]],
+        "native KSampler on upstream Qwen edit latent",
     )
     sampler = graph[sampler_id]["inputs"]
-    steps = int(sampler.get("steps", 0))
-    denoise = float(sampler.get("denoise", 0))
-    if steps != 4:
-        raise AssertionError(f"Four-step Turbo edit was given {steps} actual sampler steps")
-    if abs(denoise - 0.8) > 1e-4:
-        raise AssertionError(f"Expected native ComfyUI denoise 0.8, got {denoise}")
-    if "start_at_step" in sampler:
-        raise AssertionError("Native KSampler must own denoise scheduling, not Swarm's start_at_step")
+    steps = int(sampler.get("steps", -1))
+    denoise = float(sampler.get("denoise", -1))
+    if steps != 4 or abs(denoise - 0.8) > 1e-4 or "start_at_step" in sampler:
+        raise AssertionError(f"Native four-pass schedule broken: steps={steps}, denoise={denoise}")
 
-    compositor_id = require_single(
-        [key for key, node in graph.items()
-         if node["class_type"] == "ImageCompositeMasked"
-         and sampler_id in capture.upstream(
-             graph, capture.roots(node["inputs"].get("source"), graph))],
-        "native ImageCompositeMasked of the sampled Qwen crop",
+    stitch_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "InpaintStitchImproved"],
+        "upstream InpaintStitchImproved",
     )
-    compositor = graph[compositor_id]["inputs"]
-    if "destination" not in compositor or "source" not in compositor or "mask" not in compositor:
-        raise AssertionError("Incomplete native compositor inputs")
-    if graph[capture.link(compositor["source"], graph)]["class_type"] != "ImageScale":
-        raise AssertionError("Composite source must be the actual sampled crop scaled back to its detected bounds")
+    stitch = graph[stitch_id]["inputs"]
+    if stitch.get("stitcher") != [crop_id, 0]:
+        raise AssertionError("Stitcher must be the EXACT metadata returned by the upstream crop adapter")
+    stitch_input = stitch.get("inpainted_image")
+    stitch_input_id = capture.link(stitch_input, graph)
+    if stitch_input_id is None or graph[stitch_input_id]["class_type"] != "SplitImageWithAlpha":
+        raise AssertionError("Stitch must receive the decoded sampled crop without unexpected alpha")
+    if sampler_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
+        raise AssertionError("Stitch image must actually originate from the segment KSampler")
 
     for node_id in NODE_IDS.values():
         if node_id in graph:
-            raise AssertionError(f"Probe node id collides with real workflow: {node_id}")
+            raise AssertionError(f"Probe ID collision: {node_id}")
 
     def preview(kind, image_ref):
-        graph[NODE_IDS[kind]] = {
-            "class_type": "PreviewImage",
-            "inputs": {"images": image_ref},
-        }
+        graph[NODE_IDS[kind]] = {"class_type": "PreviewImage",
+                                 "inputs": {"images": image_ref}}
 
-    # Compare the same pre/post crop geometry: original bounds crop versus
-    # generated crop resized back to those same bounds for compositing.
-    preview("before", compositor["destination"])
-    preview("crop_before", raw_crop_ref)
-    preview("crop_after", compositor["source"])
+    # Images captured from the ACTUAL path, not a shadow simulation:
+    #  * crop output 1 is the source seen by native Qwen
+    #  * stitch metadata output 0 controls the exact final placement
+    #  * stitch output 0 is the actual final frame
+    preview("before", crop["image"])
+    preview("crop_before", [crop_id, 1])
+    preview("crop_after", stitch_input)
     graph[NODE_IDS["mask_image"]] = {
         "class_type": "MaskToImage",
         "inputs": {"mask": [detector_id, 0]},
@@ -174,16 +160,18 @@ def inspect_and_instrument(original):
     preview("mask", [NODE_IDS["mask_image"], 0])
     graph[NODE_IDS["mask_used_image"]] = {
         "class_type": "MaskToImage",
-        "inputs": {"mask": compositor["mask"]},
+        "inputs": {"mask": [crop_id, 2]},
     }
     preview("mask_used", [NODE_IDS["mask_used_image"], 0])
-    preview("after", [compositor_id, 0])
-    return graph, {"detector": detector_id, "encoder": enc_id,
-                   "sampler": sampler_id, "compositor": compositor_id,
-                   "steps": steps, "native_denoise": denoise,
-                   "effective_steps": steps,
-                   "expected_iterations": 4,
-                   "creativity": denoise, "clipseg_threshold": 0.1}
+    preview("after", [stitch_id, 0])
+    return graph, {
+        "detector": detector_id, "crop_adapter": crop_id,
+        "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
+        "steps": steps, "native_denoise": denoise, "effective_steps": steps,
+        "expected_iterations": 4, "creativity": denoise,
+        "clipseg_threshold": 0.1,
+        "mask_used_definition": "adapter output 2 (cropped mask), not inaccessible private stitcher blend",
+    }
 
 def read_result(base, prompt_id, timeout_seconds):
     deadline = time.monotonic() + timeout_seconds
@@ -245,10 +233,11 @@ def main(argv=None):
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
-    registered = fetch_json(args.comfy_url, "object_info/TextEncodeQwenImage21")
-    if "TextEncodeQwenImage21" not in registered:
-        raise AssertionError("The actual Comfy backend has not registered TextEncodeQwenImage21. "
-                             "A Python source file on disk does not establish runtime node availability.")
+    for expected_node in ("TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved"):
+        registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
+        if expected_node not in registered:
+            raise AssertionError(f"Actual Comfy backend does not expose {expected_node}; "
+                                 "a checked-in plugin is not proof that the runtime loaded it.")
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
@@ -287,7 +276,7 @@ def main(argv=None):
         result = {
             "attempt": i+1, "segment_seed": sampler[seed_key], "prompt_id": pid,
             "mask_fraction_above_5_percent": mask_coverage,
-            "compositor_mask_fraction_above_5_percent": used_mask_coverage,
+            "adapter_cropped_mask_fraction_above_5_percent": used_mask_coverage,
             "crop_mean_absolute_rgb_difference": crop_change,
             "final_mean_absolute_rgb_difference": composite_change,
             "diagnostic": failure,
