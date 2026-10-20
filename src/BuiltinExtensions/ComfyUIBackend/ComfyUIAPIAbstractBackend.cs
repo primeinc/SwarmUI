@@ -146,8 +146,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             {
                 continue;
             }
-            JToken advertised = backendObjectInfo?["SwarmRequireNonEmptyMask"]?
-                ["input"]?["required"]?["maximum_coverage"];
+            JToken advertised = backendObjectInfo?["SwarmRequireNonEmptyMask"]?["input"]?["required"]?["maximum_coverage"];
             string actualType = advertised is JArray socket && socket.Count > 0
                 ? socket[0]?.ToString() : null;
             if (actualType != "FLOAT")
