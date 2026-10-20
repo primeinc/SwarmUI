@@ -297,6 +297,43 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public void RealBaseLoaderToSegmentHandoffKeepsSectionLoRaDistinct(bool matchesSection)
+    {
+        // Unlike Prepare()'s synthetic base-model node, invoke the production
+        // initial loader before creating the segmented image workflow.
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string> { "hair", "face" });
+        g.UserInput.Set(T2IParamTypes.LoraWeights, new List<string> { "0.35", "0.8" });
+        g.UserInput.Set(T2IParamTypes.LoraSectionConfinement,
+            new List<string> { "-1", matchesSection ? "11" : "12" });
+        WorkflowGenerator.Steps.Single(step => step.Priority == -15).Action(g);
+
+        JArray initialModel = g.CurrentModel.Path;
+        JProperty initialLora = g.Workflow.Property(initialModel[0]!.Value<string>()!)!;
+        Assert.That(initialLora.Value["class_type"]!.Value<string>(), Is.EqualTo("LoraLoaderModelOnly"));
+        Assert.That(initialLora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
+
+        RunSegment(g);
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        JArray samplerModel = (JArray)sampler.Value["inputs"]!["model"]!;
+        if (!matchesSection)
+        {
+            Assert.That(samplerModel, Is.EqualTo(initialModel),
+                "Negative control: a LoRA assigned to a different section must not appear in this segment.");
+            return;
+        }
+        Assert.That(samplerModel, Is.Not.EqualTo(initialModel),
+            "Segment sampler must not silently reuse the globally loaded model without its section LoRA.");
+        JProperty scoped = g.Workflow.Property(samplerModel[0]!.Value<string>()!)!;
+        Assert.That(scoped.Value["class_type"]!.Value<string>(), Is.EqualTo("LoraLoaderModelOnly"));
+        Assert.That(scoped.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
+        JArray scopedParent = (JArray)scoped.Value["inputs"]!["model"]!;
+        Assert.That(scopedParent, Is.EqualTo(initialModel),
+            "Section LoRA must extend the actual global loader's model object, not a separately rebuilt unpatched base.");
+    }
+
     [Test]
     public void SegmentScopedLoraIsAppliedBeforeTorchCompile()
     {
