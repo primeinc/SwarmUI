@@ -5,10 +5,10 @@ on:
     pull_request:
 
 # Only the newest validation of a pushed repair head is authoritative.
-# Keep historical completed results but cancel superseded queued/running jobs.
+# Keep historical completed results but replace superseded pending runs without cancelling the active proof.
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: false
 
 jobs:
     test:
