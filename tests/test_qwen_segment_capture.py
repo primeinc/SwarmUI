@@ -77,21 +77,27 @@ class GraphTests(unittest.TestCase):
         g['segtext']['inputs']['images'] = ['crop', 0]
         self.assertFalse(any(w.startswith('REFERENCE_WITHOUT') for w in c.analyze(g)['segments'][0]['warnings']))
 
-    def test_shipped_qwen_encoder_is_recognized_as_conditioning_leaf(self):
+    def test_existing_qwen_encoder_uses_crop_vision_and_two_references(self):
         graph = fixture()
-        graph['segtext'] = {
-            'class_type': 'SwarmQwenImage21SegmentEncode',
-            'inputs': {'clip': ['global', 0], 'vae': ['vae', 0],
-                       'image': ['crop', 0], 'image_1': ['basepixels', 0],
-                       'prompt': 'person', 'negative_prompt': '',
-                       'use_original_reference': True},
+        graph['segtext']['inputs']['images'] = ['crop', 0]
+        graph['neg_reference'] = {
+            'class_type': 'ReferenceLatent',
+            'inputs': {'conditioning': ['segtext', 0], 'latent': ['encoded', 0]},
         }
-        graph['segment']['inputs']['positive'] = ['segtext', 0]
-        graph['segment']['inputs']['negative'] = ['segtext', 1]
+        graph['segment']['inputs']['negative'] = ['neg_reference', 0]
         report = c.analyze(graph)['segments'][0]
         self.assertEqual([n['id'] for n in report['conditioning_encoders']], ['segtext'])
-        self.assertEqual(report['conditioning_encoders'][0]['inputs']['image'], ['crop', 0])
-        self.assertEqual(report['conditioning_encoders'][0]['inputs']['image_1'], ['basepixels', 0])
+        self.assertEqual(report['conditioning_encoders'][0]['inputs']['images'], ['crop', 0])
+        self.assertEqual({n['id'] for n in report['reference_latents']}, {'reference', 'neg_reference'})
+        self.assertFalse(any(w.startswith('REFERENCE_WITHOUT') for w in report['warnings']))
+
+    def test_four_scheduled_steps_starting_at_one_execute_only_three(self):
+        graph = fixture()
+        inp = graph['segment']['inputs']
+        inp.update(steps=4, start_at_step=1)
+        self.assertEqual(c.analyze(graph)['segments'][0]['settings']['effective_step_count'], 3)
+        inp.update(steps=5, start_at_step=1)
+        self.assertEqual(c.analyze(graph)['segments'][0]['settings']['effective_step_count'], 4)
 
     def test_actual_start_step_and_disabled_noise(self):
         g = fixture()
