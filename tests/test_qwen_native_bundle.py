@@ -103,6 +103,19 @@ class NativeQwenBundleTest(unittest.TestCase):
             nodes["TextEncodeQwenImage21"]["id"]
         )
 
+    def test_masked_sampler_required_native_inputs_are_supplied(self):
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        nodes = (LANPAINT_PLUGIN / "src/LanPaint/nodes.py").read_text()
+        required = ("LanPaint_NumSteps", "LanPaint_PromptMode",
+                    "LanPaint_Info", "Inpainting_mode")
+        # These are declared under the upstream REQUIRED schema, not inferred
+        # from Python sample() default values.
+        sample_required = nodes[nodes.index("class LanPaint_KSampler():"):
+                                nodes.index("class LanPaint_KSamplerAdvanced:")]
+        for field in required:
+            self.assertIn('"' + field + '": (', sample_required)
+            self.assertIn('samplerInputs["' + field + '"] = ', steps)
+
     def test_generation_uses_the_original_adapters_end_to_end(self):
         helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()

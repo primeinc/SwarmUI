@@ -2402,8 +2402,14 @@ public class WorkflowGeneratorSteps
                         }
                         else
                         {
+                            // LanPaint_KSampler.INPUT_TYPES declares all four
+                            // of these as REQUIRED, including UI-only info text.
+                            // Python default arguments do not waive Comfy's
+                            // JSON workflow input validation.
                             samplerInputs["LanPaint_NumSteps"] = 5;
                             samplerInputs["LanPaint_PromptMode"] = "Image First";
+                            samplerInputs["LanPaint_Info"] = "LanPaint KSampler.";
+                            samplerInputs["Inpainting_mode"] = "🖼️ Image Inpainting";
                             sampler = g.CreateNode("LanPaint_KSampler", samplerInputs);
                         }
                     }
