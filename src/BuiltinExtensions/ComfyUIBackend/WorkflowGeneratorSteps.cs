@@ -2145,11 +2145,10 @@ public class WorkflowGeneratorSteps
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     WGNodeData beforeImage = g.CurrentMedia;
-                    // Capture the real source/encoder/sampler/compositor boundaries,
-                    // using Swarm's EXISTING intermediate output path. No custom
-                    // Comfy node or synthetic tensor can establish image provenance.
-                    // Only when the user has enabled Output Intermediate Images.
-                    bool traceQwen = nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false);
+                    // Always emit native-node diagnostics until segmented Qwen is
+                    // proven on real GPU images. Swarm's existing intermediate
+                    // saving path needs no new custom ComfyUI node.
+                    bool traceQwen = nativeQwenSegment;
                     void TraceQwenImage(string stage, JArray imagePath)
                     {
                         if (!traceQwen)
@@ -2164,23 +2163,23 @@ public class WorkflowGeneratorSteps
                     if (nativeQwenSegment)
                     {
                         Logs.Info($"[QWEN21-SEG] graph section={part.ContextID} region='{part.DataText}' prompt='{part.Prompt?.Trim()}' " +
-                            $"source_frame={beforeImage.Path[0]} crop_bounds={g.MaskShrunkInfo.BoundsNode} " +
-                            $"crop_raw={g.MaskShrunkInfo.SourceCrop} crop_scaled={g.MaskShrunkInfo.ScaledImage} " +
-                            $"detected_mask={detectedMaskNode} cropped_mask={g.MaskShrunkInfo.CroppedMask} " +
+                            $"source_frame={beforeImage.Path[0]} crop_adapter={cropStitcher[0]} crop_image={qwenCrop[0]}:1 " +
+                            $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
                             $"steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
-                            $"trace_intermediates={traceQwen}");
-                        if (traceQwen)
+                            $"diagnostics=always");
+                        TraceQwenImage("00_source_full_frame", beforeImage.Path);
+                        string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
                         {
-                            TraceQwenImage("00_source_full_frame", beforeImage.Path);
-                            string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
-                            {
-                                ["mask"] = NodePath(detectedMaskNode, 0)
-                            });
-                            TraceQwenImage("01_raw_detection_mask", NodePath(rawMaskImage, 0));
-                            TraceQwenImage("02_crop_before_resize", NodePath(g.MaskShrunkInfo.SourceCrop, 0));
-                            TraceQwenImage("03_exact_qwen_vision_input", NodePath(g.MaskShrunkInfo.ScaledImage, 0));
-                        }
+                            ["mask"] = NodePath(detectedMaskNode, 0)
+                        });
+                        TraceQwenImage("01_raw_detector_mask", NodePath(rawMaskImage, 0));
+                        TraceQwenImage("02_actual_qwen_reference_crop", qwenCrop);
+                        string adapterMaskImage = g.CreateNode("MaskToImage", new JObject()
+                        {
+                            ["mask"] = qwenCropMask
+                        });
+                        TraceQwenImage("03_adapter_crop_mask", NodePath(adapterMaskImage, 0));
                     }
                     string sampler;
                     if (nativeQwenSegment)
@@ -2218,42 +2217,35 @@ public class WorkflowGeneratorSteps
                     {
                         g.SaveOptionalIntermediate();
                     }
-                    JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: nativeQwenSegment, preserveSoftMask: nativeQwenSegment, useNativeComposite: nativeQwenSegment);
+                    JArray composited;
                     if (nativeQwenSegment)
                     {
-                        JObject actualCompositeInputs = g.Workflow[$"{composited[0]}"]["inputs"] as JObject;
-                        JArray actualSource = actualCompositeInputs["source"] as JArray;
-                        JArray actualMask = actualCompositeInputs["mask"] as JArray;
-                        Logs.Info($"[QWEN21-SEG] composite section={part.ContextID} sampler={sampler} " +
-                            $"class=ImageCompositeMasked source={actualSource?[0]}:{actualSource?[1]} " +
-                            $"mask={actualMask?[0]}:{actualMask?[1]} destination={beforeImage.Path[0]} " +
-                            $"bounds={g.MaskShrunkInfo.BoundsNode} result={composited[0]}");
-                        if (traceQwen)
+                        // Feed the image generated from the exact native Qwen
+                        // reference crop to the matching upstream stitch node.
+                        // The stitcher object retains the real crop transform and
+                        // blending mask, so nothing re-derives coordinates.
+                        string rgb = g.CreateNode("SplitImageWithAlpha", new JObject()
                         {
-                            TraceQwenImage("05_exact_compositor_source", actualSource);
-                            string appliedMaskImage = g.CreateNode("MaskToImage", new JObject()
-                            {
-                                ["mask"] = actualMask
-                            });
-                            TraceQwenImage("06_exact_compositor_mask", NodePath(appliedMaskImage, 0));
-                            TraceQwenImage("07_full_frame_composite", composited);
-                        }
-                    }
-                    // The sampler preview is the entire generated crop, before
-                    // masking. This second preview is the EXACT crop of the final
-                    // composited result and therefore shows what was really applied.
-                    if (nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false))
-                    {
-                        string finalPreviewCrop = g.CreateNode("ImageCrop", new JObject()
-                        {
-                            ["image"] = composited,
-                            ["x"] = NodePath(g.MaskShrunkInfo.BoundsNode, 0),
-                            ["y"] = NodePath(g.MaskShrunkInfo.BoundsNode, 1),
-                            ["width"] = NodePath(g.MaskShrunkInfo.BoundsNode, 2),
-                            ["height"] = NodePath(g.MaskShrunkInfo.BoundsNode, 3)
+                            ["image"] = g.CurrentMedia.Path
                         });
-                        new WGNodeData([finalPreviewCrop, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat())
-                            .SaveOutput(null, null, g.GetStableDynamicID(50000, 0));
+                        JArray stitchInput = NodePath(rgb, 0);
+                        string stitchNode = g.CreateNode("InpaintStitchImproved", new JObject()
+                        {
+                            ["stitcher"] = cropStitcher,
+                            ["inpainted_image"] = stitchInput
+                        });
+                        composited = NodePath(stitchNode, 0);
+                        Logs.Info($"[QWEN21-SEG] stitch section={part.ContextID} class=InpaintStitchImproved " +
+                            $"stitcher={cropStitcher[0]}:0 crop_image={qwenCrop[0]}:1 " +
+                            $"sampler={sampler} sampled_rgb={stitchInput[0]} " +
+                            $"final={stitchNode} result={composited[0]}");
+                        TraceQwenImage("05_exact_stitch_input", stitchInput);
+                        TraceQwenImage("06_stitched_full_frame", composited);
+                    }
+                    else
+                    {
+                        composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode,
+                            [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path);
                     }
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
