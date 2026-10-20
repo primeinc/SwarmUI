@@ -146,4 +146,17 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         Assert.That(graph.Properties().Any(p =>
             p.Value?["class_type"]?.ToString() == "LanPaint_ImageEncode"), Is.False);
     }
+    [TestCase(80, 96, 64, 96)]
+    [TestCase(128, 128, 128, 128)]
+    [TestCase(15, 20, 32, 32)]
+    [TestCase(48, 49, 64, 64)]
+    public static void NativeQwenReferencesUseIndependentRoundToEvenGrid(
+        int sourceWidth, int sourceHeight, int expectedWidth, int expectedHeight)
+    {
+        (int width, int height) =
+            WorkflowGenerator.NativeQwen21ReferenceDimensions(sourceWidth, sourceHeight);
+        Assert.That(width, Is.EqualTo(expectedWidth));
+        Assert.That(height, Is.EqualTo(expectedHeight));
+    }
+
 }
