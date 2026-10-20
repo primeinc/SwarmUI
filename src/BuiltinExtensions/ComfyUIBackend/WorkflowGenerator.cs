@@ -163,6 +163,9 @@ public partial class WorkflowGenerator
     /// <summary>Type id ('Base', 'Refiner') of the current loading model.</summary>
     public string LoadingModelType;
 
+    /// <summary>Optional extra LoRA confinement to apply during model loading before model wrappers/compile.</summary>
+    public int LoadingAdditionalLoraConfinement = 0;
+
     /// <summary>If true, user-selected VAE may be wrong, so ignore it.</summary>
     public bool NoVAEOverride = false;
 
