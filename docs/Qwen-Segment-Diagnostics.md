@@ -28,6 +28,14 @@ An effective Qwen segment-model override controls original-photo source
 selection even when the base checkpoint is not Qwen. Replicated source-image
 batches offset the segment seed per image so edits are not identical clones.
 
+The user's segment instruction is passed to native `TextEncodeQwenImage21`
+without any invented replacement wording or synthetic `<image1>` token.
+Only the existing Swarm prompt parser and residual Swarm markup flattening
+affect the text. Qwen must interpret the user's words, not an adapter-created
+instruction. The selected Comfy backend's own `/object_info` node inventory
+is checked before submission; bundled nodes on another backend do not make
+external API-by-URL backends compatible.
+
 Swarm bundles unchanged upstream Qwen, LanPaint, and CropAndStitch sources
 under separate node packages, retaining their respective licenses. Empty
 CLIPSeg masks fail before the crop adapter rather than becoming whole-frame
