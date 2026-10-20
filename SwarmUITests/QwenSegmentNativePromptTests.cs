@@ -65,6 +65,8 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("Replace")]
     [TestCase("Add")]
     [TestCase("Remove")]
+    [TestCase("Remove.")]
+    [TestCase("删除女孩")]
     [TestCase("Replace the girl with a black boy with blue eyes")]
     [TestCase("Add sunglasses to the girl")]
     [TestCase("Put a hat on the subject")]
