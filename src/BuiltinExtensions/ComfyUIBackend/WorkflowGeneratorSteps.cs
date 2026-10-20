@@ -1817,6 +1817,10 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
+                    if (g.IsQwenImage21() && part.Strength2 <= 0)
+                    {
+                        continue;
+                    }
                     string[] segmentSections = part.DataText.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     string segmentNode = null;
                     if (segmentSections.Length == 0)
@@ -1939,16 +1943,27 @@ public class WorkflowGeneratorSteps
                         clip = clip.WithPath(newClip);
                     }
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
-                    JArray prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
-                    JArray negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
+                    bool nativeQwenSegment = g.IsQwenImage21();
+                    JArray prompt, negPrompt;
+                    JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
+                    if (nativeQwenSegment)
+                    {
+                        (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21SegmentConditioning(
+                            part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID);
+                    }
+                    else
+                    {
+                        prompt = g.CreateConditioning(part.Prompt, clip.Path, t2iModel, true, steps: steps);
+                        negPrompt = g.CreateConditioning(neg, clip.Path, t2iModel, false, steps: steps);
+                    }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
                     // When Segment Model differs from the base model, that must be the segment VAE.
-                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, [g.MaskShrunkInfo.MaskedLatent, 0], cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID));
+                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.

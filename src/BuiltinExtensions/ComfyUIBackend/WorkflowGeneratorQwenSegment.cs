@@ -1,0 +1,67 @@
+using System;
+using Newtonsoft.Json.Linq;
+using SwarmUI.Text2Image;
+using SwarmUI.Utils;
+
+namespace SwarmUI.Builtin_ComfyUIBackend;
+
+public partial class WorkflowGenerator
+{
+    /// <summary>Builds paired native Qwen 2.1 conditioning from the actual segment crop. The crop is first so the native empty latent has the sampling dimensions.</summary>
+    public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
+        string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
+        ImageMaskCropData crop, int steps, double creativity, int sectionId)
+    {
+        if (!Features.Contains("qwen21_native_conditioning"))
+        {
+            throw new SwarmUserErrorException("Qwen Image 2.1 segments require the ComfyUI TextEncodeQwenImage21 node. Update the selected Comfy backend and restart it; a text-only fallback would not correctly condition the crop.");
+        }
+        if (crop?.ScaledImage is null || vae is null || clip is null)
+        {
+            throw new SwarmUserErrorException("Qwen Image 2.1 segment is missing its scaled crop, text encoder, or VAE.");
+        }
+        string mode = UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: sectionId);
+        if (mode != "Reference Edit" && mode != "Masked Img2Img")
+        {
+            throw new SwarmUserErrorException($"Unknown Qwen Image 2.1 segment sampling mode '{mode}'.");
+        }
+        // The native encoder consumes plain prompts. Never silently turn scheduled Swarm tags into literal text.
+        string combinedPrompt = (prompt ?? "") + "\n" + (negativePrompt ?? "");
+        foreach (string tag in new[] { "<fromto", "<alternate", "<alt:", "<alt[", "<weight", "<break>", "<embed", "//hook=" })
+        {
+            if (combinedPrompt.Contains(tag, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SwarmUserErrorException("Native Qwen Image 2.1 segment conditioning does not support step-scheduled or weighted Swarm prompt tags. Use plain segment text and static segment LoRA tags.");
+            }
+        }
+        JObject inputs = new()
+        {
+            ["clip"] = clip.Path,
+            ["prompt"] = prompt ?? "",
+            ["negative_prompt"] = negativePrompt ?? "",
+            ["vae"] = vae.Path,
+            ["resolution"] = 0,
+            ["images.image_1"] = NodePath(crop.ScaledImage, 0)
+        };
+        // Keep explicit prompt references separate; ImageBatch would resize distinct references to one shape.
+        for (int i = 0; i < 16; i++)
+        {
+            JArray reference = GetPromptImage(false, false, i);
+            if (reference is null)
+            {
+                break;
+            }
+            if (i == 15)
+            {
+                throw new SwarmUserErrorException("Qwen Image 2.1 segments support at most 15 Prompt Images in addition to the segment crop.");
+            }
+            inputs[$"images.image_{i + 2}"] = reference;
+        }
+        string encoder = CreateNode("TextEncodeQwenImage21", inputs);
+        // Reference Edit regenerates the crop, then the existing pixel mask composites only its selected area.
+        // Masked Img2Img preserves the original partial-denoise/latent-mask semantics explicitly.
+        JArray latent = mode == "Reference Edit" ? NodePath(encoder, 2) : NodePath(crop.MaskedLatent, 0);
+        int startStep = mode == "Reference Edit" ? 0 : (int)Math.Round(steps * (1 - creativity));
+        return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
+    }
+}

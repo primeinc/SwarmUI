@@ -49,6 +49,7 @@ public class ComfyUIBackendExtension : Extension
         ["SwarmJustLoadTheModelPlease"] = "comfy_just_load_model",
         ["SwarmLatentBlendMasked"] = "comfy_latent_blend_masked",
         ["SwarmKSampler"] = "variation_seed",
+        ["TextEncodeQwenImage21"] = "qwen21_native_conditioning",
         ["FreeU"] = "freeu",
         ["AITemplateLoader"] = "aitemplate",
         ["IPAdapter"] = "ipadapter",

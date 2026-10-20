@@ -993,7 +993,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Creates a KSampler and returns its node ID.</summary>
-    public string CreateKSampler(JArray model, JArray pos, JArray neg, JArray latent, double cfg, int steps, int startStep, int endStep, long seed, bool returnWithLeftoverNoise, bool addNoise, double sigmin = -1, double sigmax = -1, string previews = null, string defsampler = null, string defscheduler = null, string id = null, bool rawSampler = false, bool doTiled = false, bool isFirstSampler = false, bool hadSpecialCond = false, string explicitSampler = null, string explicitScheduler = null, int sectionId = 0, WGNodeData negativeModel = null)
+    public string CreateKSampler(JArray model, JArray pos, JArray neg, JArray latent, double cfg, int steps, int startStep, int endStep, long seed, bool returnWithLeftoverNoise, bool addNoise, double sigmin = -1, double sigmax = -1, string previews = null, string defsampler = null, string defscheduler = null, string id = null, bool rawSampler = false, bool doTiled = false, bool isFirstSampler = false, bool hadSpecialCond = false, string explicitSampler = null, string explicitScheduler = null, int sectionId = 0, WGNodeData negativeModel = null, bool referenceConditioningHandled = false)
     {
         if (negativeModel is null && UserInput.TryGet(T2IParamTypes.NegativeModel, out T2IModel negModel, sectionId: sectionId))
         {
@@ -1204,11 +1204,13 @@ public partial class WorkflowGenerator
             neg = [disabledNeg, 0];
         }
         JArray imgNeg = null;
-        if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images) && images.Count > 0)
+        // Native paired encoders have already attached matching vision/reference conditioning.
+        // Do not append global or inferred crop references for a second time.
+        if (!referenceConditioningHandled && UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images) && images.Count > 0)
         {
             (pos, neg, latent, imgNeg) = BuildInputImageHandling(LoadPromptImagesForMainRef(images), pos, neg, latent);
         }
-        else
+        else if (!referenceConditioningHandled)
         {
             if (IsKontext() || (IsQwenImage() && IsQwenImageEdit()) || ShouldUseQwen21AutomaticReference())
             {
