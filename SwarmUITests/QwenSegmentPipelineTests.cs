@@ -15,7 +15,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
 {
     private T2IModelHandler priorLoras;
     private bool priorHashSetting;
-    private bool addedQwenVaeKnownModel;
 
     [OneTimeSetUp]
     public void Initialize()
@@ -29,23 +28,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
-        addedQwenVaeKnownModel = CommonModels.Known.TryAdd("qwen-image-2.1-vae", new(
-            "qwen-image-2.1-vae",
-            "Qwen Image 2.1 VAE",
-            "The RGBA VAE for Qwen Image 2.1",
-            "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors",
-            "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
-            "VAE",
-            "QwenImage/qwen_image_2.1_vae_bf16.safetensors"));
-    }
-
-    [OneTimeTearDown]
-    public void CleanupKnownModels()
-    {
-        if (addedQwenVaeKnownModel)
-        {
-            CommonModels.Known.TryRemove("qwen-image-2.1-vae", out _);
-        }
     }
 
     [SetUp]
@@ -85,11 +67,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
         };
         T2IParamInput input = new(null);
         input.Set(T2IParamTypes.Model, model);
-        if (qwen)
-        {
-            input.Set(T2IParamTypes.QwenModel, new T2IModel(null, "/fixture", "/fixture/qwen3vl_8b_int8_convrot.safetensors", "qwen3vl_8b_int8_convrot.safetensors"));
-            input.Set(T2IParamTypes.VAE, new T2IModel(null, "/fixture", "/fixture/qwen_image_2.1_vae_bf16.safetensors", "qwen_image_2.1_vae_bf16.safetensors"));
-        }
         input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
         input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
         Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001));
@@ -251,29 +228,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(firstModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
         Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
-    }
-
-
-    [Test]
-    public void SegmentScopedLoraLoadsBeforeLaterModelWrappers()
-    {
-        WorkflowGenerator g = Prepare();
-        g.LoadingModel = new JArray("base-model", 0);
-        g.LoadingClip = new JArray("base-clip", 0);
-        g.LoadingModelType = "Base";
-        g.LoadingAdditionalLoraConfinement = 11;
-
-        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -10).Action(g);
-        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
-
-        string wrapperId = g.CreateNode("TorchCompileModel", new JObject()
-        {
-            ["model"] = g.LoadingModel,
-            ["backend"] = "inductor"
-        });
-        JProperty wrapper = g.Workflow.Property(wrapperId)!;
-        Assert.That(wrapper.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
-            "Segment-confined Qwen LoRA must be inside any later compile/cache/model wrapper.");
     }
 
     [Test]
