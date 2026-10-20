@@ -33,7 +33,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public static int MaxSummaryChars = 20_000;
 
     /// <summary>Summary sections removed, in order, until the summary fits <see cref="MaxSummaryChars"/>. The server log always has the full trace.</summary>
-    public static string[] SummaryTrimOrder = ["nodes", "params_read", "section_overrides", "media", "prompts", "cache_hits", "rewires", "removed", "loras", "segments", "steps", "model_loads", "samplers"];
+    public static string[] SummaryTrimOrder = ["nodes", "params_read", "undeclared_inputs", "section_overrides", "media", "prompts", "cache_hits", "rewires", "removed", "loras", "segments", "steps", "model_loads", "samplers"];
 
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
@@ -789,6 +789,16 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return null;
     }
 
+    /// <summary>Returns true if <see cref="ObjectInfo"/> lists the node class and it declares the input as required, optional or hidden. Returns null if the class is not listed.</summary>
+    public bool? ComfyDeclaresInput(string classType, string input)
+    {
+        if (ObjectInfo is null || !ObjectInfo.TryGetValue(classType, out JToken info) || info["input"] is not JObject inputs)
+        {
+            return null;
+        }
+        return new[] { "required", "optional", "hidden" }.Any(group => inputs[group] is JObject set && set.ContainsKey(input));
+    }
+
     /// <summary>Returns true if the value is a link to another node, ie ["id", slot].</summary>
     public static bool IsLink(JToken value)
     {
@@ -1221,15 +1231,25 @@ public class WorkflowTrace(WorkflowGenerator gen)
         if (ObjectInfo is not null)
         {
             JArray typeErrors = [];
+            JArray undeclared = [];
+            JArray unknownClasses = [];
             foreach (JProperty property in workflow.Properties())
             {
                 string classType = $"{property.Value["class_type"]}";
+                if (!ObjectInfo.ContainsKey(classType))
+                {
+                    unknownClasses.Add($"{property.Name}:{classType}");
+                }
                 if (property.Value["inputs"] is not JObject inputs)
                 {
                     continue;
                 }
                 foreach (JProperty input in inputs.Properties())
                 {
+                    if (ComfyDeclaresInput(classType, input.Name) == false)
+                    {
+                        undeclared.Add($"{property.Name}:{classType}.{input.Name}");
+                    }
                     if (!IsLink(input.Value) || workflow[$"{input.Value[0]}"] is not JObject source)
                     {
                         continue;
@@ -1249,6 +1269,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 }
             }
             result["type_errors"] = typeErrors;
+            result["undeclared_inputs"] = undeclared;
+            result["classes_missing_from_object_info"] = unknownClasses;
         }
         JObject prompts = [];
         foreach ((string text, List<string> labels) in PromptLabels)
