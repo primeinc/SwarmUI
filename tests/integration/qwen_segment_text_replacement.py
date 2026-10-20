@@ -141,6 +141,15 @@ def inspect_and_instrument(original):
     # Binarize all detector-selected support BEFORE crop/stitch hipass(0.5).
     if abs(float(graph[guard_id]["inputs"].get("minimum_confidence", -1))) > 1e-6:
         raise AssertionError("Segment detector guard must not add a second threshold")
+    # A normalized weak background response can leave positive scores over
+    # almost the whole frame. ThresholdMask(0) would turn all of them opaque.
+    # Require a finite cutoff at the actual detector-mask guard, not a new
+    # implicit CLIPSeg score threshold.
+    max_coverage = graph[guard_id]["inputs"].get("maximum_coverage")
+    if not isinstance(max_coverage, (float, int)) or not (0 < max_coverage <= 0.99):
+        raise AssertionError(
+            "Qwen mask guard must reject near-whole-canvas detection without "
+            "changing the authored CLIPSeg confidence threshold")
     solid_mask_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "ThresholdMask"
          and v["inputs"].get("mask") == [guard_id, 0]
