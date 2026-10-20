@@ -1,0 +1,4 @@
+Pinned CI validation snapshot for PR #16
+Source commit: 8b22927c1c470235b098e20192a726eb99e135a7
+Regression: tests/test_qwen_reference_break_cpu.py
+Acceptance boundary: C# / Python CPU graph and compositor only. Qwen model-backed image and LoRA effect are not proved by this run.
