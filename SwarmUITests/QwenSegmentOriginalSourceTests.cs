@@ -102,7 +102,7 @@ public class QwenSegmentOriginalSourceTests
             Is.EqualTo(new Newtonsoft.Json.Linq.JArray(mask.Id, 0).ToString()));
         Assert.That(encoder.Node["inputs"]?["prompt"]?.ToString(),
             Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
-        Assert.That(sampler.Node["inputs"]?["denoise"]?.Value<double>(), Is.EqualTo(0.8).Within(0.000001));
+        Assert.That(sampler.Node["inputs"]?["denoise"]?.ToObject<double>(), Is.EqualTo(0.8).Within(0.000001));
         Assert.That(sampler.Node["inputs"]?["LanPaint_Info"]?.ToString(), Is.EqualTo("LanPaint KSampler."));
         Assert.That(sampler.Node["inputs"]?["Inpainting_mode"]?.ToString(), Is.EqualTo("🖼️ Image Inpainting"));
         Assert.That(stitch.Node["inputs"]?["stitcher"]?.ToString(),
