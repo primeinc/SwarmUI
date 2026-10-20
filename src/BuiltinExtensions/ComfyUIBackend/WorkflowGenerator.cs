@@ -2,6 +2,7 @@ using System;
 using System.Text;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using SwarmUI.Core;
 using SwarmUI.Media;
 using SwarmUI.Text2Image;
@@ -22,7 +23,9 @@ public partial class WorkflowGenerator
     /// "-10" is the priority of the first core pre-init,
     /// "0" is before final outputs,
     /// "10" is final output.</param>
-    public record class WorkflowGenStep(Action<WorkflowGenerator> Action, double Priority);
+    /// <param name="Name">Optional human-readable name of the step.</param>
+    /// <param name="Source">Registration source, as file:line.</param>
+    public record class WorkflowGenStep(Action<WorkflowGenerator> Action, double Priority, string Name = null, string Source = null);
 
     /// <summary>Callable steps for modifying workflows as they go.</summary>
     public static List<WorkflowGenStep> Steps = [];
@@ -46,16 +49,16 @@ public partial class WorkflowGenerator
     public static ConcurrentDictionary<string, string> IPAdapterModelsValid = [];
 
     /// <summary>Register a new step to the workflow generator.</summary>
-    public static void AddStep(Action<WorkflowGenerator> step, double priority)
+    public static void AddStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        Steps.Add(new(step, priority));
+        Steps.Add(new(step, priority, name, $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}"));
         Steps = [.. Steps.OrderBy(s => s.Priority)];
     }
 
     /// <summary>Register a new step to the workflow generator.</summary>
-    public static void AddModelGenStep(Action<WorkflowGenerator> step, double priority)
+    public static void AddModelGenStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        ModelGenSteps.Add(new(step, priority));
+        ModelGenSteps.Add(new(step, priority, name, $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}"));
         ModelGenSteps = [.. ModelGenSteps.OrderBy(s => s.Priority)];
     }
 
@@ -78,6 +81,12 @@ public partial class WorkflowGenerator
 
     /// <summary>The output workflow object.</summary>
     public JObject Workflow;
+
+    /// <summary>Debug trace of how this workflow was built, or null when not tracing. Set automatically by <see cref="Generate"/> when <see cref="Settings.AddDebugData"/> is enabled.</summary>
+    public WorkflowTrace Trace;
+
+    /// <summary>Marks nodes created inside the returned scope as belonging to the given stage in the debug trace. Returns null when not tracing.</summary>
+    public IDisposable TraceStage(string stage) => Trace?.EnterStage(stage);
 
     /// <summary>Current node data trackers for core data that passes throughout the workflow.</summary>
     public WGNodeData CurrentModel, CurrentTextEnc, CurrentVae, CurrentAudioVae, CurrentMedia, BasicInputImage;
@@ -222,24 +231,26 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Creates a new node with the given class type and configuration action, and optional manual ID.</summary>
-    public string CreateNode(string classType, Action<string, JObject> configure, string id = null)
+    public string CreateNode(string classType, Action<string, JObject> configure, string id = null, [CallerMemberName] string callerMember = "", [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
         id ??= $"{LastID++}";
         JObject obj = new() { ["class_type"] = classType };
         configure(id, obj);
+        Trace?.NodeCreated(id, classType, Workflow.ContainsKey(id), callerMember, callerFile, callerLine);
         Workflow[id] = obj;
         return id;
     }
 
     /// <summary>Creates a new node with the given class type and input data, and optional manual ID.</summary>
-    public string CreateNode(string classType, JObject input, string id = null, bool idMandatory = true)
+    public string CreateNode(string classType, JObject input, string id = null, bool idMandatory = true, [CallerMemberName] string callerMember = "", [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
         string lookup = $"__generic_node__{classType}___{input}";
         if ((id is null || !idMandatory) && NodeHelpers.TryGetValue(lookup, out string existingNode))
         {
+            Trace?.NodeReused(existingNode, callerMember, callerFile, callerLine);
             return existingNode;
         }
-        string result = CreateNode(classType, (_, n) => n["inputs"] = input, id);
+        string result = CreateNode(classType, (_, n) => n["inputs"] = input, id, callerMember, callerFile, callerLine);
         NodeHelpers[lookup] = result;
         return result;
     }
@@ -350,6 +361,7 @@ public partial class WorkflowGenerator
                 ["strength_model"] = weight,
                 ["strength_clip"] = tencWeight
             }, GetStableDynamicID(2500, i), false);
+            Trace?.LoraApplied(confinement, lora, weight, tencWeight, newId, "hook");
             last = [newId, 0];
         }
         if (last is null)
@@ -398,6 +410,7 @@ public partial class WorkflowGenerator
                 ["strength_model"] = weight,
                 ["strength_clip"] = tencWeight
             }, GetStableDynamicID(3000, hookId), false);
+            Trace?.LoraApplied(-1, lora, weight, tencWeight, newId, "dynamic-hook");
             last = [newId, 0];
         }
         DynamicLoraHooks = last;
@@ -484,6 +497,7 @@ public partial class WorkflowGenerator
                 model = [newId, 0];
                 clip = [newId, 1];
             }
+            Trace?.LoraApplied(confinement, lora, weight, tencWeight, $"{model[0]}", "loader");
         }
         return (model, clip);
     }
@@ -491,10 +505,12 @@ public partial class WorkflowGenerator
     public string CreateAudioLoadNode(AudioFile audio, string param, string nodeId = null)
     {
         // TODO: Fallback for base LoadAudio node?
-        return CreateNode("SwarmLoadAudioB64", new JObject()
+        string result = CreateNode("SwarmLoadAudioB64", new JObject()
         {
             ["audio_base64"] = audio.AsBase64
         }, nodeId);
+        Trace?.LabelMedia(result, param, audio);
+        return result;
     }
 
     /// <summary>Creates a new node to load an image.</summary>
@@ -524,6 +540,7 @@ public partial class WorkflowGenerator
                 {
                     ["image_base64"] = (resize ? img.Resize(imgWidth, imgHeight) : img).AsBase64
                 }, nodeId);
+                Trace?.LabelMedia(result, param, img, resize ? imgWidth : null, resize ? imgHeight : null);
                 return new([result, 0], this, WGNodeData.DT_IMAGE, CurrentCompat()) { Width = imgWidth, Height = imgHeight };
             }
             else
@@ -536,6 +553,7 @@ public partial class WorkflowGenerator
                     {
                         ["video_base64"] = img.AsBase64
                     }, resize ? null : nodeId);
+                    Trace?.LabelMedia(result, param, img);
                     string splitNode = CreateNode("GetVideoComponents", new JObject()
                     {
                         ["video"] = NodePath(result, 0)
@@ -550,6 +568,7 @@ public partial class WorkflowGenerator
                     {
                         ["image_base64"] = img.AsBase64
                     }, resize ? null : nodeId);
+                    Trace?.LabelMedia(result, param, img);
                 }
                 int? imgWidth = null;
                 int? imgHeight = null;
@@ -575,6 +594,7 @@ public partial class WorkflowGenerator
             {
                 ["image"] = param
             }, nodeId);
+            Trace?.LabelMedia(result, param, img);
             return new([result, 0], this, WGNodeData.DT_IMAGE, CurrentCompat());
         }
     }
@@ -714,14 +734,31 @@ public partial class WorkflowGenerator
     public JObject Generate()
     {
         Workflow = [];
-        foreach (WorkflowGenStep step in Steps)
+        if (Trace is null && Program.ServerSettings.AddDebugData)
         {
-            step.Action(this);
-            if (SkipFurtherSteps)
+            Trace = new(this);
+        }
+        Trace?.Begin();
+        try
+        {
+            foreach (WorkflowGenStep step in Steps)
             {
-                break;
+                Trace?.BeginStep(step, false);
+                step.Action(this);
+                Trace?.EndStep();
+                if (SkipFurtherSteps)
+                {
+                    Trace?.SkippedFurtherSteps();
+                    break;
+                }
             }
         }
+        catch (Exception ex)
+        {
+            Trace?.Fail(ex);
+            throw;
+        }
+        Trace?.Finish();
         return Workflow;
     }
 
@@ -781,6 +818,7 @@ public partial class WorkflowGenerator
         string vaeFixed = vae.Replace('\\', '/').Replace("/", ModelFolderFormat ?? $"{Path.DirectorySeparatorChar}");
         if (NodeHelpers.TryGetValue($"vaeloader-{vaeFixed}", out string helper))
         {
+            Trace?.CacheHit($"vaeloader {vaeFixed}", helper);
             return [helper, 0];
         }
         string vaeLoader;
@@ -1280,7 +1318,29 @@ public partial class WorkflowGenerator
                 ["latent_image"] = latentImage,
                 ["noise"] = NodePath(noiseNode, 0)
             }, id);
+            traceSamplerCall(finalSampler);
             return finalSampler;
+        }
+        void traceSamplerCall(string nodeId)
+        {
+            Trace?.SamplerCall(nodeId, new JObject()
+            {
+                ["section"] = sectionId,
+                ["steps"] = steps,
+                ["start_step"] = startStep,
+                ["end_step"] = endStep,
+                ["cfg"] = cfg,
+                ["seed"] = seed,
+                ["add_noise"] = addNoise,
+                ["return_leftover_noise"] = returnWithLeftoverNoise,
+                ["first_sampler"] = isFirstSampler,
+                ["explicit_sampler"] = explicitSampler,
+                ["explicit_scheduler"] = explicitScheduler,
+                ["default_sampler"] = defsampler,
+                ["default_scheduler"] = defscheduler,
+                ["prompt_images_as_references"] = images?.Count ?? 0,
+                ["negative_model"] = negativeModel is null ? null : WorkflowTrace.PathText(negativeModel.Path)
+            });
         }
         if (classId == "stable-diffusion-xl-v1-edit")
         {
@@ -1343,6 +1403,7 @@ public partial class WorkflowGenerator
         {
             created = CreateNode("KSamplerAdvanced", inputs, firstId);
         }
+        traceSamplerCall(created);
         if (willCascadeFix)
         {
             string stageBCond = CreateNode("StableCascade_StageB_Conditioning", new JObject()
@@ -2490,6 +2551,7 @@ public partial class WorkflowGenerator
         string trackerId = $"__cond_direct____{clip[0]}_{clip[1]}_{isPositive}____{prompt}_{attachImages}_{steps}";
         if (id is null && NodeHelpers.TryGetValue(trackerId, out string nodeId))
         {
+            Trace?.CacheHit("conditioning", nodeId);
             return [nodeId, 0];
         }
         string node;
@@ -3038,6 +3100,7 @@ public partial class WorkflowGenerator
     /// <summary>Creates a SeedVR2 restoration stage: converts to a SeedVR2-space latent and samples the restored image from it.</summary>
     public WGNodeData CreateSeedVR2Restore(T2IModel seedVrModel, WGNodeData media, WGNodeData decodeVae, long seed, bool isRefiner = false)
     {
+        using IDisposable traceStage = isRefiner ? null : TraceStage("seedvr");
         WGNodeData raw = media.AsRawImage(decodeVae);
         JArray resized = raw.Path;
         string preprocessed = CreateNode("SeedVR2Preprocess", new JObject()
@@ -3133,6 +3196,8 @@ public partial class WorkflowGenerator
         {
             globalPromptText = $"{globalPromptText} {regionalizer.BasePrompt}";
         }
+        string tracePromptLabel = Trace is null ? null : $"{Trace.CurrentStage}.{(isPositive ? "pos" : "neg")}";
+        Trace?.LabelPrompt(globalPromptText.Trim(), tracePromptLabel);
         JArray globalCond = CreateConditioningLine(globalPromptText.Trim(), clip, model, isPositive, firstId, attachImages: attachImages, steps: steps);
         if (!isPositive && string.IsNullOrWhiteSpace(prompt) && ShouldZeroNegative())
         {
@@ -3146,6 +3211,10 @@ public partial class WorkflowGenerator
         if (parts.IsEmpty())
         {
             return globalCond;
+        }
+        foreach (PromptRegion.Part part in parts)
+        {
+            Trace?.LabelPrompt(part.Prompt, $"{tracePromptLabel}.{$"{part.Type}".ToLowerFast()}{part.ContextID}");
         }
         string gligenModel = UserInput.Get(ComfyUIBackendExtension.GligenModel, "None");
         if (gligenModel != "None")
@@ -3226,6 +3295,7 @@ public partial class WorkflowGenerator
             ["exclude_mask"] = lastMergedMask
         });
         string backgroundPrompt = string.IsNullOrWhiteSpace(regionalizer.BackgroundPrompt) ? regionalizer.GlobalPrompt : regionalizer.BackgroundPrompt;
+        Trace?.LabelPrompt(backgroundPrompt, $"{tracePromptLabel}.background");
         JArray backgroundCond = CreateConditioningLine(backgroundPrompt, clip, model, isPositive, attachImages: attachImages, steps: steps);
         string mainConditioning = CreateNode("ConditioningSetMask", new JObject()
         {
@@ -3310,6 +3380,7 @@ public partial class WorkflowGenerator
     public void ReplaceNodeConnection(JArray oldNode, JArray newNode)
     {
         string target0 = $"{oldNode[0]}", target1 = $"{oldNode[1]}";
+        int replaced = 0;
         foreach (JObject node in Workflow.Values().Cast<JObject>())
         {
             JObject inputs = node["inputs"] as JObject;
@@ -3318,9 +3389,11 @@ public partial class WorkflowGenerator
                 if (property.Value is JArray jarr && jarr.Count == 2 && $"{jarr[0]}" == target0 && $"{jarr[1]}" == target1)
                 {
                     inputs[property.Name] = newNode;
+                    replaced++;
                 }
             }
         }
+        Trace?.Rewired(oldNode, newNode, replaced);
     }
 
     public HashSet<string> UsedInputs = null;

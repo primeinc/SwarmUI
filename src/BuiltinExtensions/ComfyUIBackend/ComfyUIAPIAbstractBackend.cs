@@ -818,7 +818,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
-    public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null)
+    public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null, JObject objectInfo = null)
     {
         // note: gently break any standard embed with a space, *require* swarm format embeds, as comfy's raw syntax has unwanted behaviors
         user_input.ProcessPromptEmbeds(x => $"<embed:{x}>", p => p.Replace("embedding:", "embedding :", StringComparison.OrdinalIgnoreCase));
@@ -911,11 +911,21 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 return Utilities.EscapeJsonString(filled);
             }, false);
             Logs.Verbose("Workflow filled.");
+            if (Program.ServerSettings.AddDebugData)
+            {
+                WorkflowTrace.RecordExternalWorkflow(user_input, user_input.InternalSet.ValuesInput.ContainsKey(ComfyUIBackendExtension.CustomWorkflowParam.Type.ID) ? "custom" : "raw", workflow);
+            }
         }
         else
         {
-            workflow = new WorkflowGenerator() { UserInput = user_input, ModelFolderFormat = ModelFolderFormat, Features = features ?? [] }.Generate().ToString();
-            workflow = initImageFixer(workflow);
+            WorkflowGenerator generator = new() { UserInput = user_input, ModelFolderFormat = ModelFolderFormat, Features = features ?? [] };
+            if (Program.ServerSettings.AddDebugData)
+            {
+                generator.Trace = new(generator) { ObjectInfo = objectInfo };
+            }
+            string generated = generator.Generate().ToString();
+            workflow = initImageFixer(generated);
+            generator.Trace?.RecordSent(workflow, workflow != generated);
         }
         return workflow;
     }
@@ -993,7 +1003,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return workflow;
         }
-        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures], RawObjectInfo);
         try
         {
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);

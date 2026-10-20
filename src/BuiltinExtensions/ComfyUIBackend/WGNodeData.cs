@@ -10,8 +10,18 @@ using SwarmUI.Utils;
 namespace SwarmUI.Builtin_ComfyUIBackend;
 
 /// <summary>Represents data from a node output in <see cref="WorkflowGenerator"/>.</summary>
-public class WGNodeData(JArray _path, WorkflowGenerator _gen, string _dataType, T2IModelCompatClass _compat)
+public class WGNodeData
 {
+    /// <summary>Construct node output data for a given path, generator, data type, and compat class.</summary>
+    public WGNodeData(JArray _path, WorkflowGenerator _gen, string _dataType, T2IModelCompatClass _compat)
+    {
+        Path = _path;
+        Gen = _gen;
+        DataType = _dataType;
+        Compat = _compat;
+        Gen?.Trace?.TrackData(this);
+    }
+
     public static string DT_IMAGE = "IMAGE", DT_LATENT_IMAGE = "LATENT_IMAGE",
         DT_MODEL = "MODEL", DT_TEXTENC = "TEXTENC", DT_VAE = "VAE", DT_AUDIOVAE = "AUDIOVAE",
         DT_VIDEO = "VIDEO", DT_LATENT_VIDEO = "LATENT_VIDEO",
@@ -28,13 +38,13 @@ public class WGNodeData(JArray _path, WorkflowGenerator _gen, string _dataType, 
     public bool IsRawMedia => DataType == DT_IMAGE || DataType == DT_AUDIO || DataType == DT_VIDEO;
 
     /// <summary>Actual backing path to the node output in the workflow.</summary>
-    public JArray Path = _path;
+    public JArray Path;
 
     /// <summary>What type of data is in this. Use the static types available in <see cref="WGNodeData"/>.</summary>
-    public string DataType = _dataType;
+    public string DataType;
 
     /// <summary>If known and relevant (eg latent), what class of models this is compatible with.</summary>
-    public T2IModelCompatClass Compat = _compat;
+    public T2IModelCompatClass Compat;
 
     /// <summary>Whether this media may contain an alpha channel when decoded.</summary>
     public bool MayHaveAlpha = false;
@@ -68,7 +78,7 @@ public class WGNodeData(JArray _path, WorkflowGenerator _gen, string _dataType, 
     public WGNodeData AttachedAudio = null;
 
     /// <summary>The backing relevant workflow generator.</summary>
-    public WorkflowGenerator Gen = _gen;
+    public WorkflowGenerator Gen;
 
     /// <summary>The current relevant user input data.</summary>
     public T2IParamInput UserInput => Gen.UserInput;
@@ -77,7 +87,12 @@ public class WGNodeData(JArray _path, WorkflowGenerator _gen, string _dataType, 
     public HashSet<string> Features => Gen.Features;
 
     /// <summary>Create an exact copy of this object.</summary>
-    public WGNodeData Duplicate() => (WGNodeData)MemberwiseClone();
+    public WGNodeData Duplicate()
+    {
+        WGNodeData dup = (WGNodeData)MemberwiseClone();
+        Gen?.Trace?.TrackData(dup);
+        return dup;
+    }
 
     public (string, JObject) SourceNodeData => Gen.Workflow.TryGetValue($"{Path[0]}", out JToken tok) && tok is JObject node ? ($"{node["class_type"]}", (JObject)node["inputs"]) : (null, null);
 

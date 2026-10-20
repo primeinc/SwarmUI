@@ -182,6 +182,9 @@ public class T2IParamInput
     /// <summary>If true, no parameters are ever "unused". Useful for special meta-handlers, eg Grid Image.</summary>
     public bool NoUnusedParams = false;
 
+    /// <summary>If non-null, called on every parameter read with (param, section ID, value returned, source of the value: "section", "base", or "default").</summary>
+    public Action<T2IParamType, int, object, string> ParamReadTracker = null;
+
     /// <summary>Gets the parameter overrides for a given section. Returns the main <see cref="InternalSet"/> if not in a sub-section currently.</summary>
     /// <param name="section">The section ID.</param>
     public T2IParamSet GetSectionParamOverrides(int section)
@@ -602,14 +605,18 @@ public class T2IParamInput
     public object GetRaw(T2IParamType param)
     {
         ParamsQueried.Add(param.ID);
-        return InternalSet.GetRaw(param);
+        object result = InternalSet.GetRaw(param);
+        ParamReadTracker?.Invoke(param, 0, result, result is null ? "default" : "base");
+        return result;
     }
 
     /// <summary>Gets the value of the parameter, if it is present, or default if not.</summary>
     public T Get<T>(T2IRegisteredParam<T> param)
     {
         ParamsQueried.Add(param.Type.ID);
-        return InternalSet.Get(param);
+        T result = InternalSet.Get(param);
+        ParamReadTracker?.Invoke(param.Type, 0, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? "base" : "default");
+        return result;
     }
 
     /// <summary>Gets the value of the parameter, if it is present, or default if not.</summary>
@@ -618,16 +625,20 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out T subVal))
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, "section");
             return subVal;
         }
         if (sectionId != 0 && !includeBase)
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
             return null;
         }
         if (InternalSet.TryGet(param, out T val))
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, val, "base");
             return val;
         }
+        ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
         return null;
     }
 
@@ -637,20 +648,26 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out T subVal))
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, "section");
             return subVal;
         }
         if (sectionId != 0 && !includeBase)
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, defVal, "default");
             return defVal;
         }
-        return InternalSet.Get(param, defVal, autoFixDefault);
+        T result = InternalSet.Get(param, defVal, autoFixDefault);
+        ParamReadTracker?.Invoke(param.Type, sectionId, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? "base" : "default");
+        return result;
     }
 
     /// <summary>Gets the value of the parameter as a string, if it is present, or null if not.</summary>
     public string GetString<T>(T2IRegisteredParam<T> param)
     {
         ParamsQueried.Add(param.Type.ID);
-        return InternalSet.GetString(param);
+        string result = InternalSet.GetString(param);
+        ParamReadTracker?.Invoke(param.Type, 0, result, result is null ? "default" : "base");
+        return result;
     }
 
     /// <summary>Tries to get the value of the parameter. If it is present, returns true and outputs the value. If it is not present, returns false.</summary>
@@ -659,21 +676,27 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out val))
         {
+            ParamReadTracker?.Invoke(param.Type, sectionId, val, "section");
             return true;
         }
         if (sectionId != 0 && !includeBase)
         {
             val = default;
+            ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
             return false;
         }
-        return InternalSet.TryGet(param, out val);
+        bool found = InternalSet.TryGet(param, out val);
+        ParamReadTracker?.Invoke(param.Type, sectionId, found ? (object)val : null, found ? "base" : "default");
+        return found;
     }
 
     /// <summary>Tries to get the value of the parameter. If it is present, returns true and outputs the value. If it is not present, returns false.</summary>
     public bool TryGetRaw(T2IParamType param, out object val)
     {
         ParamsQueried.Add(param.ID);
-        return InternalSet.TryGetRaw(param, out val);
+        bool found = InternalSet.TryGetRaw(param, out val);
+        ParamReadTracker?.Invoke(param, 0, found ? val : null, found ? "base" : "default");
+        return found;
     }
 
     /// <summary>Sets the value of an input parameter to a given plaintext input. Will run the 'Clean' call if needed.</summary>
