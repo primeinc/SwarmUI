@@ -7,6 +7,7 @@ import unittest
 import torch
 
 from inpaint_cropandstitch import InpaintCropImproved, InpaintStitchImproved
+from test_qwen_segment_mask_guard import get_real_node
 
 
 class CropReplacementTests(unittest.TestCase):
@@ -15,11 +16,23 @@ class CropReplacementTests(unittest.TestCase):
         source[:, 30:66, 30:66] = 0.0  # original dark rectangular subject
         mask = torch.zeros((1, 96, 96), dtype=torch.float32)
         mask[:, 30:66, 30:66] = 1.0
+        # Exercise the ACTUAL Swarm guard before the native threshold and the
+        # unchanged upstream crop/stitch. No Qwen weights or GPU are needed to
+        # execute and falsify this pixel-compositor contract.
+        detector_confidence = mask * 0.6
+        guard = get_real_node()
+        validated, = guard.validate(detector_confidence, minimum_confidence=0.5)
+        self.assertIs(validated, detector_confidence)
+        with self.assertRaises(ValueError):
+            guard.validate(mask * 0.2, minimum_confidence=0.5)
+        # Comfy-Org/ComfyUI ThresholdMask.execute uses (mask > value).float().
+        solid_mask = (validated > 0.5).float()
+        self.assertEqual(torch.count_nonzero(solid_mask).item(), 36 * 36)
 
         crop = InpaintCropImproved()
         stitch = InpaintStitchImproved()
         args = dict(
-            image=source, mask=mask,
+            image=source, mask=solid_mask,
             downscale_algorithm="bilinear", upscale_algorithm="bicubic",
             preresize=False, preresize_mode="ensure minimum resolution",
             preresize_min_width=1024, preresize_min_height=1024,
@@ -51,7 +64,7 @@ class CropReplacementTests(unittest.TestCase):
         # fractional confidence is fed directly into its mask input.
         # Contrast the native adapter with the unthresholded 0.6 mask to
         # establish that thresholding is necessary, not cosmetic.
-        soft_mask = mask * 0.6
+        soft_mask = detector_confidence
         soft_stitcher, soft_image, _ = crop.inpaint_crop(
             **{**args, "mask": soft_mask})[:3]
         soft_result = stitch.inpaint_stitch(
