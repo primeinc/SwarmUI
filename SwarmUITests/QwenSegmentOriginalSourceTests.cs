@@ -48,6 +48,28 @@ public class QwenSegmentOriginalSourceTests
             prompt, isQwen21, isSingleImage, hasExplicitSource), Is.EqualTo(expectOriginal));
     }
 
+    [Test]
+    public void OrdinaryInitImageWorkflowMustKeepExistingResizeBehavior()
+    {
+        if (T2IParamTypes.InitImage is null)
+        {
+            T2IParamTypes.RegisterDefaults();
+        }
+        using var pixels = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(128, 128);
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.InitImage, new SwarmUI.Utils.Image(pixels));
+        Assert.That(T2IParamTypes.InitImage.Type.ImageShouldResize, Is.True);
+        Newtonsoft.Json.Linq.JObject graph = new()
+        {
+            ["4"] = new Newtonsoft.Json.Linq.JObject
+            {
+                ["class_type"] = "LoadImage",
+                ["inputs"] = new Newtonsoft.Json.Linq.JObject { ["image"] = "${initimage}" }
+            }
+        };
+        Assert.That(ComfyUIAPIAbstractBackend.ShouldPreserveQwenOriginalInitUpload(graph, input), Is.False);
+    }
+
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1)]
@@ -178,6 +200,8 @@ public class QwenSegmentOriginalSourceTests
             Features = useBase64Images ? new() { "comfy_loadimage_b64" } : new()
         };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
+        Assert.That(ComfyUIAPIAbstractBackend.ShouldPreserveQwenOriginalInitUpload(graph, input),
+            Is.EqualTo(hasInitImage), "Native Qwen Init Image must bypass external canvas resampling");
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
         if (batchSize > 1)
         {
