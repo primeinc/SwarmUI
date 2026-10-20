@@ -6,6 +6,7 @@ live ComfyUI loading, real GPU inference, or semantic subject replacement.
 from pathlib import Path
 import hashlib
 import json
+import re
 import unittest
 
 
@@ -102,6 +103,21 @@ class NativeQwenBundleTest(unittest.TestCase):
             edge_to("LanPaint_KSampler", "latent_image")[1],
             nodes["TextEncodeQwenImage21"]["id"]
         )
+
+    def test_crop_and_stitch_native_required_inputs_are_supplied(self):
+        upstream = (CROP_PLUGIN / "inpaint_cropandstitch.py").read_text()
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        crop_schema = upstream[upstream.index("class InpaintCropImproved:"):
+                               upstream.index("class InpaintStitchImproved:")]
+        required = crop_schema.split('"required": {', 1)[1].split('"optional": {', 1)[0]
+        required_names = re.findall(r'^\\s+"([a-z_]+)": \\(', required, re.MULTILINE)
+        self.assertGreater(len(required_names), 20)
+        crop_inputs = steps.split('JObject cropInputs = new()', 1)[1].split('};', 1)[0]
+        for field in required_names:
+            self.assertIn('["' + field + '"] = ', crop_inputs, field)
+        # Stitch's two mandatory inputs must reach the native class unchanged.
+        self.assertIn('["stitcher"] = cropStitcher', steps)
+        self.assertIn('["inpainted_image"] = stitchInput', steps)
 
     def test_masked_sampler_required_native_inputs_are_supplied(self):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
