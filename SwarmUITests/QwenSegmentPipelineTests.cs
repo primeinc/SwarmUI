@@ -124,19 +124,24 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(lora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(lora.Value["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
 
-        JProperty diagnostic = Nodes(g, "SwarmQwen21SegmentDiagnostics").Single();
-        Assert.That(diagnostic.Value["inputs"]!["generated"], Is.Not.Null);
-        Assert.That(diagnostic.Value["inputs"]!["source"], Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
-        Assert.That(diagnostic.Value["inputs"]!["prompt"]!.Value<string>()!.Trim(), Is.EqualTo("make the face blue"));
-        Assert.That(diagnostic.Value["inputs"]!["mode"]!.Value<string>(), Is.EqualTo("Reference Edit"));
+        JProperty[] diagnostics = Nodes(g, "SwarmQwen21SegmentDiagnostics");
+        Assert.That(diagnostics, Has.Length.EqualTo(2));
+        JProperty preDiagnostic = diagnostics.Single(p => p.Value["inputs"]!["mode"]!.Value<string>() == "Reference Edit");
+        Assert.That(preDiagnostic.Value["inputs"]!["generated"], Is.Not.Null);
+        Assert.That(preDiagnostic.Value["inputs"]!["source"], Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
+        Assert.That(preDiagnostic.Value["inputs"]!["prompt"]!.Value<string>()!.Trim(), Is.EqualTo("make the face blue"));
 
         JProperty splitAlpha = Nodes(g, "SplitImageWithAlpha").Single();
-        Assert.That(splitAlpha.Value["inputs"]!["image"], Is.EqualTo(new JArray(diagnostic.Name, 0)));
+        Assert.That(splitAlpha.Value["inputs"]!["image"], Is.EqualTo(new JArray(preDiagnostic.Name, 0)));
         JProperty scaleBack = Nodes(g, "ImageScale").Last();
         Assert.That(scaleBack.Value["inputs"]!["image"], Is.EqualTo(new JArray(splitAlpha.Name, 0)));
         JProperty composite = Nodes(g, "SwarmImageCompositeMaskedColorCorrecting").Single();
         Assert.That(composite.Value["inputs"]!["source"], Is.EqualTo(new JArray(scaleBack.Name, 0)));
-        Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(composite.Name, 0)));
+
+        JProperty postDiagnostic = diagnostics.Single(p => p.Value["inputs"]!["mode"]!.Value<string>() == "Post Composite / Reference Edit");
+        Assert.That(postDiagnostic.Value["inputs"]!["source"], Is.EqualTo(new JArray("base-image", 0)));
+        Assert.That(postDiagnostic.Value["inputs"]!["generated"], Is.EqualTo(new JArray(composite.Name, 0)));
+        Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(postDiagnostic.Name, 0)));
     }
 
     [Test]
@@ -192,7 +197,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
         Assert.That(Nodes(g, "DifferentialDiffusion"), Has.Length.EqualTo(1));
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
-        Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(1));
+        Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(2));
     }
 
     [Test]
@@ -201,7 +206,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         WorkflowGenerator g = Prepare(secondSegment: true);
         RunSegment(g);
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(2));
-        Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(4));
 
         JProperty[] encoders = Nodes(g, "SwarmQwenImage21SegmentEncode");
         Assert.That(encoders.Select(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim()), Is.EquivalentTo(new[] { "make the face blue", "make the hair red" }));
