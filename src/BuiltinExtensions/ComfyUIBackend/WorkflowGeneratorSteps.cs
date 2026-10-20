@@ -1973,12 +1973,33 @@ public class WorkflowGeneratorSteps
                     int blurAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskBlur, 10);
                     if (blurAmt > 0)
                     {
-                        segmentNode = g.CreateNode("SwarmMaskBlur", new JObject()
+                        if (g.IsQwenImage21())
                         {
-                            ["mask"] = NodePath(segmentNode, 0),
-                            ["blur_radius"] = blurAmt,
-                            ["sigma"] = 1
-                        });
+                            string maskImage = g.CreateNode("MaskToImage", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0)
+                            });
+                            string blurred = g.CreateNode("ImageBlur", new JObject()
+                            {
+                                ["image"] = NodePath(maskImage, 0),
+                                ["blur_radius"] = Math.Min(blurAmt, 31),
+                                ["sigma"] = 1.0
+                            });
+                            segmentNode = g.CreateNode("ImageToMask", new JObject()
+                            {
+                                ["image"] = NodePath(blurred, 0),
+                                ["channel"] = "red"
+                            });
+                        }
+                        else
+                        {
+                            segmentNode = g.CreateNode("SwarmMaskBlur", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0),
+                                ["blur_radius"] = blurAmt,
+                                ["sigma"] = 1
+                            });
+                        }
                     }
                     int growAmt = g.UserInput.Get(T2IParamTypes.SegmentMaskGrow, 16);
                     if (growAmt > 0)
