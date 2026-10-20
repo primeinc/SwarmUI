@@ -651,9 +651,9 @@ public partial class WorkflowGenerator
             maskForBounds = mask;
         }
         string targetRes = UserInput.Get(T2IParamTypes.SegmentTargetResolution, "0x0");
-        (string targetWidth, string targetHeight) = targetRes.BeforeAndAfter('x');
-        int targetX = int.Parse(targetWidth);
-        int targetY = int.Parse(targetHeight);
+        (string targetWidthText, string targetHeightText) = targetRes.BeforeAndAfter('x');
+        int targetX = int.Parse(targetWidthText);
+        int targetY = int.Parse(targetHeightText);
         bool isCustomRes = targetX > 0 && targetY > 0;
         string boundsNode = CreateNode("SwarmMaskBounds", new JObject()
         {
