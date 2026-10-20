@@ -67,6 +67,13 @@ public class QwenSegmentPipelineTests : SwarmUITest
         };
         T2IParamInput input = new(null);
         input.Set(T2IParamTypes.Model, model);
+        if (qwen)
+        {
+            T2IModel qwenClip = new(null, "/fixture", "/fixture/qwen3vl_8b_int8_convrot.safetensors", "qwen3vl_8b_int8_convrot.safetensors");
+            T2IModel qwenVae = new(null, "/fixture", "/fixture/qwen_image_2.1_vae_bf16.safetensors", "qwen_image_2.1_vae_bf16.safetensors");
+            input.Set(T2IParamTypes.QwenModel, qwenClip);
+            input.Set(T2IParamTypes.VAE, qwenVae);
+        }
         input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
         input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
         Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001));
@@ -167,7 +174,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
     {
         WorkflowGenerator g = Prepare();
         g.UserInput.Set(T2IParamTypes.SegmentModel, g.FinalLoadedModel);
-        g.NodeHelpers["modelloader_model.safetensors_Refiner"] = "base-model:0:base-clip:0:base-vae:0";
         RunSegment(g);
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Has.Length.EqualTo(1));
