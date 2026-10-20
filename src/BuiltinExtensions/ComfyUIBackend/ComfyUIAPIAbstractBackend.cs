@@ -50,16 +50,13 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         {
             return;
         }
-        HashSet<string> nativeSegmentNodes = [
-            "TextEncodeQwenImage21", "SwarmClipSeg", "SwarmYoloDetection",
-            "SwarmRequireNonEmptyMask", "ThresholdMask",
-            "InpaintCropImproved", "InpaintStitchImproved",
-            "LanPaint_ImageEncode", "LanPaint_KSampler",
-            "LanPaint_ImageDecode", "SplitImageWithAlpha"
-        ];
+        // A fixed list silently omitted the actual SwarmTextEncodeAdvanced,
+        // ReferenceLatent, VAEEncode, and dynamically emitted LoRA hook nodes.
+        // Comfy will reject ANY missing class_type, not just a familiar few.
+        // Compare the entire generated (or raw) Qwen graph with this precise
+        // backend's registered /object_info class names before any uploads.
         string[] missing = [.. usedTypes
-            .Where(type => nativeSegmentNodes.Contains(type)
-                && (availableNodeTypes is null || !availableNodeTypes.Contains(type)))
+            .Where(type => availableNodeTypes is null || !availableNodeTypes.Contains(type))
             .Distinct()
             .OrderBy(type => type)];
         if (missing.Length > 0)
