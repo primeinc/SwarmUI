@@ -141,28 +141,35 @@ def inspect_and_instrument(original):
     if "images.image_2" in encoder:
         raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
 
-    # This is the user's "Reference Edit" reproduction, not LanPaint's
-    # separate "Masked Img2Img" mode. The native Comfy Qwen encoder returns the
-    # edit latent from output 2; the stock sampler must consume EXACTLY that.
-    if any(v["class_type"] == "LanPaint_ImageEncode" and
-           v["inputs"].get("image") == masked_reference
-           for v in graph.values()):
-        raise AssertionError("Reference Edit wrongly encodes the original image as a masked latent")
+    # Segment default is actual native Qwen masked inpainting. The upstream
+    # adapter's cropped IMAGE and MASK must both reach LanPaint_ImageEncode,
+    # and its output must drive the sampler's latent input. Simply masking
+    # the final stitch is not an inpaint sampler.
+    masked_encoder_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "LanPaint_ImageEncode"
+         and v["inputs"].get("image") == masked_reference
+         and v["inputs"].get("mask") == [crop_id, 2]],
+        "upstream LanPaint masked encoder of the exact Qwen reference",
+    )
     sampler_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "KSampler"
-         and v["inputs"].get("latent_image") == [enc_id, 2]],
-        "upstream native KSampler on Qwen edit latent",
+        [k for k, v in graph.items() if v["class_type"] == "LanPaint_KSampler"
+         and v["inputs"].get("latent_image") == [masked_encoder_id, 0]],
+        "upstream LanPaint_KSampler on the MASKED latent",
     )
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", -1))
     denoise = float(sampler.get("denoise", -1))
-    # The native Qwen edit encoder emits a ZERO-FILLED latent. Reference Edit
-    # requires a full schedule, unlike masked LanPaint image-to-image.
     cfg = float(sampler.get("cfg", -1))
-    if steps != 4 or abs(denoise - 1.0) > 1e-4 or "start_at_step" in sampler:
-        raise AssertionError(f"Native Qwen empty-latent schedule broken: steps={steps}, denoise={denoise}")
+    if steps != 4 or abs(denoise - 0.8) > 1e-4 or "start_at_step" in sampler:
+        raise AssertionError(f"Native masked Qwen schedule broken: steps={steps}, denoise={denoise}")
     if abs(cfg - 1.0) > 1e-4:
-        raise AssertionError(f"Native Qwen default CFG must be 1.0, got {cfg}; the generic CFG 7 degrades Qwen 2.1")
+        raise AssertionError(f"Native Qwen CFG should be 1.0, got {cfg}")
+    if int(sampler.get("LanPaint_NumSteps", 0)) != 5:
+        raise AssertionError("LanPaint's upstream inner update schedule is missing")
+    if any(v["class_type"] == "KSampler" and
+           v["inputs"].get("latent_image") == [enc_id, 2]
+           for v in graph.values()):
+        raise AssertionError("Unmasked empty-latent sampler remains reachable in masked segment edit")
 
     stitch_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "InpaintStitchImproved"],
@@ -180,7 +187,7 @@ def inspect_and_instrument(original):
          and v["inputs"].get("samples") == [sampler_id, 0]
          and v["inputs"].get("image") == masked_reference
          and "mask" not in v["inputs"]],
-        "upstream LanPaint decoder without a second mask blend, fed by stock Qwen sampler",
+        "upstream LanPaint decoder without a second mask blend, fed by the masked Qwen sampler",
     )
     if decoder_id not in capture.upstream(graph, capture.roots(stitch_input, graph)):
         raise AssertionError("Stitch image must originate from the unmasked native decoder")
@@ -215,8 +222,8 @@ def inspect_and_instrument(original):
         "detector": detector_id, "crop_adapter": crop_id,
         "source_reference": crop_id,
         "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
-        "mode": "Reference Edit", "sampler_class": "KSampler",
-        "sampler_latent_source": [enc_id, 2],
+        "mode": "Masked Img2Img", "sampler_class": "LanPaint_KSampler",
+        "sampler_latent_source": [masked_encoder_id, 0],
         "steps": steps, "native_denoise": denoise, "effective_steps": steps,
         "expected_iterations": 4, "requested_creativity": 0.8, "cfg": cfg,
         "clipseg_threshold": 0.1,
