@@ -2345,7 +2345,11 @@ public class WorkflowGeneratorSteps
                         string requiredMask = g.CreateNode("SwarmRequireNonEmptyMask", new JObject()
                         {
                             ["mask"] = NodePath(detectedMaskNode, 0),
-                            ["minimum_confidence"] = 0.0
+                            ["minimum_confidence"] = 0.0,
+                            // Refuse nearly full-canvas detection before it
+                            // becomes an opaque replacement mask. Do not
+                            // silently change the authored CLIPSeg threshold.
+                            ["maximum_coverage"] = 0.99
                         });
                         // Native ThresholdMask converts accepted CLIPSeg confidence
                         // into an opaque subject mask. Without this, the
