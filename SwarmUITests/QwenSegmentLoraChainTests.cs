@@ -158,6 +158,44 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void NoSelectedLoRAMustStillRejectMissingSamplerModelNode()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string>());
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("missing_loader", 0), 11, false)).Message,
+            Does.Contain("missing model node"));
+    }
+
+    [Test]
+    public static void MatchingLoRAMustRejectSelfReferentialModelCycle()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["model"] = new JArray("patched", 0);
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false)).Message,
+            Does.Contain("cyclic sampler model chain"));
+    }
+
+    [Test]
+    public static void MatchingLoRAMustRejectDanglingOrAbsentUpstreamModel()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["model"] = new JArray("lost_source", 0);
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false)).Message,
+            Does.Contain("missing model node"));
+        ((JObject)g.Workflow["patched"]["inputs"]).Remove("model");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false)).Message,
+            Does.Contain("no upstream MODEL connection"));
+    }
+
+    [Test]
     public static void NoSelectedLoRAAllowsAPlainModelPath()
     {
         WorkflowGenerator g = Prepare();
