@@ -71,19 +71,21 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 2)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 2)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 2, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 2, false)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, true)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, true, 1, true)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize, bool useSegmentOverride)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -149,7 +151,32 @@ public class QwenSegmentOriginalSourceTests
         using var pixels = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(128, 128);
         var image = new SwarmUI.Utils.Image(pixels);
         T2IParamInput input = new(null);
-        input.Set(T2IParamTypes.Model, model);
+        if (useSegmentOverride)
+        {
+            // The base checkpoint is deliberately not Qwen 2.1; the effective
+            // native segment model must still choose the original photograph.
+            T2IModelClass baseClass = new()
+            {
+                ID = "stable-diffusion-v1",
+                Name = "Base SDv1",
+                CompatClass = T2IModelClassSorter.CompatSdv1,
+                StandardWidth = 512,
+                StandardHeight = 512
+            };
+            T2IModel baseModel = new(null, "/models/Stable-Diffusion",
+                "/models/Stable-Diffusion/base-test.safetensors", "base-test.safetensors")
+            {
+                ModelClass = baseClass,
+                StandardWidth = 512,
+                StandardHeight = 512
+            };
+            input.Set(T2IParamTypes.Model, baseModel);
+            input.Set(T2IParamTypes.SegmentModel, model);
+        }
+        else
+        {
+            input.Set(T2IParamTypes.Model, model);
+        }
         input.Set(T2IParamTypes.VAE, vae);
         input.Set(T2IParamTypes.QwenModel, clip);
         if (hasInitImage)
