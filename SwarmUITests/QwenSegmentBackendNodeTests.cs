@@ -98,6 +98,51 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     }
 
     [Test]
+    public static void StaleExternalSwarmTextSchemaRejectsIndependentQwenReferences()
+    {
+        JObject graph = NativeGraph();
+        graph["vision"] = Node("SwarmTextEncodeAdvanced");
+        JObject inputs = (JObject)graph["vision"]["inputs"];
+        inputs["image_1"] = new JArray("crop", 1);
+        inputs["image_2"] = new JArray("extra", 0);
+
+        // Older SwarmText has the legacy IMAGE batch input and the correct
+        // class name, but lacks both independent Qwen image_N sockets.
+        JObject oldBackend = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject
+                    {
+                        ["images"] = new JArray("IMAGE")
+                    }
+                }
+            }
+        };
+        SwarmUserErrorException first = Assert.Throws<SwarmUserErrorException>(
+            () => ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(
+                graph, oldBackend));
+        Assert.That(first.Message, Does.Contain("image_1"));
+        Assert.That(first.Message, Does.Contain("THIS backend"));
+
+        JObject optional = (JObject)oldBackend["SwarmTextEncodeAdvanced"]["input"]["optional"];
+        optional["image_1"] = new JArray("IMAGE");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, oldBackend))
+            .Message, Does.Contain("image_2"));
+
+        optional["image_2"] = new JArray("IMAGE");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, oldBackend));
+        // The preexisting single-reference batch input remains compatible.
+        graph["vision"]["inputs"] = new JObject { ["images"] = new JArray("crop", 1) };
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, new JObject()));
+    }
+
+    [Test]
     public static void ReferenceEditDoesNotRequireLanPaintSamplerWhenNotUsed()
     {
         JObject graph = NativeGraph();
