@@ -75,6 +75,28 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, new HashSet<string>()));
     }
 
+    [TestCase("SwarmTextEncodeAdvanced")]
+    [TestCase("ReferenceLatent")]
+    [TestCase("VAEEncode")]
+    [TestCase("ImageBatch")]
+    [TestCase("GetImageSize")]
+    public static void MissingConditioningOrReferenceNodesFailBeforeInference(string missingClass)
+    {
+        JObject graph = NativeGraph();
+        graph["extra"] = Node(missingClass);
+        HashSet<string> available = [
+            "InpaintCropImproved", "TextEncodeQwenImage21",
+            "SwarmRequireNonEmptyMask", "ThresholdMask",
+            "LanPaint_KSampler", "InpaintStitchImproved", "SaveImage"
+        ];
+        Assert.That(
+            Assert.Throws<SwarmUserErrorException>(() =>
+                ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, available))
+            .Message, Does.Contain(missingClass));
+        available.Add(missingClass);
+        Assert.DoesNotThrow(() => ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, available));
+    }
+
     [Test]
     public static void ReferenceEditDoesNotRequireLanPaintSamplerWhenNotUsed()
     {
