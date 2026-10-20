@@ -132,8 +132,10 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
         JProperty splitAlpha = Nodes(g, "SplitImageWithAlpha").Single();
         Assert.That(splitAlpha.Value["inputs"]!["image"], Is.EqualTo(new JArray(diagnostic.Name, 0)));
+        JProperty scaleBack = Nodes(g, "ImageScale").Last();
+        Assert.That(scaleBack.Value["inputs"]!["image"], Is.EqualTo(new JArray(splitAlpha.Name, 0)));
         JProperty composite = Nodes(g, "SwarmImageCompositeMaskedColorCorrecting").Single();
-        Assert.That(composite.Value["inputs"]!["source"], Is.EqualTo(new JArray(splitAlpha.Name, 0)));
+        Assert.That(composite.Value["inputs"]!["source"], Is.EqualTo(new JArray(scaleBack.Name, 0)));
         Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray(composite.Name, 0)));
     }
 
