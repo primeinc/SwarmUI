@@ -1,5 +1,8 @@
 """Real CPU-tensor checks of the Swarm mask guard, including a negative control."""
 from pathlib import Path
+import ast
+import numpy as np
+from PIL import Image
 import importlib.util
 import sys
 import types
@@ -23,6 +26,49 @@ def get_real_node():
     with patch.dict(sys.modules, {"comfy": module}):
         spec.loader.exec_module(loaded)
     return loaded.SwarmRequireNonEmptyMask()
+
+
+def actual_clipseg_with_controlled_logits():
+    """Execute the shipped SwarmClipSeg.seg, replacing only model logits.
+
+    This is a negative detector-mask contract test, NOT model inference.
+    A controlled weak background response exposes the normalization that can
+    produce almost whole-canvas positive support after authored thresholding.
+    """
+    source_path = (Path(__file__).resolve().parents[1] /
+                   "src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmClipSeg.py")
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    klass = next(n for n in tree.body
+                 if isinstance(n, ast.ClassDef) and n.name == "SwarmClipSeg")
+
+    class ProbeProcessor:
+        @classmethod
+        def from_pretrained(cls, _path):
+            return cls()
+
+        def __call__(self, **_kwargs):
+            return {}
+
+    class ControlledLogits:
+        @classmethod
+        def from_pretrained(cls, _path):
+            return cls()
+
+        def __call__(self, **_kwargs):
+            probabilities = torch.linspace(0.2, 0.4, 64).reshape(8, 8)
+            probabilities[2:6, 2:6] = 0.95
+            return [torch.logit(probabilities)]
+
+    bindings = {
+        "np": np, "torch": torch, "Image": Image,
+        "get_path": lambda: "/no-network",
+        "download_model": lambda *_args: None,
+        "CLIPSegProcessor": ProbeProcessor,
+        "CLIPSegForImageSegmentation": ControlledLogits,
+    }
+    exec(compile(ast.Module(body=[klass], type_ignores=[]),
+                 str(source_path), "exec"), bindings)
+    return bindings["SwarmClipSeg"]()
 
 
 class MaskGuardTests(unittest.TestCase):
@@ -125,6 +171,19 @@ class MaskGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.node.validate(mask, minimum_confidence=0.0,
                                    maximum_coverage=invalid)
+
+    def test_real_clipseg_postprocess_near_full_support_is_rejected(self):
+        # This executes shipped SwarmClipSeg.seg normalization against known
+        # detector logits. It does NOT pretend to detect a real subject.
+        # At authored threshold 0.1, weak background scores survive and the
+        # native ThresholdMask(value=0) would make them opaque.
+        image = torch.zeros((1, 128, 128, 3), dtype=torch.float32)
+        (detected,) = actual_clipseg_with_controlled_logits().seg(image, "girl", 0.1)
+        coverage = float((detected > 0).float().mean())
+        self.assertGreater(coverage, 0.99,
+                           "The positive-control postprocess no longer exposes broad support")
+        with self.assertRaisesRegex(ValueError, "nearly the entire source canvas"):
+            self.node.validate(detected, minimum_confidence=0.0, maximum_coverage=0.99)
 
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
