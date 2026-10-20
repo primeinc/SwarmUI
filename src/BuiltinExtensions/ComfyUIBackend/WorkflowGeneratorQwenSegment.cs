@@ -25,8 +25,7 @@ public partial class WorkflowGenerator
         {
             throw new SwarmUserErrorException("Qwen segment edit requires an instruction or replacement description.");
         }
-        bool hasSwarmWeightMarkup = raw.Contains("<weight[", StringComparison.OrdinalIgnoreCase);
-        if (!hasSwarmWeightMarkup && text.Any(char.IsWhiteSpace))
+        if (text.Any(char.IsWhiteSpace))
         {
             // "Give the girl blue eyes" must not become "Replace ... with Give ...".
             // Descriptive multiword phrases are also left untouched rather than
