@@ -95,9 +95,18 @@ def inspect_and_instrument(original):
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", 0))
     actual_start = int(sampler.get("start_at_step", -1))
-    if not steps or abs(actual_start - round(steps * 0.2)) > 1:
+    # This case is specifically the user's FOUR-step Turbo configuration.
+    # The old bug incorrectly executed only 3/4 iterations: steps=4, start=1.
+    # ComfyUI's partial-denoise contract now schedules five and starts at one,
+    # retaining all four requested model evaluations.
+    expected_iterations = 4
+    effective_iterations = steps - actual_start
+    if effective_iterations != expected_iterations:
         raise AssertionError(
-            f"0.8 creativity should preserve about 80% of steps: steps={steps}, start={actual_start}"
+            f"QWEN SEGMENT STEP REGRESSION: base requested {expected_iterations} "
+            f"denoising iterations but segment will execute {effective_iterations} "
+            f"(scheduled_steps={steps}, start_at_step={actual_start}). "
+            "Do not run costly GPU inference against a truncated 4-step LoRA schedule."
         )
     for node_id in NODE_IDS.values():
         if node_id in graph:
@@ -119,7 +128,8 @@ def inspect_and_instrument(original):
     return graph, {"detector": detector_id, "encoder": enc_id,
                    "sampler": sampler_id, "compositor": compositor_id,
                    "steps": steps, "start_at_step": actual_start,
-                   "effective_steps": max(0, steps - actual_start),
+                   "effective_steps": effective_iterations,
+                   "expected_iterations": expected_iterations,
                    "creativity": 0.8, "clipseg_threshold": 0.1}
 
 
