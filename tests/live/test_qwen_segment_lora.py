@@ -94,8 +94,11 @@ class ComfyClient:
                 continue
             history = response[prompt_id]
             status = history.get("status", {})
-            if status.get("status_str") != "success" or status.get("completed") is False:
+            if status.get("status_str") == "error":
                 raise AssertionError(f"{label}: Comfy execution failed: {status}")
+            if status.get("status_str") != "success" or status.get("completed") is not True:
+                time.sleep(1)
+                continue
             images = history.get("outputs", {}).get(_OUTPUT, {}).get("images", [])
             if len(images) != 1:
                 raise AssertionError(f"{label}: expected one Comfy saved image; got {images}")
