@@ -84,6 +84,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         g.CreateNode("VAELoader", new JObject() { ["vae_name"] = "vae.safetensors" }, "base-vae");
         g.CreateNode("LoadImage", new JObject() { ["image"] = "fixed-base.png" }, "base-image");
         g.CurrentModel = new(["base-model", 0], g, WGNodeData.DT_MODEL, compat);
+        if (qwen)
+        {
+            // Synthetic fixture has no real CreateModelLoader call, so model-load anchor == base model.
+            g.LoadedModelLoraAnchors["base-model:0"] = new JArray("base-model", 0);
+        }
         g.CurrentTextEnc = new(["base-clip", 0], g, WGNodeData.DT_TEXTENC, compat);
         g.CurrentVae = new(["base-vae", 0], g, WGNodeData.DT_VAE, compat);
         g.CurrentMedia = new(["base-image", 0], g, WGNodeData.DT_IMAGE, compat);
@@ -228,6 +233,44 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(firstModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
         Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
+    }
+
+    [Test]
+    public void ScopedQwenLoraIsInsertedInsideExistingWrappersWithoutMutatingBaseChain()
+    {
+        WorkflowGenerator g = Prepare();
+        string compile = g.CreateNode("TorchCompileModel", new JObject()
+        {
+            ["model"] = new JArray("base-model", 0),
+            ["backend"] = "inductor"
+        });
+        string outer = g.CreateNode("DifferentialDiffusion", new JObject()
+        {
+            ["model"] = new JArray(compile, 0)
+        });
+        g.LoadedModelLoraAnchors[$"{compile}:0"] = new JArray("base-model", 0);
+
+        (JArray variant, JArray clip) = g.LoadLorasForConfinementInsideWrappers(11, new JArray(outer, 0), new JArray("base-clip", 0));
+
+        JObject outerClone = (JObject)g.Workflow[variant[0]!.ToString()]!;
+        Assert.That(outerClone["class_type"]!.Value<string>(), Is.EqualTo("DifferentialDiffusion"));
+        JArray compiledPath = (JArray)outerClone["inputs"]!["model"]!;
+        JObject compileClone = (JObject)g.Workflow[compiledPath[0]!.ToString()]!;
+        Assert.That(compileClone["class_type"]!.Value<string>(), Is.EqualTo("TorchCompileModel"));
+        JArray loraPath = (JArray)compileClone["inputs"]!["model"]!;
+        JObject lora = (JObject)g.Workflow[loraPath[0]!.ToString()]!;
+        Assert.That(lora["class_type"]!.Value<string>(), Is.EqualTo("LoraLoaderModelOnly"));
+        Assert.That(lora["inputs"]!["model"], Is.EqualTo(new JArray("base-model", 0)));
+        Assert.That(lora["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
+        Assert.That(lora["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
+        Assert.That(clip, Is.EqualTo(new JArray("base-clip", 0)));
+
+        // Original shared model chain must remain untouched for the base pass.
+        Assert.That(g.Workflow[compile]!["inputs"]!["model"], Is.EqualTo(new JArray("base-model", 0)));
+        Assert.That(g.Workflow[outer]!["inputs"]!["model"], Is.EqualTo(new JArray(compile, 0)));
+
+        (JArray cached, _) = g.LoadLorasForConfinementInsideWrappers(11, new JArray(outer, 0), new JArray("base-clip", 0));
+        Assert.That(cached, Is.EqualTo(variant), "Repeated use of the same section/model chain should reuse its scoped variant.");
     }
 
     [Test]
