@@ -19,6 +19,8 @@ jobs:
           env:
             SWARM_QWEN_EXPORT_GRAPH: /tmp/swarm-qwen-production-graph.json
           run: bash ./launchtools/run_tests.sh
+        - name: Exercise native Qwen empty-negative tokenizer flags (CPU, NOT inference)
+          run: python3 -m unittest discover -s tests -p test_qwen21_empty_token_cpu.py -v
         - name: Validate actual generated Qwen graph with no-model Python acceptance preflight
           run: |
             test -s /tmp/swarm-qwen-production-graph.json
