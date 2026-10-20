@@ -39,6 +39,15 @@ public partial class WorkflowGenerator
             ["negative_prompt"] = negativePrompt ?? "",
             ["use_original_reference"] = useOriginalReference
         };
+        // Match WGNodeData.EncodeToLatent's VAE tiling contract for reference images.
+        // The source crop and each optional reference use the same encoding mode.
+        if (UserInput.TryGet(T2IParamTypes.VAETileSize, out _) || UserInput.TryGet(T2IParamTypes.VAETemporalTileSize, out _))
+        {
+            encoderInputs["reference_tile_size"] = UserInput.Get(T2IParamTypes.VAETileSize, 256);
+            encoderInputs["reference_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETileOverlap, 64);
+            encoderInputs["reference_temporal_tile_size"] = UserInput.Get(T2IParamTypes.VAETemporalTileSize, 32);
+            encoderInputs["reference_temporal_tile_overlap"] = UserInput.Get(T2IParamTypes.VAETemporalTileOverlap, 4);
+        }
         // Qwen supports sixteen individual references; the segment crop consumes one
         // when enabled. Keep every optional prompt image in its own native vision slot.
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out System.Collections.Generic.List<Image> referenceImages)
