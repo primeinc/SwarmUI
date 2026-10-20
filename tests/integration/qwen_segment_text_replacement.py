@@ -101,12 +101,25 @@ def inspect_and_instrument(original):
             "Refusing costly GPU generation on a known-bad graph."
         )
     crop_id = capture.link(encoder.get("images.image_1"), graph)
-    if crop_id is None or graph[crop_id]["class_type"] != "SwarmImageScaleForMP":
-        raise AssertionError("Native Qwen vision input must come from the detected, scaled segment crop")
+    if crop_id is None or graph[crop_id]["class_type"] != "ImageScaleToTotalPixels":
+        raise AssertionError("Native Qwen vision input must come from upstream ImageScaleToTotalPixels of the detected crop")
     raw_crop_ref = graph[crop_id]["inputs"].get("image")
     raw_crop_id = capture.link(raw_crop_ref, graph)
-    if raw_crop_id is None or graph[raw_crop_id]["class_type"] not in ("ImageCrop", "SwarmImageCrop"):
-        raise AssertionError("Segment crop preview is not connected to the actual cropped source image")
+    if raw_crop_id is None or graph[raw_crop_id]["class_type"] != "ImageCrop":
+        raise AssertionError("Segment crop preview must use native ImageCrop from the actual source image")
+    native_crop = graph[raw_crop_id]["inputs"]
+    bounds_id = capture.link(native_crop.get("x"), graph)
+    if bounds_id is None or graph[bounds_id]["class_type"] != "SwarmMaskBounds":
+        raise AssertionError("Crop must use actual segment mask bounds, not full image coordinates")
+    # Bounds must not come from the blurred/grown compositor mask. Otherwise
+    # background confidence gets spread across the frame and the preview zooms out.
+    hard_mask = capture.link(graph[bounds_id]["inputs"].get("mask"), graph)
+    if hard_mask is None or graph[hard_mask]["class_type"] != "ThresholdMask":
+        raise AssertionError("Crop bounds must use native ThresholdMask on raw CLIPSeg detection")
+    if capture.link(graph[hard_mask]["inputs"].get("mask"), graph) != detector_id:
+        raise AssertionError("Crop bounds derive from blurred/grown mask instead of raw detector")
+    if abs(float(graph[hard_mask]["inputs"].get("value", 0)) - 0.5) > 1e-6:
+        raise AssertionError("Crop bounds threshold must reject low-confidence background")
 
     sampler_id = require_single(
         [k for k, v in graph.items()
