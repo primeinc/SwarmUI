@@ -389,6 +389,25 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
+    public void NativeQwenSegmentPassesDynamicLoraHooksIntoRealEncoder()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.DynamicLoraIndices.Add(0);
+        g.UserInput.Set(T2IParamTypes.Prompt,
+            "base scene <segment:face,1,0.8//cid=11>portrait <lora:face//hook=0> <fromto[0.5]:first,second>");
+        RunSegment(g);
+
+        JProperty encoder = Nodes(g, "SwarmQwenImage21SegmentEncode").Single();
+        JProperty hooks = Nodes(g, "CreateHookLora").Single();
+        Assert.That(encoder.Value["inputs"]!["lora_hooks"], Is.EqualTo(new JArray(hooks.Name, 0)),
+            "The scoped dynamic adapter must reach Qwen's actual text encoder instead of being excluded from static loading and dropped.");
+        Assert.That(encoder.Value["inputs"]!["steps"]!.Value<int>(), Is.EqualTo(20),
+            "Scheduled prompt tags require the segment's real sampling step count.");
+        Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty,
+            "Dynamic LoRAs must be applied as scheduled hooks, not loaded as static section LoRAs.");
+    }
+
+    [Test]
     public void ZeroCreativityStillSavesRequestedSegmentMask()
     {
         WorkflowGenerator g = Prepare(creativity: 0);
