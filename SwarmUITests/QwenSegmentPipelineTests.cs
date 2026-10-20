@@ -15,6 +15,8 @@ public class QwenSegmentPipelineTests : SwarmUITest
 {
     private T2IModelHandler priorLoras;
     private bool priorHashSetting;
+    private bool hadPriorQwen21VaeInfo;
+    private CommonModels.ModelInfo priorQwen21VaeInfo;
 
     [OneTimeSetUp]
     public void Initialize()
@@ -28,6 +30,28 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
+        // Scoped-Qwen tests reload the model through the full Comfy model-generation pipeline.
+        // Initialize every extension param that pipeline reads while leaving each feature at its default/off state.
+        ComfyUIBackendExtension.SetClipDevice ??= new(new T2IParamType("Set CLIP Device", "", "cpu", ID: "setclipdevice"));
+        ComfyUIBackendExtension.SelfAttentionGuidanceScale ??= new(new T2IParamType("Self-Attention Guidance Scale", "", "0.5", ID: "selfattentionguidancescale"));
+        ComfyUIBackendExtension.SelfAttentionGuidanceSigmaBlur ??= new(new T2IParamType("Self-Attention Guidance Sigma Blur", "", "2", ID: "selfattentionguidancesigmablur"));
+        ComfyUIBackendExtension.PerturbedAttentionGuidanceScale ??= new(new T2IParamType("Perturbed Attention Guidance Scale", "", "3", ID: "perturbedattentionguidancescale"));
+        ComfyUIBackendExtension.RescaleCFGMultiplier ??= new(new T2IParamType("Rescale CFG Multiplier", "", "0.7", ID: "rescalecfgmultiplier"));
+        ComfyUIBackendExtension.RenormCFG ??= new(new T2IParamType("Renorm CFG", "", "0", ID: "renormcfg"));
+        ComfyUIBackendExtension.UseCfgZeroStar ??= new(new T2IParamType("Use CFG Zero Star", "", "false", ID: "usecfgzerostar"));
+        ComfyUIBackendExtension.UseTCFG ??= new(new T2IParamType("Use TCFG", "", "false", ID: "usetcfg"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceScale ??= new(new T2IParamType("Normalized Attention Guidance Scale", "", "0", ID: "normalizedattentionguidancescale"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceAlpha ??= new(new T2IParamType("Normalized Attention Guidance Alpha", "", "0.5", ID: "normalizedattentionguidancealpha"));
+        ComfyUIBackendExtension.NormalizedAttentionGuidanceTau ??= new(new T2IParamType("Normalized Attention Guidance Tau", "", "1.5", ID: "normalizedattentionguidancetau"));
+        ComfyUIBackendExtension.TeaCacheMode ??= new(new T2IParamType("TeaCache Mode", "", "disabled", ID: "teacachemode"));
+        ComfyUIBackendExtension.TeaCacheThreshold ??= new(new T2IParamType("TeaCache Threshold", "", "0.25", ID: "teacachethreshold"));
+        ComfyUIBackendExtension.TeaCacheStart ??= new(new T2IParamType("TeaCache Start", "", "0", ID: "teacachestart"));
+        ComfyUIBackendExtension.EasyCacheMode ??= new(new T2IParamType("EasyCache Mode", "", "disabled", ID: "easycachemode"));
+        ComfyUIBackendExtension.EasyCacheThreshold ??= new(new T2IParamType("EasyCache Threshold", "", "0", ID: "easycachethreshold"));
+        ComfyUIBackendExtension.EasyCacheStart ??= new(new T2IParamType("EasyCache Start", "", "0", ID: "easycachestart"));
+        ComfyUIBackendExtension.EasyCacheEnd ??= new(new T2IParamType("EasyCache End", "", "1", ID: "easycacheend"));
+        ComfyUIBackendExtension.ModelAttentionBackend ??= new(new T2IParamType("Model Attention Backend", "", "pytorch attention", ID: "modelattentionbackend"));
+        ComfyUIBackendExtension.UseSparseAttention ??= new(new T2IParamType("Use Sparse Attention", "", "None", ID: "usesparseattention"));
     }
 
     [SetUp]
@@ -36,6 +60,15 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Program.T2IModelSets.TryGetValue("LoRA", out priorLoras);
         priorHashSetting = Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash;
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = false;
+        hadPriorQwen21VaeInfo = CommonModels.Known.TryGetValue("qwen-image-2.1-vae", out priorQwen21VaeInfo);
+        CommonModels.Known["qwen-image-2.1-vae"] = new(
+            "qwen-image-2.1-vae",
+            "Qwen Image 2.1 VAE",
+            "test fixture",
+            "https://example.invalid/qwen_image_2.1_vae_bf16.safetensors",
+            new string('0', 64),
+            "VAE",
+            "QwenImage/qwen_image_2.1_vae_bf16.safetensors");
         T2IModelHandler handler = new() { ModelType = "LoRA" };
         foreach (string name in new[] { "face.safetensors", "hair.safetensors" })
         {
@@ -56,6 +89,14 @@ public class QwenSegmentPipelineTests : SwarmUITest
             Program.T2IModelSets["LoRA"] = priorLoras;
         }
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = priorHashSetting;
+        if (hadPriorQwen21VaeInfo)
+        {
+            CommonModels.Known["qwen-image-2.1-vae"] = priorQwen21VaeInfo;
+        }
+        else
+        {
+            CommonModels.Known.TryRemove("qwen-image-2.1-vae", out _);
+        }
     }
 
     private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false)
@@ -67,6 +108,13 @@ public class QwenSegmentPipelineTests : SwarmUITest
         };
         T2IParamInput input = new(null);
         input.Set(T2IParamTypes.Model, model);
+        if (qwen)
+        {
+            T2IModel qwenClip = new(null, "/fixture", "/fixture/qwen3vl_8b_int8_convrot.safetensors", "qwen3vl_8b_int8_convrot.safetensors");
+            T2IModel qwenVae = new(null, "/fixture", "/fixture/qwen_image_2.1_vae_bf16.safetensors", "qwen_image_2.1_vae_bf16.safetensors");
+            input.Set(T2IParamTypes.QwenModel, qwenClip);
+            input.Set(T2IParamTypes.VAE, qwenVae);
+        }
         input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
         input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
         Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001));
@@ -115,10 +163,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
         Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
-        JProperty[] vaeEncodes = Nodes(g, "VAEEncode");
-        JProperty plainCropEncode = vaeEncodes.Single(p => p.Value["inputs"]!["pixels"] is JArray pixels
-            && JToken.DeepEquals(pixels, new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
-        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(plainCropEncode.Name, 0)));
+        string samplerLatentNodeId = sampler.Value["inputs"]!["latent_image"]![0]!.Value<string>()!;
+        JProperty plainCropEncode = g.Workflow.Property(samplerLatentNodeId)!;
+        Assert.That(plainCropEncode.Value["class_type"]!.Value<string>(), Is.EqualTo("VAEEncode"));
+        Assert.That(plainCropEncode.Value["inputs"]!["pixels"],
+            Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(encoder.Name, 2)));
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Plain-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
@@ -181,7 +230,6 @@ public class QwenSegmentPipelineTests : SwarmUITest
     {
         WorkflowGenerator g = Prepare();
         g.UserInput.Set(T2IParamTypes.SegmentModel, g.FinalLoadedModel);
-        g.NodeHelpers["modelloader_model.safetensors_Refiner"] = "base-model:0:base-clip:0:base-vae:0";
         RunSegment(g);
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Has.Length.EqualTo(1));
@@ -227,7 +275,23 @@ public class QwenSegmentPipelineTests : SwarmUITest
         JToken secondModel = g.Workflow[samplers[1].Value["inputs"]!["model"]![0]!.Value<string>()!]!;
         Assert.That(firstModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
-        Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
+    }
+
+    [Test]
+    public void SegmentScopedLoraIsAppliedBeforeTorchCompile()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.TorchCompile, "inductor");
+        RunSegment(g);
+
+        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
+        JProperty compile = Nodes(g, "TorchCompileModel").Single();
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+
+        Assert.That(compile.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
+            "Scoped Qwen LoRA must be inside the compiled model graph, matching ordinary model-load LoRA ordering.");
+        Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(compile.Name, 0)),
+            "Segment sampler must consume the compiled model whose input already contains the confined LoRA.");
     }
 
     [Test]
