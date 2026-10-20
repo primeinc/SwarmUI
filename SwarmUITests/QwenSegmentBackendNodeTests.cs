@@ -322,4 +322,27 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         Assert.That(error.Message, Does.Contain("before image upload"));
     }
 
+    [Test]
+    public static void Qwen21TextToImageMustRejectMissing64ChannelLatentNode()
+    {
+        // Qwen 2.1 plain text-to-image has no InpaintCropImproved node,
+        // but now requires this Swarm-specific 64-channel latent generator.
+        JObject qwenTextGraph = new()
+        {
+            ["latent"] = Node("SwarmEmptyQwenImage21Latent"),
+            ["save"] = Node("SaveImage")
+        };
+        HashSet<string> unavailable = ["SaveImage"];
+        SwarmUserErrorException missing = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(qwenTextGraph, unavailable));
+        Assert.That(missing.Message, Does.Contain("SwarmEmptyQwenImage21Latent"));
+        unavailable.Add("SwarmEmptyQwenImage21Latent");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(qwenTextGraph, unavailable));
+        // Other models must not inherit Qwen-only node requirements.
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(
+                new JObject { ["save"] = Node("SaveImage") }, new HashSet<string>()));
+    }
+
 }
