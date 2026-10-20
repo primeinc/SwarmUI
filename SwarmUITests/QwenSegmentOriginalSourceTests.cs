@@ -76,6 +76,28 @@ public class QwenSegmentOriginalSourceTests
             new CommonModels.ModelInfo("qwen-image-2.1-vae", "Qwen Test VAE",
                 "Graph construction only", "https://example.invalid/qwen-vae.safetensors",
                 new string('0', 64), "VAE", "qwen-vae.safetensors"));
+        // Source-only NUnit does not initialize the application extension.
+        // Supply inert typed handles for optional extension controls so the
+        // real generator can run. Nothing is downloaded or inferred here.
+        var registry = typeof(T2IParamTypes).GetMethods(System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Static)
+            .Single(m => m.Name == "Register" && m.IsGenericMethodDefinition);
+        foreach (var field in typeof(ComfyUIBackendExtension).GetFields(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not null || !field.FieldType.IsGenericType
+                || field.FieldType.GetGenericTypeDefinition() != typeof(T2IRegisteredParam<>))
+            {
+                continue;
+            }
+            System.Type valueType = field.FieldType.GenericTypeArguments[0];
+            string defaultValue = valueType == typeof(bool) ? "false"
+                : (valueType == typeof(int) || valueType == typeof(double)) ? "0"
+                : valueType == typeof(string) ? "" : null;
+            T2IParamType registration = new("Qwen Smoke " + field.Name,
+                "Isolated workflow generator regression test handle", defaultValue);
+            field.SetValue(null, registry.MakeGenericMethod(valueType).Invoke(null, [registration]));
+        }
         T2IModelClass modelClass = new()
         {
             ID = T2IModelClassSorter.CompatQwenImage21.ID,
