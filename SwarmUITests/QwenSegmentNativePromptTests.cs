@@ -57,6 +57,10 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.False, "Do not accidentally mix the two conditioning contracts");
         Assert.That(encoders[0]["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
         Assert.That(encoders[1]["inputs"]?["prompt"]?.ToString(), Is.EqualTo(negativePrompt));
+        // Upstream TextEncodeQwenImage21 uses prevent_empty_text=True on both
+        // conditionings; this option must not rewrite either authored string.
+        Assert.That(encoders[0]["inputs"]?["qwen21_prevent_empty_text"]?.ToObject<bool>(), Is.True);
+        Assert.That(encoders[1]["inputs"]?["qwen21_prevent_empty_text"]?.ToObject<bool>(), Is.True);
         return (encoders[0], encoders[1], generator.Workflow, result.Latent);
     }
 
@@ -103,6 +107,15 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt));
         Assert.That(negative["inputs"]?["prompt"]?.ToString(), Is.EqualTo(prompt + " negative"));
         Assert.That(positive["inputs"]?["steps"]?.ToObject<int>(), Is.EqualTo(4));
+    }
+
+    [Test]
+    public static void EmptyNegativeTextKeepsNativeQwenTokenizerFlagWithoutInventedInstructions()
+    {
+        var (positive, negative, _, _) = ConditionersFor("Replace the subject.", "");
+        Assert.That(positive["inputs"]?["prompt"]?.ToString(), Is.EqualTo("Replace the subject."));
+        Assert.That(negative["inputs"]?["prompt"]?.ToString(), Is.Empty);
+        Assert.That(negative["inputs"]?["qwen21_prevent_empty_text"]?.ToObject<bool>(), Is.True);
     }
 
     [Test]
