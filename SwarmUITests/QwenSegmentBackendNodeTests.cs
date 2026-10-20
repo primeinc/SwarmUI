@@ -345,4 +345,36 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
                 new JObject { ["save"] = Node("SaveImage") }, new HashSet<string>()));
     }
 
+    [Test]
+    public static void PlainQwen21TextToImageRejectsLegacySwarmEncoderOptionSchema()
+    {
+        // This is a plain Qwen T2I workflow, without InpaintCropImproved.
+        // The new 64-channel latent and native empty-text option both require
+        // backend compatibility preflight before Comfy workflow submission.
+        JObject graph = new()
+        {
+            ["latent"] = Node("SwarmEmptyQwenImage21Latent"),
+            ["vision"] = Node("SwarmTextEncodeAdvanced"),
+            ["save"] = Node("SaveImage")
+        };
+        graph["vision"]["inputs"]["qwen21_prevent_empty_text"] = true;
+        JObject backendInfo = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["images"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        SwarmUserErrorException missing = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backendInfo));
+        Assert.That(missing.Message, Does.Contain("qwen21_prevent_empty_text"));
+        ((JObject)backendInfo["SwarmTextEncodeAdvanced"]["input"]["optional"])
+            ["qwen21_prevent_empty_text"] = new JArray("BOOLEAN");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backendInfo));
+    }
+
 }
