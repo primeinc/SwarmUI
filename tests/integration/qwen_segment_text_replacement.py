@@ -167,10 +167,12 @@ def inspect_and_instrument(original):
     neg_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "SwarmTextEncodeAdvanced"
          and v["inputs"].get("prompt") == ""
-         and v["inputs"].get("images", v["inputs"].get("image_1")) == masked_reference],
+         and (v["inputs"].get("images") or v["inputs"].get("image_1")) == masked_reference],
         "native segment negative conditioning on the original subject crop",
     )
-    if encoder.get("images") != masked_reference or graph[neg_id]["inputs"].get("images") != masked_reference:
+    if ((encoder.get("images") or encoder.get("image_1")) != masked_reference
+            or (graph[neg_id]["inputs"].get("images") or
+                graph[neg_id]["inputs"].get("image_1")) != masked_reference):
         raise AssertionError("Both Swarm vision encoders must see the exact CropAndStitch source crop")
     if any(v["class_type"] == "JoinImageWithAlpha" and
            v["inputs"].get("image") == masked_reference and
