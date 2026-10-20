@@ -17,6 +17,13 @@ public class Qwen21EmptyLatentTests : SwarmUITest
     public static void PreInit()
     {
         Setup();
+        // This isolated NUnit fixture does not run application startup.
+        // Width, height and PromptImages must be real registered parameters
+        // before Set()/GetImageWidth() can exercise the production generator.
+        if (T2IParamTypes.PromptImages is null)
+        {
+            T2IParamTypes.RegisterDefaults();
+        }
         // The isolated graph fixture does not initialize the Comfy backend
         // extension; register the one typed parameter the native reference
         // encoder reads. The real application registers it on startup.
