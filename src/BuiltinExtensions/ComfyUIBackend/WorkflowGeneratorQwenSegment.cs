@@ -19,6 +19,17 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>
+    /// Native TextEncodeQwenImage21(resolution=0) rounds every independent
+    /// reference to multiples of 32 before BOTH vision and VAE encoding.
+    /// Match Python's round-to-even; no common-size ImageBatch is involved.
+    /// </summary>
+    public static (int Width, int Height) NativeQwen21ReferenceDimensions(int width, int height)
+    {
+        return (Math.Max(32, (int)Math.Round(width / 32.0) * 32),
+            Math.Max(32, (int)Math.Round(height / 32.0) * 32));
+    }
+
+    /// <summary>
     /// Qwen 2.1 regions use the SAME Swarm prompt engine as ordinary Qwen
     /// generation. Do not flatten weights, substitute scheduled text, discard
     /// dynamic LoRA hooks, or manufacture an edit instruction.
@@ -68,6 +79,23 @@ public partial class WorkflowGenerator
                 JArray image = GetPromptImage(false, false, i);
                 if (image is not null)
                 {
+                    (int rawWidth, int rawHeight) = references[i].GetResolution();
+                    (int refWidth, int refHeight) = NativeQwen21ReferenceDimensions(rawWidth, rawHeight);
+                    if (rawWidth != refWidth || rawHeight != refHeight)
+                    {
+                        // Resize ONCE per reference so the vision encoder and
+                        // ReferenceLatent/VAEEncode see identical pixels and
+                        // 32-pixel geometry, exactly as native Qwen requires.
+                        string resize = CreateNode("ImageScale", new JObject()
+                        {
+                            ["image"] = image,
+                            ["width"] = refWidth,
+                            ["height"] = refHeight,
+                            ["crop"] = "disabled",
+                            ["upscale_method"] = "lanczos"
+                        });
+                        image = NodePath(resize, 0);
+                    }
                     referenceImages.Add(image);
                     if (referenceImages.Count > 16)
                     {
