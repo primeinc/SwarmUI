@@ -527,7 +527,7 @@ class SwarmTextEncodeAdvanced:
         # Preserve independently-sized Qwen vision images without batching or
         # interpolating them. Comfy's Qwen tokenizer accepts a Python list.
         # Keep the existing IMAGE batch input unchanged for other callers.
-        if image_slots:
+        if any(image is not None for image in image_slots.values()):
             if images is not None:
                 raise ValueError("Use either the images batch or independent image_N references")
             images = []
