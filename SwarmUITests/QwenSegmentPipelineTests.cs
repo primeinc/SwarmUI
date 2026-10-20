@@ -131,10 +131,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Plain-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
 
-        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
-        Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)));
-        Assert.That(lora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
-        Assert.That(lora.Value["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
+        Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty);
 
         JProperty diagnostic = Nodes(g, "SwarmQwen21SegmentDiagnostics").Single();
         Assert.That(diagnostic.Value["inputs"]!["generated"], Is.Not.Null);
