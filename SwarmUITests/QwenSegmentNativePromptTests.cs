@@ -136,6 +136,23 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     }
 
     [Test]
+    public static void QwenNegativeTextReceivesExactlyTheSameSwarmOnlyProcessing()
+    {
+        JObject encoder = NativeEncoderFor("Replace the girl.", "  <weight[0.7]:no hats>  ");
+        Assert.That(encoder["inputs"]?["negative_prompt"]?.ToString(),
+            Is.EqualTo("  no hats  "));
+        Assert.That(NativeEncoderFor("Replace the girl.")["inputs"]?["negative_prompt"]?.ToString(),
+            Is.EqualTo(""));
+    }
+
+    [Test]
+    public static void UnsupportedResidualTagsInNegativeTextCannotSilentlyChangeInstructions()
+    {
+        Assert.Throws<SwarmUserErrorException>(() =>
+            NativeEncoderFor("Replace the girl.", "<alternate:blurry,clear>"));
+    }
+
+    [Test]
     public static void MissingSegmentTextMustFailWithoutInvention()
     {
         Assert.Throws<SwarmUserErrorException>(
