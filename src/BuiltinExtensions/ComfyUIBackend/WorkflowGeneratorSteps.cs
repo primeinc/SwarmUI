@@ -1982,7 +1982,7 @@ public class WorkflowGeneratorSteps
                             string blurred = g.CreateNode("ImageBlur", new JObject()
                             {
                                 ["image"] = NodePath(maskImage, 0),
-                                ["blur_radius"] = Math.Min(blurAmt, 31),
+                                ["blur_radius"] = blurAmt, // Comfy validates its native 1..31 range; never silently clamp user input.
                                 ["sigma"] = 1.0
                             });
                             segmentNode = g.CreateNode("ImageToMask", new JObject()
