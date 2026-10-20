@@ -54,6 +54,25 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo(new JArray("crop", 1).ToString()));
     }
 
+    [Test]
+    public static void ActualNativeEncoderMustNotReferenceAnAbsentCropImage()
+    {
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference, false, sectionId: 11);
+        WorkflowGenerator g = new() { UserInput = input, Workflow = new JObject() };
+        WGNodeData clip = new(new JArray("clip", 0), g, WGNodeData.DT_TEXTENC, null);
+        WGNodeData vae = new(new JArray("vae", 0), g, WGNodeData.DT_VAE, null);
+        g.CreateQwen21SegmentConditioning(
+            "<weight[1.2]:HannahLynn>", "", clip, vae,
+            new JArray("crop", 1), new JArray("crop", 2), 11, "girl");
+        JObject encoder = g.Workflow.Properties()
+            .Select(p => p.Value as JObject)
+            .Single(n => n["class_type"]?.ToString() == "TextEncodeQwenImage21");
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Does.Not.Contain("<image1>"));
+        Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Does.Contain("HannahLynn"));
+        Assert.That(encoder["inputs"]?["images.image_1"], Is.Null);
+    }
+
     [TestCase(true, true, 0)]
     [TestCase(true, false, 1)]
     [TestCase(false, true, 0)]
