@@ -150,6 +150,25 @@ class Qwen21SegmentEncoderTests(unittest.TestCase):
         self.assertNotIn("reference_latents", negative)
         self.assertEqual(latent["samples"].shape, (1, 64, 4, 4))
 
+    def test_optional_prompt_image_uses_its_own_qwen_reference_slot(self):
+        encoder = self.Encoder()
+        positive, negative, _latent = encoder.encode(
+            self.clip, self.vae, self.image, "person", "negative",
+            image_1=FakeTensor((1, 64, 64, 4)),
+        )
+        self.assertEqual(self.vae.calls, 2)
+        self.assertTrue(all(len(call["images"]) == 2 for call in self.clip.calls))
+        self.assertEqual(len(positive["reference_latents"]), 2)
+        self.assertEqual(len(negative["reference_latents"]), 2)
+
+    def test_encoder_refuses_to_alias_a_batched_source_to_first_crop(self):
+        encoder = self.Encoder()
+        with self.assertRaisesRegex(ValueError, "one source crop"):
+            encoder.encode(
+                self.clip, self.vae, FakeTensor((2, 64, 64, 4)),
+                "person", "negative",
+            )
+
     def test_optional_input_preserves_saved_workflow_compatibility(self):
         inputs = self.Encoder.INPUT_TYPES()
         self.assertIn("use_original_reference", inputs["optional"])
