@@ -12,8 +12,8 @@ public partial class WorkflowGenerator
 {
     /// <summary>
     /// Preserve a user's multiword natural-language edit request verbatim.
-    /// Only a bare trigger (a single token or weighted LoRA markup) is
-    /// sufficiently unambiguous to turn into a replacement instruction.
+    /// Only a bare single-token trigger (after flattening Swarm markup) is
+    /// unambiguous enough to turn into a replacement instruction.
     /// No fixed English verb allowlist can safely classify every instruction.
     /// </summary>
     public static string BuildQwen21SegmentEditInstruction(
