@@ -219,6 +219,9 @@ public record class T2IParamGroup(string Name, bool Toggles = false, bool Open =
 /// <summary>Central manager of Text2Image parameter types.</summary>
 public class T2IParamTypes
 {
+    /// <summary>Qwen 2.1 segment sampling mode: native reference editing or partial-denoise masked img2img.</summary>
+    public static T2IRegisteredParam<string> SegmentQwen21Sampling;
+
     /// <summary>Map of all currently loaded types, by cleaned name.</summary>
     public static Dictionary<string, T2IParamType> Types = [];
 
@@ -895,6 +898,9 @@ public class T2IParamTypes
             ));
         SegmentQwenUseOriginalReference = Register<bool>(new("Segment Qwen 2.1 Original Reference", "If enabled, Qwen Image 2.1 segment refinement conditions on the original image crop as a ReferenceLatent. Disable to test whether strong original-image conditioning prevents segment changes, while retaining masked latent sampling.",
             "true", IgnoreIf: "true", IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.5
+            ));
+        SegmentQwen21Sampling = Register<string>(new("Segment Qwen 2.1 Sampling", "Reference Edit regenerates each selected crop using native Qwen image conditioning and the full configured step schedule, then composites through the segment mask. Segment creativity zero skips the edit; other creativity values do not shorten this mode. Select Masked Img2Img to retain partial-denoise Segment Creativity and latent masking. Applies only to Qwen Image 2.1.",
+            "Reference Edit", IgnoreIf: "Reference Edit", GetValues: _ => ["Reference Edit", "Masked Img2Img"], IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.6
             ));
         // ================================================ Advanced Sampling ================================================
         GroupAdvancedSampling = new("Advanced Sampling", Open: false, OrderPriority: 15, IsAdvanced: true);
