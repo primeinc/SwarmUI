@@ -105,15 +105,21 @@ public partial class WorkflowGenerator
                 ["conditioning"] = negative
             }), 0);
         }
-        // Follow upstream LanPaint's Qwen 2.1 masked editing adapter instead
-        // of sampling an unmasked, empty Qwen latent.
+        // These are distinct upstream workflows, not aliases:
+        // Reference Edit uses ComfyUI TextEncodeQwenImage21's own edit latent
+        // (the path used by ordinary Qwen editing). Masked Img2Img uses
+        // LanPaint's masked VAE latent, as in its official inpaint example.
+        // No handwritten inpaint encoder or step planner is required.
+        if (mode == "Reference Edit")
+        {
+            return (positive, negative, NodePath(native, 2));
+        }
         string maskedEncode = CreateNode("LanPaint_ImageEncode", new JObject()
         {
             ["image"] = croppedImage,
             ["vae"] = vae.Path,
             ["mask"] = croppedMask
         });
-        JArray latent = NodePath(maskedEncode, 0);
-        return (positive, negative, latent);
+        return (positive, negative, NodePath(maskedEncode, 0));
     }
 }
