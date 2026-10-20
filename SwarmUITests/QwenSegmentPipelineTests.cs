@@ -311,6 +311,55 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
+    public void ZeroCreativityStillSavesRequestedSegmentMask()
+    {
+        WorkflowGenerator g = Prepare(creativity: 0);
+        g.UserInput.Set(T2IParamTypes.SaveSegmentMask, true);
+        RunSegment(g);
+
+        Assert.That(Nodes(g, "MaskToImage"), Has.Length.EqualTo(1),
+            "A zero-creativity Qwen segment still promises to save its detected mask.");
+        Assert.That(Nodes(g, "SwarmKSampler"), Is.Empty);
+        Assert.That(g.CurrentMedia.Path, Is.EqualTo(new JArray("base-image", 0)));
+    }
+
+    [Test]
+    public void PostRefinerConfinedLoraRebuildPreservesRefinerOnlyLoras()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string> { "hair", "face", "hair" });
+        g.UserInput.Set(T2IParamTypes.LoraWeights, new List<string> { "0.2", "0.4", "0.8" });
+        g.UserInput.Set(T2IParamTypes.LoraSectionConfinement, new List<string> { "5", "1", "11" });
+        g.UserInput.Set(T2IParamTypes.RefinerMethod, "StepSwapNoisy");
+        g.UserInput.Set(T2IParamTypes.RefinerControl, 1.0);
+        WorkflowGenerator.Steps.Single(step => step.Priority == -4).Action(g);
+        RunSegment(g);
+
+        JProperty sampler = Nodes(g, "SwarmKSampler").Last();
+        string modelNodeId = sampler.Value["inputs"]!["model"]![0]!.Value<string>()!;
+        List<(string name, double strength)> loras = [];
+        for (int i = 0; i < 20; i++)
+        {
+            JToken node = g.Workflow[modelNodeId]!;
+            if (node["class_type"]?.ToString() == "LoraLoaderModelOnly")
+            {
+                loras.Add((node["inputs"]!["lora_name"]!.Value<string>()!,
+                    node["inputs"]!["strength_model"]!.Value<double>()));
+            }
+            if (node["inputs"]?["model"] is not JArray next)
+            {
+                break;
+            }
+            modelNodeId = next[0]!.Value<string>()!;
+        }
+
+        Assert.That(loras, Has.Count.EqualTo(2),
+            "A post-refiner segment should carry its confined LoRA and refiner-only LoRAs, not base-only LoRAs.");
+        Assert.That(loras, Does.Contain(("hair.safetensors", 0.8)));
+        Assert.That(loras, Does.Contain(("face.safetensors", 0.4)));
+    }
+
+    [Test]
     public void KreaKeepsItsExistingSegmentPath()
     {
         WorkflowGenerator g = Prepare(qwen: false, creativity: 0.6);
