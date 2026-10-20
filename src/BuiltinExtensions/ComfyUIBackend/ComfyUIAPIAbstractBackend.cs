@@ -979,7 +979,20 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     {
         string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
             rawWorkflow, "${", "}", _ => "null");
-        ValidateNativeQwenSegmentNodes(JObject.Parse(structuralGraph), availableNodeTypes);
+        JObject inventory = JObject.Parse(structuralGraph);
+        // A macro-driven class_type cannot be verified before uploading
+        // referenced files. Reject it rather than discovering unsupported
+        // native nodes only after irreversible API-by-URL uploads.
+        if (inventory.Properties().Any(property =>
+            property.Value?["class_type"] is null
+            || property.Value["class_type"].Type == JTokenType.Null
+            || property.Value["class_type"].ToString() == "null"))
+        {
+            throw new SwarmUserErrorException(
+                "Raw Comfy workflow class_type must be statically specified before image upload. " +
+                "Dynamic class_type placeholders cannot be safely preflighted.");
+        }
+        ValidateNativeQwenSegmentNodes(inventory, availableNodeTypes);
     }
 
     public volatile int ImageIDDedup = 0;
