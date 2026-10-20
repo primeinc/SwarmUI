@@ -426,6 +426,9 @@ public class QwenSegmentOriginalSourceTests
             Is.EqualTo(requestedThreshold).Within(0.00001));
         Assert.That(requireMask.Node["inputs"]?["minimum_confidence"]?.ToObject<double>(),
             Is.Zero, "Do not erase detector-selected pixels with a second post-detection cutoff");
+        Assert.That(requireMask.Node["inputs"]?["maximum_coverage"]?.ToObject<double>(),
+            Is.EqualTo(0.99).Within(0.00001),
+            "Required Comfy input: reject near-whole-canvas Qwen masks before crop/stitch");
         Assert.That(mask.Node["inputs"]?["value"]?.ToObject<double>(),
             Is.Zero, "Binarize every positive pixel after the author's detector threshold");
         Assert.That(crop.Node["inputs"]?["mask_hipass_filter"]?.ToObject<double>(),
