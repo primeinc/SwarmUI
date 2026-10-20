@@ -84,8 +84,14 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// </summary>
     public static void ValidateQwen21IndependentVisionSockets(JObject workflow, JObject backendObjectInfo)
     {
+        // The custom Swarm Qwen 2.1 empty latent marks plain T2I just as
+        // InpaintCropImproved marks segmented edits. Both workflows rely on
+        // qwen21_prevent_empty_text and optional independent image_N sockets.
+        // An older remote backend can register the encoder class name while
+        // silently omitting these newly required inputs.
         if (workflow is null || !workflow.Properties().Any(p =>
-            p.Value?["class_type"]?.ToString() == "InpaintCropImproved"))
+            p.Value?["class_type"]?.ToString() is
+                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent"))
         {
             return;
         }
