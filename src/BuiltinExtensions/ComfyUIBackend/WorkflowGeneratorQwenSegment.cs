@@ -10,11 +10,6 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Wires a segment crop into the exact ComfyUI TextEncodeQwenImage21 node.
-    /// Upstream owns Qwen vision tokens, reference VAE latents, and the starting
-    /// edit latent. No Qwen-specific encoding or sampling is reimplemented here.
-    /// </summary>
-    /// <summary>
     /// Qwen edits consume instructions, not SD-style noun-only trigger
     /// prompts. Leave an explicit edit instruction intact; otherwise explain
     /// what the requested LoRA-triggered replacement targets.
@@ -36,6 +31,15 @@ public partial class WorkflowGenerator
             target.StartsWith("yolo-", StringComparison.OrdinalIgnoreCase) || target.Contains('|')
                 ? "selected subject" : target.Trim();
         return $"Replace the {subject} in <image1> with {text}. Keep the rest of the image unchanged.";
+    }
+
+    /// <summary>
+    /// Skip PromptImages[0] only when that image was also the crop source.
+    /// An independent InitImage source does not consume PromptImages[0].
+    /// </summary>
+    public static int FirstQwen21AdditionalReferenceIndex(bool useOriginal, bool hasInitImage)
+    {
+        return useOriginal && !hasInitImage ? 1 : 0;
     }
 
     public (JArray Positive, JArray Negative, JArray Latent) CreateQwen21SegmentConditioning(
@@ -80,16 +84,18 @@ public partial class WorkflowGenerator
         int slot = 1;
         if (useOriginal)
         {
-            // For InitEdit, this *replaces* the full-frame Prompt Images[0].
-            // Feeding both the crop and the full frame duplicates the subject
-            // that is supposed to be replaced.
+            // The crop is the native source reference. An additional Prompt
+            // Image is skipped only if it was itself the crop's original source.
             inputs["images.image_1"] = croppedImage;
             slot++;
         }
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> references)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            for (int i = useOriginal ? 1 : 0; i < references.Count; i++)
+            bool hasInitImage = UserInput.TryGet(T2IParamTypes.InitImage, out Image initSource)
+                && initSource is not null;
+            for (int i = FirstQwen21AdditionalReferenceIndex(useOriginal, hasInitImage);
+                i < references.Count; i++)
             {
                 if (slot > 16)
                 {

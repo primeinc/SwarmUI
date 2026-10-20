@@ -54,6 +54,17 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo(new JArray("crop", 1).ToString()));
     }
 
+    [TestCase(true, true, 0)]
+    [TestCase(true, false, 1)]
+    [TestCase(false, true, 0)]
+    [TestCase(false, false, 0)]
+    public static void QwenMustKeepIndependentPromptImageReferences(
+        bool useOriginal, bool hasInitImage, int expectedFirstIndex)
+    {
+        Assert.That(WorkflowGenerator.FirstQwen21AdditionalReferenceIndex(
+            useOriginal, hasInitImage), Is.EqualTo(expectedFirstIndex));
+    }
+
     [Test]
     public static void NativeQwenPreservesExplicitReplacementInstructions()
     {
