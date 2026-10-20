@@ -5,6 +5,7 @@ live ComfyUI loading, real GPU inference, or semantic subject replacement.
 """
 from pathlib import Path
 import hashlib
+import json
 import unittest
 
 
@@ -18,6 +19,8 @@ PINNED_CROP_INIT_BLOB = "d24dd44d381507953fc59f7a593c36f94179bf85"
 LANPAINT_PLUGIN = BACKEND / "ExtraNodes/LanPaintUpstream"
 PINNED_LANPAINT_NODES_BLOB = "6c2f8e4a7ebf238da66d2e3c885e82685880f78d"
 PINNED_LANPAINT_INIT_BLOB = "057359402c29c697197d643fd499825209684592"
+UPSTREAM_WORKFLOW = ROOT / "tests/references/LanPaint_Qwen_Image_2.1_Edit_Masked_Inpaint.json"
+PINNED_WORKFLOW_BLOB = "52ffc874c1a6d4cb380a4a7374485d660dec7725"
 
 
 class NativeQwenBundleTest(unittest.TestCase):
@@ -58,6 +61,47 @@ class NativeQwenBundleTest(unittest.TestCase):
             git_blob = b"blob " + str(len(contents)).encode("ascii") + b"\x00" + contents
             self.assertEqual(hashlib.sha1(git_blob).hexdigest(), blob, relative)
         self.assertTrue((LANPAINT_PLUGIN / "LICENSE").is_file())
+
+    def test_real_upstream_qwen_21_workflow_is_unmodified_and_matches_the_connected_chain(self):
+        data = UPSTREAM_WORKFLOW.read_bytes()
+        git_blob = b"blob " + str(len(data)).encode("ascii") + b"\x00" + data
+        self.assertEqual(hashlib.sha1(git_blob).hexdigest(), PINNED_WORKFLOW_BLOB)
+        workflow = json.loads(data)
+        nodes = {node["type"]: node for node in workflow["nodes"]}
+        links = {link[0]: link for link in workflow["links"]}
+
+        def edge_to(target_type, name):
+            incoming = next(x for x in nodes[target_type]["inputs"] if x["name"] == name)
+            self.assertIsInstance(incoming["link"], int, (target_type, name))
+            return links[incoming["link"]]
+
+        def assert_edge(source_type, source_slot, target_type, input_name):
+            link = edge_to(target_type, input_name)
+            self.assertEqual((link[1], link[2], link[3]),
+                             (nodes[source_type]["id"], source_slot, nodes[target_type]["id"]))
+
+        # These are the real links in the author's Qwen 2.1 example, not
+        # values invented by our Swarm fixture. One IMAGE goes to both Qwen's
+        # image1 conditioning and LanPaint's masked encode/decode. One MASK
+        # goes to both mask inputs. The downstream source is the decoder.
+        assert_edge("JoinImageWithAlpha", 0, "TextEncodeQwenImage21", "images.image_1")
+        assert_edge("JoinImageWithAlpha", 0, "LanPaint_ImageEncode", "image")
+        assert_edge("JoinImageWithAlpha", 0, "LanPaint_ImageDecode", "image")
+        assert_edge("LoadImageMask", 0, "LanPaint_ImageEncode", "mask")
+        assert_edge("LoadImageMask", 0, "LanPaint_ImageDecode", "mask")
+        assert_edge("TextEncodeQwenImage21", 0, "LanPaint_KSampler", "positive")
+        assert_edge("TextEncodeQwenImage21", 1, "LanPaint_KSampler", "negative")
+        assert_edge("LanPaint_ImageEncode", 0, "LanPaint_KSampler", "latent_image")
+        assert_edge("LanPaint_KSampler", 0, "LanPaint_ImageDecode", "samples")
+        assert_edge("LanPaint_ImageDecode", 0, "SaveImage", "images")
+
+        # Proof attack: if someone swaps the sampler input to the wrong
+        # native Qwen empty latent output, the reference edge assertion
+        # must reject it. No silent acceptance of the old faulty path.
+        self.assertNotEqual(
+            edge_to("LanPaint_KSampler", "latent_image")[1],
+            nodes["TextEncodeQwenImage21"]["id"]
+        )
 
     def test_generation_uses_the_original_adapters_end_to_end(self):
         helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
