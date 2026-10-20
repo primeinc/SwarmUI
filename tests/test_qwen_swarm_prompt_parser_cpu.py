@@ -74,5 +74,10 @@ class RealSwarmQwenSegmentPromptParserTests(unittest.TestCase):
         self.assertEqual("".join(x.text or "" for x in self.leaves(malformed)), malformed)
 
 
+# Reuse the already scheduled CPU prompt-parser CI job for Qwen image-slot
+# execution regressions, without changing the workflow definition.
+from test_qwen_reference_break_cpu import QwenSwarmBreakReferenceContract
+
+
 if __name__ == "__main__":
     unittest.main()
