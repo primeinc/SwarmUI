@@ -1,6 +1,6 @@
 # Capture a Qwen segment failure without changing the generation
 
-The Qwen segment-only LoRA issue is NOT FIXED. This tool captures evidence; it does not claim to repair image generation.
+A real rendered Qwen segment-LoRA acceptance pass is **not yet verified**. This tool captures the actual backend graph; it does not queue image generation and cannot certify rendered subject replacement.
 
 From the SwarmUI directory on Windows, run `capture-qwen-segment.bat`, then repeat the failing generation once. Keep SwarmUI and its Comfy backend running. The tool reads the active queue because Swarm normally deletes completed Comfy history. It prints the path of a ZIP in the Windows temporary directory. It does not queue a generation, alter settings, switch branches, install packages, or send the ZIP anywhere.
 
@@ -12,7 +12,7 @@ The capture reports actual sampler inputs, model-path LoRA loaders and strengths
 
 Run `python -m unittest discover -s tests -p test_qwen_segment_capture.py -v`.
 
-18 tests passed locally on Python 3.13.5/Linux: graph traversal, missing/disconnected LoRA negative controls, conditioning isolation, zero effective steps, empty/deleted history with active queue, GET-only HTTP integration, redaction, and CLI ZIP output. The Windows batch launcher has not been executed in this environment. No GPU inference or user-visible Qwen fix is certified by these tests.
+CI exercises graph traversal, missing/disconnected LoRA negative controls, conditioning isolation, zero effective steps (including the historical 4-total, 1-skipped = 3-effective failure), queue/history selection, GET-only HTTP integration, redaction, and CLI ZIP output. These are only tool-integrity checks; they are **not** runtime image-generation evidence. The Windows batch launcher and an actual post-change GPU render have not been verified here.
 
 ## Evidence and unresolved questions
 
