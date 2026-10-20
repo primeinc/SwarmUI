@@ -143,6 +143,8 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("<weight[1.2]>")]
     [TestCase("<weight[]:Remove the hat>")]
     [TestCase("<weight[1.2]Remove the hat>")]
+    [TestCase("<weight[1.2]:Remove the hat")]
+    [TestCase("<weight[1.2]:A <weight[2]:B>")]
     public static void MalformedResidualWeightTagsMustNeverBeFlattened(string prompt)
     {
         Assert.Throws<SwarmUserErrorException>(
