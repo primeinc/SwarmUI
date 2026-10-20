@@ -958,6 +958,20 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
+    /// <summary>
+    /// An externally hosted Comfy backend normally resizes Init Image uploads to
+    /// the text-to-image canvas. Native Qwen segmentation instead crops the
+    /// supplied photograph on its own pixel canvas; keep that source unscaled.
+    /// The production-generated InpaintCropImproved node is specific to the
+    /// native Qwen segment path. Do not alter ordinary img2img or raw workflows.
+    /// </summary>
+    public static bool ShouldPreserveQwenOriginalInitUpload(JObject generatedGraph, T2IParamInput input)
+    {
+        return generatedGraph is not null
+            && input.TryGet(T2IParamTypes.InitImage, out Image original) && original is not null
+            && generatedGraph.Properties().Any(p => p.Value["class_type"]?.ToString() == "InpaintCropImproved");
+    }
+
     public volatile int ImageIDDedup = 0;
 
     /// <summary>Returns true if the file will be deleted properly (and ID should not be reused as it may conflict), or false if it can't be deleted (and thus the ID should be reused to reduce amount of images getting stored).</summary>
@@ -970,12 +984,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     public override async Task GenerateLive(T2IParamInput user_input, string batchId, Action<object> takeOutput)
     {
         List<Action> completeSteps = [];
+        bool preserveQwenOriginalInitUpload = false;
         string initImageFixer(string workflow) // This is a hack, backup for if Swarm nodes are missing
         {
             void TryApply(string key, ImageFile img, bool resize)
             {
                 int width = user_input.GetImageWidth(-1), height = user_input.GetImageHeight(-1);
                 if (width <= 0 || height <= 0)
+                {
+                    resize = false;
+                }
+                // The native Qwen original-image crop must not inherit generic
+                // Init Image canvas resizing on remote API-by-URL backends.
+                if (preserveQwenOriginalInitUpload && key == T2IParamTypes.InitImage.Type.ID)
                 {
                     resize = false;
                 }
@@ -1057,7 +1078,9 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 // Generated graphs are complete before the optional image file
                 // fallback. Reject unavailable Qwen nodes before upload.
                 workflow = CreateWorkflow(user_input, static graph => graph, ModelFolderFormat, [.. SupportedFeatures]);
-                ValidateNativeQwenSegmentNodes(JObject.Parse(workflow), NodeTypes);
+                JObject nativeGraph = JObject.Parse(workflow);
+                ValidateNativeQwenSegmentNodes(nativeGraph, NodeTypes);
+                preserveQwenOriginalInitUpload = ShouldPreserveQwenOriginalInitUpload(nativeGraph, user_input);
                 workflow = initImageFixer(workflow);
             }
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);
