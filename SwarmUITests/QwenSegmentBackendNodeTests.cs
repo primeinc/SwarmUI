@@ -88,4 +88,38 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         Assert.DoesNotThrow(() =>
             ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, types));
     }
+    [Test]
+    public static void RawQwenPreflightAcceptsUnquotedImagePlaceholdersWhenNodesExist()
+    {
+        // Saved custom workflows can use an unquoted ${initimage} token,
+        // which is not parseable JSON until its placeholder is expanded.
+        // Validation must precede any remote upload, however.
+        const string raw = """
+            {
+                "image": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "crop": {"class_type":"InpaintCropImproved","inputs":{"image":["image",0]}},
+                "sampler": {"class_type":"LanPaint_KSampler","inputs":{"seed":${seed}}}
+            }
+            """;
+        HashSet<string> installed = ["InpaintCropImproved", "LanPaint_KSampler", "LoadImage"];
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed));
+    }
+
+    [Test]
+    public static void RawQwenPreflightRejectsMissingNativeNodeBeforeImageUpload()
+    {
+        const string raw = """
+            {
+                "image": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "crop": {"class_type":"InpaintCropImproved","inputs":{"image":["image",0]}},
+                "sampler": {"class_type":"LanPaint_KSampler","inputs":{"seed":${seed}}}
+            }
+            """;
+        HashSet<string> missingSampler = ["InpaintCropImproved", "LoadImage"];
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, missingSampler));
+        Assert.That(error.Message, Does.Contain("LanPaint_KSampler"));
+    }
+
 }
