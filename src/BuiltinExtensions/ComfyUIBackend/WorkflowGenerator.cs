@@ -151,6 +151,12 @@ public partial class WorkflowGenerator
     /// <summary>Mapping of any extra nodes to keep track of, Name->ID, eg "MyNode" -> "15".</summary>
     public Dictionary<string, string> NodeHelpers = [];
 
+    /// <summary>For each fully loaded model path, the same model immediately after normal/global LoRAs but before later wrappers.</summary>
+    public Dictionary<string, JArray> LoadedModelLoraAnchors = [];
+
+    /// <summary>Per-workflow cache of model variants with a section-confined LoRA inserted inside existing wrappers.</summary>
+    public Dictionary<string, JArray> ScopedLoraModelVariants = [];
+
     /// <summary>Combined Comfy hook group for LoRAs controlled by step-scheduled prompt tags.</summary>
     public JArray DynamicLoraHooks = null;
 
@@ -405,6 +411,74 @@ public partial class WorkflowGenerator
         }
         DynamicLoraHooks = last;
         return DynamicLoraHooks;
+    }
+
+    private static string ModelPathKey(JArray path)
+    {
+        return path is null ? "" : $"{path[0]}:{path[1]}";
+    }
+
+    /// <summary>
+    /// Applies a section-confined LoRA at the same model-chain point used by normal/global LoRAs,
+    /// then recreates the exact existing model wrappers around that variant.
+    /// </summary>
+    public (JArray Model, JArray Clip) LoadLorasForConfinementInsideWrappers(int confinement, JArray finalModel, JArray clip)
+    {
+        if (confinement <= 0)
+        {
+            return (finalModel, clip);
+        }
+        string variantKey = $"{ModelPathKey(finalModel)}|section:{confinement}";
+        if (ScopedLoraModelVariants.TryGetValue(variantKey, out JArray cached))
+        {
+            return (cached, clip);
+        }
+
+        List<(string Type, JObject Inputs, int Output)> wrappers = [];
+        JArray cursor = finalModel;
+        JArray anchor = null;
+        for (int depth = 0; depth < 32 && cursor is not null; depth++)
+        {
+            if (LoadedModelLoraAnchors.TryGetValue(ModelPathKey(cursor), out JArray registeredAnchor))
+            {
+                anchor = registeredAnchor;
+            }
+            if (anchor is not null && JToken.DeepEquals(cursor, anchor))
+            {
+                break;
+            }
+            string nodeId = cursor[0]?.ToString();
+            if (nodeId is null || Workflow[nodeId] is not JObject node || node["inputs"] is not JObject inputs || inputs["model"] is not JArray innerModel)
+            {
+                break;
+            }
+            wrappers.Add((node["class_type"]?.ToString(), (JObject)inputs.DeepClone(), cursor[1]?.Value<int>() ?? 0));
+            cursor = innerModel;
+        }
+
+        if (anchor is null || !JToken.DeepEquals(cursor, anchor))
+        {
+            Logs.Warning($"[QWEN21-SEG] Could not locate the normal LoRA insertion anchor inside model path '{ModelPathKey(finalModel)}'; applying section {confinement} LoRA to the terminal model as a compatibility fallback.");
+            (JArray fallbackModel, JArray fallbackClip) = LoadLorasForConfinement(confinement, finalModel, clip);
+            ScopedLoraModelVariants[variantKey] = fallbackModel;
+            return (fallbackModel, fallbackClip);
+        }
+
+        (JArray scopedModel, JArray scopedClip) = LoadLorasForConfinement(confinement, anchor, clip);
+        for (int i = wrappers.Count - 1; i >= 0; i--)
+        {
+            (string type, JObject inputs, int output) = wrappers[i];
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                throw new SwarmUserErrorException("Cannot rebuild Qwen segment model wrapper because a model node has no class type.");
+            }
+            inputs["model"] = scopedModel;
+            string wrapper = CreateNode(type, inputs);
+            scopedModel = [wrapper, output];
+        }
+        ScopedLoraModelVariants[variantKey] = scopedModel;
+        Logs.Info($"[QWEN21-SEG] inserted section {confinement} LoRA at model-load anchor and rebuilt {wrappers.Count} existing wrapper(s).");
+        return (scopedModel, scopedClip);
     }
 
     /// <summary>Loads and applies LoRAs in the user parameters for the given LoRA confinement ID.</summary>
