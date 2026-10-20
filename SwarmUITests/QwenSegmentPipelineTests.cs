@@ -247,22 +247,16 @@ public class QwenSegmentPipelineTests : SwarmUITest
     {
         WorkflowGenerator g = Prepare();
         g.UserInput.Set(T2IParamTypes.TorchCompile, "inductor");
-        g.LoadingModel = new JArray("base-model", 0);
-        g.LoadingClip = new JArray("base-clip", 0);
-        g.LoadingModelType = "Base";
-        g.LoadingAdditionalLoraConfinement = 11;
-
-        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -10).Action(g);
-        string compileId = g.CreateNode("TorchCompileModel", new JObject()
-        {
-            ["model"] = g.LoadingModel,
-            ["backend"] = "inductor"
-        });
+        RunSegment(g);
 
         JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
-        JProperty compile = g.Workflow.Property(compileId)!;
+        JProperty compile = Nodes(g, "TorchCompileModel").Single();
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+
         Assert.That(compile.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
             "Scoped Qwen LoRA must be inside the compiled model graph, matching global LoRA ordering.");
+        Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(compile.Name, 0)),
+            "The segment sampler must consume the compiled model whose input already contains the confined LoRA.");
     }
 
     [Test]
