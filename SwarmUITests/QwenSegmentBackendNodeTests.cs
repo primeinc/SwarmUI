@@ -161,4 +161,25 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         Assert.That(error.Message, Does.Contain("before image upload"));
     }
 
+    [TestCase("Inpaint${node_kind}")]
+    [TestCase("Vendor${node_kind}Sampler")]
+    public static void RawQwenPreflightRejectsEmbeddedClassTypeMacroBeforeUpload(string classType)
+    {
+        // A wholly dynamic class_type is already rejected. Partial expansion
+        // is equally unsafe: replacing ${node_kind} with null must NOT turn
+        // "Inpaint${node_kind}" into an apparently static "Inpaintnull".
+        const string template = """
+            {
+                "source": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "dynamic": {"class_type":"__NODE_TYPE__","inputs":{"seed":${seed}}}
+            }
+            """;
+        string raw = template.Replace("__NODE_TYPE__", classType);
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                raw, new HashSet<string> { "LoadImage" }));
+        Assert.That(error.Message, Does.Contain("class_type"));
+        Assert.That(error.Message, Does.Contain("before image upload"));
+    }
+
 }
