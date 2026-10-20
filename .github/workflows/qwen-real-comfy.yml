@@ -1,0 +1,38 @@
+name: Qwen Real Comfy Integration
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-qwen-lora-forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout SwarmUI
+        uses: actions/checkout@v6
+      - name: Checkout pinned upstream ComfyUI
+        uses: actions/checkout@v6
+        with:
+          repository: Comfy-Org/ComfyUI
+          ref: e3bee7ffcb7d6547ed0bcd15221792f3b8646b17
+          path: comfy-source
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install real upstream Python runtime on CPU
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r comfy-source/requirements.txt -r comfy-source/tests-unit/requirements.txt
+      - name: Execute real Comfy LoRA loader, model patcher and Qwen 2.1 transformer
+        env:
+          COMFYUI_REPO_PATH: ${{ github.workspace }}/comfy-source
+        run: python -m pytest -v tests/integration/test_real_comfy_qwen_lora.py
