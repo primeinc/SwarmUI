@@ -276,6 +276,15 @@ public class QwenSegmentOriginalSourceTests
         input.Set(T2IParamTypes.Prompt, prompt);
         input.Set(T2IParamTypes.Seed, 20261020L);
         input.Set(T2IParamTypes.BatchSize, batchSize);
+        // Adversarial control: the ordinary native Qwen reference encoder
+        // rounds dimensions to multiples of 32. Apply a deliberately
+        // non-aligned source crop target in the actual C# generator.
+        bool nonAlignedCropTarget = !independentPromptImage && hasInitImage
+            && useBase64Images && batchSize == 1 && !useSegmentOverride && !referenceEdit;
+        if (nonAlignedCropTarget)
+        {
+            input.Set(T2IParamTypes.SegmentTargetResolution, "1330x1311");
+        }
         // CI proves the Python acceptance preflight against the ACTUAL C#
         // workflow emitted for the precise, previously failing segment prompt.
         // This is graph/source evidence without GPU/model inference.
@@ -417,6 +426,13 @@ public class QwenSegmentOriginalSourceTests
             string expectedBytes = (hasInitImage ? image : independentReference).AsBase64;
             Assert.That(graph[sourceId]?["inputs"]?["image_base64"]?.ToString(), Is.EqualTo(expectedBytes),
                 "The native detector must receive the exact supplied image bytes, without resampling");
+        }
+        if (nonAlignedCropTarget)
+        {
+            Assert.That(crop.Node["inputs"]?["output_target_width"]?.ToObject<int>(),
+                Is.EqualTo(1344), "Native Qwen crop must round width onto its 32-pixel reference grid");
+            Assert.That(crop.Node["inputs"]?["output_target_height"]?.ToObject<int>(),
+                Is.EqualTo(1312), "Native Qwen crop must round height onto its 32-pixel reference grid");
         }
         Assert.That(detector.Node["inputs"]?["images"]?.ToString(), Is.EqualTo(crop.Node["inputs"]?["image"]?.ToString()));
         Assert.That(crop.Node["inputs"]?["mask"]?.ToString(),
