@@ -131,6 +131,74 @@ class LiveLoRAFinalOutputContractTests(unittest.TestCase):
         self.assertIsNone(self.check(g, ["scaled", 0], "stitch"))
 
 
+def load_shipped_qwen_mask_preflight():
+    """Execute actual live acceptance mask-contract function without a model."""
+    import ast
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "live/test_qwen_segment_lora.py"
+    syntax = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    funcs = [n for n in syntax.body
+             if isinstance(n, ast.FunctionDef) and n.name == "validate_qwen_subject_mask_chain"]
+    if len(funcs) != 1:
+        raise AssertionError("Missing or duplicate live Qwen mask contract")
+    scope = {}
+    exec(compile(ast.Module(body=funcs, type_ignores=[]), str(path), "exec"), scope)
+    return scope["validate_qwen_subject_mask_chain"]
+
+
+class LiveLoRAMaskPreflightContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.validate_mask = staticmethod(load_shipped_qwen_mask_preflight())
+
+    @staticmethod
+    def graph():
+        return {
+            "detector": {"class_type": "SwarmClipSeg", "inputs": {"threshold": 0.1}},
+            "guard": {"class_type": "SwarmRequireNonEmptyMask",
+                      "inputs": {"mask": ["detector", 0],
+                                 "minimum_confidence": 0.0, "maximum_coverage": 0.99}},
+            "binary": {"class_type": "ThresholdMask",
+                       "inputs": {"mask": ["guard", 0], "value": 0.0}},
+            "crop": {"class_type": "InpaintCropImproved",
+                     "inputs": {"mask": ["binary", 0], "mask_hipass_filter": 0.5}},
+        }
+
+    def test_authored_low_threshold_and_safe_coverage_passes(self):
+        self.assertEqual(self.validate_mask(self.graph(), "crop"), ["binary", 0])
+
+    def test_stale_second_half_threshold_rejected(self):
+        graph = self.graph()
+        graph["binary"]["inputs"]["value"] = 0.5
+        with self.assertRaisesRegex(AssertionError, "at zero"):
+            self.validate_mask(graph, "crop")
+
+    def test_stale_guard_half_threshold_rejected(self):
+        graph = self.graph()
+        graph["guard"]["inputs"]["minimum_confidence"] = 0.5
+        with self.assertRaisesRegex(AssertionError, "authored CLIPSeg"):
+            self.validate_mask(graph, "crop")
+
+    def test_missing_near_full_frame_guard_rejected(self):
+        graph = self.graph()
+        del graph["guard"]["inputs"]["maximum_coverage"]
+        with self.assertRaisesRegex(AssertionError, "near-full-canvas"):
+            self.validate_mask(graph, "crop")
+
+    def test_disabled_near_full_frame_guard_rejected(self):
+        graph = self.graph()
+        graph["guard"]["inputs"]["maximum_coverage"] = 1.0
+        with self.assertRaisesRegex(AssertionError, "near-full-canvas"):
+            self.validate_mask(graph, "crop")
+
+    def test_non_detector_mask_cannot_be_accepted(self):
+        graph = self.graph()
+        graph["detector"]["class_type"] = "SolidMask"
+        with self.assertRaisesRegex(AssertionError, "actual text detector"):
+            self.validate_mask(graph, "crop")
+
+
 class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
     @staticmethod
     def sample():
