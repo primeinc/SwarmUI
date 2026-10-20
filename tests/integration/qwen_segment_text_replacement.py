@@ -336,6 +336,7 @@ def main(argv=None):
             "semantic_subject_replacement_verified": False,
             "image_space_lora_effect_verified": False,
             "runtime_node_registration_verified": False,
+            "native_schema_completeness_verified": False,
         }, indent=2))
         return 0
     if not args.comfy_url or args.outdir is None:
