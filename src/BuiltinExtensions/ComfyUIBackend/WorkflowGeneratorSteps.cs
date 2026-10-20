@@ -2057,11 +2057,12 @@ public class WorkflowGeneratorSteps
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentSteps, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20, sectionId: part.ContextID);
                     string neg = negativeParts.FirstOrDefault(p => p.DataText == part.DataText)?.Prompt ?? negativeRegion.GlobalPrompt;
                     int startStep = (int)Math.Round(steps * (1 - part.Strength2));
+                    int samplerSteps = steps;
                     JArray prompt, negPrompt;
                     JArray segmentLatent = NodePath(g.MaskShrunkInfo.MaskedLatent, 0);
                     if (nativeQwenSegment)
                     {
-                        (prompt, negPrompt, segmentLatent, startStep) = g.CreateQwen21SegmentConditioning(
+                        (prompt, negPrompt, segmentLatent, samplerSteps, startStep) = g.CreateQwen21SegmentConditioning(
                             part.Prompt, neg, clip, vae, g.MaskShrunkInfo, steps, part.Strength2, part.ContextID);
                     }
                     else
@@ -2100,12 +2101,12 @@ public class WorkflowGeneratorSteps
                         {
                             logPrompt = logPrompt[..160];
                         }
-                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
+                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' effective_steps={steps} schedule_steps={samplerSteps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
                     }
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
                     // When Segment Model differs from the base model, that must be the segment VAE.
-                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, steps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
+                    string sampler = g.WithSegmentSamplingVae(vae, () => g.CreateKSampler(model.Path, prompt, negPrompt, segmentLatent, cfg, samplerSteps, startStep, 10000, seed, false, true, sectionId: part.ContextID, referenceConditioningHandled: nativeQwenSegment));
                     g.CurrentMedia = g.CurrentMedia.WithPath([sampler, 0], WGNodeData.DT_LATENT_IMAGE, mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
