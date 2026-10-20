@@ -111,6 +111,8 @@ def inspect_and_instrument(original):
     bounds_id = capture.link(native_crop.get("x"), graph)
     if bounds_id is None or graph[bounds_id]["class_type"] != "SwarmMaskBounds":
         raise AssertionError("Crop must use actual segment mask bounds, not full image coordinates")
+    if graph[bounds_id]["inputs"].get("reject_empty") is not True:
+        raise AssertionError("Qwen region crop must fail fast on empty detection instead of editing the full frame")
     # Bounds must not come from the blurred/grown compositor mask. Otherwise
     # background confidence gets spread across the frame and the preview zooms out.
     hard_mask = capture.link(graph[bounds_id]["inputs"].get("mask"), graph)
