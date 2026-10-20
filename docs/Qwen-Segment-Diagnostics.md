@@ -27,6 +27,9 @@ image; neither generates the old homemade Qwen diagnostics gallery.
 An effective Qwen segment-model override controls original-photo source
 selection even when the base checkpoint is not Qwen. Replicated source-image
 batches offset the segment seed per image so edits are not identical clones.
+For API-by-URL Comfy backends without the Swarm base64 image loader,
+Qwen's original Init Image also skips the legacy upload-to-canvas resize.
+Other img2img and custom workflows retain their existing resize behavior.
 
 The user's segment instruction is passed to native `TextEncodeQwenImage21`
 without any invented replacement wording or synthetic `<image1>` token.
