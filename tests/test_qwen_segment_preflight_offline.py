@@ -196,6 +196,29 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         with patch.object(probe, "fetch_json", side_effect=schema_fetch):
             self.assertTrue(probe.validate_runtime_node_contracts("http://example.invalid", graph))
 
+    def test_outdated_backend_missing_qwen_empty_text_socket_rejects_before_queue(self):
+        graph, _ = probe.inspect_and_instrument(native_contract_fixture())
+        # Both Swarm Qwen conditioning directions require this new socket,
+        # even on the legacy single-image path (no independent image_N).
+        graph["condition"]["inputs"]["qwen21_prevent_empty_text"] = True
+        graph["negative"]["inputs"]["qwen21_prevent_empty_text"] = True
+        declared = {"images": ["IMAGE"]}
+        classes = {node["class_type"] for node in graph.values()}
+
+        def schema_fetch(_base, route):
+            name = route.removeprefix("object_info/")
+            if name not in classes:
+                return {}
+            optional = declared if name == "SwarmTextEncodeAdvanced" else {}
+            return {name: {"input": {"required": {}, "optional": optional}}}
+
+        with patch.object(probe, "fetch_json", side_effect=schema_fetch):
+            with self.assertRaisesRegex(AssertionError, "qwen21_prevent_empty_text"):
+                probe.validate_runtime_node_contracts("http://example.invalid", graph)
+            declared["qwen21_prevent_empty_text"] = ["BOOLEAN"]
+            self.assertTrue(probe.validate_runtime_node_contracts(
+                "http://example.invalid", graph))
+
     def test_runtime_preflight_rejects_missing_splitter_and_diagnostic_nodes(self):
         graph, _ = probe.inspect_and_instrument(native_contract_fixture())
         available = {node["class_type"] for node in graph.values()}
