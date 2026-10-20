@@ -7,11 +7,13 @@ detection. It uses **unmodified** upstream ComfyUI Qwen 2.1 conditioning and
 Luis Quesada's Inpaint Crop & Stitch, with optional upstream LanPaint nodes.
 No custom Qwen tokenizer, VAE encoder, sampler, crop math, or image stitcher.
 
-For a **segment-only** request (no global/base/refiner prompt), the crop and
-detector must receive the unmodified Init Image or the first Prompt Image,
-**not** the blank-prompt base sampler's generated image. A missing source
-image is an error. Ordinary prompts with non-empty global content retain
-generated-frame segment processing.
+For Qwen edits with an explicitly supplied Init Image or Prompt Image,
+the crop and detector must receive that original photograph, regardless of
+whether the prompt also contains global scene text. Using a generated base
+frame here silently destroys the subject before segmentation. An instruction-only
+segment without a source image is an error. Ordinary text-to-image prompts with
+global scene content and no supplied image may still segment their generated
+frame.
 
 The two selectable segment sampling modes are intentionally different:
 
@@ -45,6 +47,12 @@ even if the selected LoRA model is correctly attached. Qwen segments now
 default to the existing upstream masked path, which sends the actual crop
 mask into LanPaint_ImageEncode and its KSampler. Reference Edit remains an
 explicit advanced option for users who specifically want unmasked crop edits.
+
+A bare regional LoRA trigger is first flattened from Swarm markup into plain
+text, then presented to the native Qwen encoder as a targeted image-edit
+instruction rather than a stand-alone noun phrase. Explicit edit instructions
+are passed through without rewording. Empty CLIPSeg detection fails before
+upstream CropAndStitch can fall back to the entire image.
 
 The Qwen native edit encoder returns a **zero-filled** output-2 latent, not
 the original image encoded as an img2img latent. Therefore Reference Edit
