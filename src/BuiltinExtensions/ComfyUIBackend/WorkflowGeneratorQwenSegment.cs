@@ -22,7 +22,7 @@ public partial class WorkflowGenerator
         {
             throw new SwarmUserErrorException("Qwen segment requires a source crop, text encoder and VAE.");
         }
-        string mode = UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Reference Edit", sectionId: sectionId);
+        string mode = UserInput.Get(T2IParamTypes.SegmentQwen21Sampling, "Masked Img2Img", sectionId: sectionId);
         if (mode != "Reference Edit" && mode != "Masked Img2Img")
         {
             throw new SwarmUserErrorException($"Unsupported Qwen segment sampling mode '{mode}'.");
