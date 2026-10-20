@@ -112,12 +112,16 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     [TestCase("Add sunglasses to the girl")]
     [TestCase("Put a hat on the subject")]
     [TestCase("Give the girl blue eyes")]
+    [TestCase("<weight[1.2]:Add sunglasses to the girl>")]
     [TestCase("Draw a star on the girl's shirt")]
     [TestCase("Make the subject smile")]
     public static void NativeQwenMustNotConvertInstructionsIntoReplacementNouns(string instruction)
     {
+        string expected = instruction.StartsWith("<weight[", StringComparison.Ordinal)
+            ? T2IPromptHandling.ProcessPromptLikeForLength(instruction)
+            : instruction;
         Assert.That(WorkflowGenerator.BuildQwen21SegmentEditInstruction(instruction, "girl"),
-            Is.EqualTo(instruction));
+            Is.EqualTo(expected));
     }
 
     [Test]
