@@ -410,6 +410,30 @@ public partial class WorkflowGenerator
         return DynamicLoraHooks;
     }
 
+    /// <summary>Whether a non-dynamic LoRA is statically confined to the given prompt section.</summary>
+    public bool HasLorasForConfinement(int confinement)
+    {
+        if (confinement <= 0 || !UserInput.TryGet(T2IParamTypes.Loras, out List<string> loras))
+        {
+            return false;
+        }
+        List<string> confinements = UserInput.Get(T2IParamTypes.LoraSectionConfinement);
+        if (confinements is null)
+        {
+            return false;
+        }
+        for (int i = 0; i < loras.Count && i < confinements.Count; i++)
+        {
+            if (!UserInput.DynamicLoraIndices.Contains(i)
+                && int.TryParse(confinements[i], out int confinementId)
+                && confinementId == confinement)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>Loads and applies LoRAs in the user parameters for the given LoRA confinement ID.</summary>
     public (JArray, JArray) LoadLorasForConfinement(int confinement, JArray model, JArray clip)
     {
