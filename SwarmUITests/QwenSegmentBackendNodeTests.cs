@@ -142,6 +142,44 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, new JObject()));
     }
 
+
+    [Test]
+    public static void RawQwenPreflightRejectsStaleIndependentVisionSocketsBeforeUpload()
+    {
+        const string raw = """
+            {
+                "source": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "crop": {"class_type":"InpaintCropImproved","inputs":{"image":["source",0]}},
+                "vision": {"class_type":"SwarmTextEncodeAdvanced",
+                    "inputs":{"image_1":["crop",1],"image_2":["source",0]}}
+            }
+            """;
+        HashSet<string> installed = ["LoadImage", "InpaintCropImproved", "SwarmTextEncodeAdvanced"];
+        JObject backend = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["images"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        // The old class-only preflight passed this graph despite the remote
+        // encoder silently lacking both new image_N inputs.
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend))
+            .Message, Does.Contain("image_1"));
+        JObject optional = (JObject)backend["SwarmTextEncodeAdvanced"]["input"]["optional"];
+        optional["image_1"] = new JArray("IMAGE");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend))
+            .Message, Does.Contain("image_2"));
+        optional["image_2"] = new JArray("IMAGE");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed, backend));
+    }
+
     [Test]
     public static void ReferenceEditDoesNotRequireLanPaintSamplerWhenNotUsed()
     {
