@@ -459,11 +459,20 @@ public class QwenSegmentPipelineTests : SwarmUITest
             Assert.That(encoders.All(e => JToken.DeepEquals(
                 e.Value["inputs"]!["images"], new JArray(batched.Name, 0))), Is.True);
             Assert.That(batched.Value["inputs"]!["image1"], Is.EqualTo(crop));
+            JProperty[] slices = Nodes(g, "ImageFromBatch");
+            Assert.That(slices, Has.Length.EqualTo(2),
+                "The VAE and Qwen vision encoder must consume the same batched reference geometry.");
+            string[] sliceIds = slices.Select(node => node.Name).ToArray();
+            Assert.That(Nodes(g, "VAEEncode").Count(node =>
+                node.Value["inputs"]!["pixels"] is JArray path &&
+                sliceIds.Contains(path[0]!.Value<string>()!)), Is.EqualTo(2),
+                "Each reference latent must encode the aligned image, not an unresized separate tensor.");
         }
         else
         {
             Assert.That(encoders.All(e =>
                 JToken.DeepEquals(e.Value["inputs"]!["images"], crop)), Is.True);
+            Assert.That(Nodes(g, "ImageFromBatch"), Is.Empty);
         }
     }
 
