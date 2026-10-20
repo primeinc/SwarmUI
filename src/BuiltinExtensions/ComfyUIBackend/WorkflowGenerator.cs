@@ -767,9 +767,24 @@ public partial class WorkflowGenerator
                 ["mask"] = croppedMask,
                 ["value"] = 0.5
             });
-            // Thresholding the compositing mask is a stock ComfyUI operation.
-            // Avoid custom Python post-processors in the Qwen edit path.
-            croppedMask = NodePath(subjectMask, 0);
+            // Soften only the edge of the binarized subject with upstream
+            // ComfyUI MaskToImage/ImageBlur/ImageToMask nodes. Do not mix the
+            // original subject throughout the mask, which caused ghosting.
+            string maskImage = CreateNode("MaskToImage", new JObject()
+            {
+                ["mask"] = NodePath(subjectMask, 0)
+            });
+            string blurImage = CreateNode("ImageBlur", new JObject()
+            {
+                ["image"] = NodePath(maskImage, 0),
+                ["blur_radius"] = 2,
+                ["sigma"] = 1.0
+            });
+            croppedMask = NodePath(CreateNode("ImageToMask", new JObject()
+            {
+                ["image"] = NodePath(blurImage, 0),
+                ["channel"] = "red"
+            }), 0);
         }
         else if (!preserveSoftMask && !useRawMask)
         {
