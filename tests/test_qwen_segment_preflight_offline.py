@@ -101,6 +101,34 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             probe.inspect_and_instrument(graph)
 
+    def test_two_final_saved_images_fail_even_with_one_save_sink(self):
+        with self.assertRaisesRegex(AssertionError, "got 2"):
+            probe.require_single_final_image(
+                {"final": {"images": [{"filename": "a.png"}, {"filename": "b.png"}]}},
+                "final")
+        self.assertEqual(
+            probe.require_single_final_image(
+                {"final": {"images": [{"filename": "single.png"}]}}, "final"
+            )["filename"],
+            "single.png")
+        with self.assertRaisesRegex(AssertionError, "UNVERIFIED"):
+            probe.require_single_final_image({}, "final")
+
+    def test_runtime_preflight_rejects_missing_splitter_and_diagnostic_nodes(self):
+        graph, _ = probe.inspect_and_instrument(native_contract_fixture())
+        available = {node["class_type"] for node in graph.values()}
+        def fake_fetch(base, route):
+            name = route.removeprefix("object_info/")
+            return {name: {"input": {"required": {}}}} if name in available else {}
+        with patch.object(probe, "fetch_json", side_effect=fake_fetch):
+            self.assertTrue(probe.validate_runtime_node_contracts("http://example.invalid", graph))
+        for missing in ("SplitImageWithAlpha", "MaskToImage", "PreviewImage"):
+            available.remove(missing)
+            with patch.object(probe, "fetch_json", side_effect=fake_fetch):
+                with self.assertRaisesRegex(AssertionError, missing):
+                    probe.validate_runtime_node_contracts("http://example.invalid", graph)
+            available.add(missing)
+
     def test_wrong_subject_or_target_instruction_is_rejected(self):
         graph = native_contract_fixture()
         graph["detector"]["inputs"]["match_text"] = "bird"
