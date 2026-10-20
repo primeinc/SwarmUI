@@ -1,7 +1,10 @@
 """Live ComfyUI Qwen-segment LoRA acceptance. No fake models, tensors, or Comfy nodes.
 
-Use actual SwarmUI-exported Comfy API graphs, installed model files and a running
-Comfy backend. This queues real GPU generations; it is never a CPU CI substitute.
+Use actual SwarmUI-exported Comfy API graphs, installed model files and a
+running, inference-capable Comfy backend. This queues actual model-backed image
+generations; unlike source/graph/CPU tensor tests it requires the real weights,
+though supported CPU inference is not conceptually excluded. An accelerator
+is usually practical, not the criterion for claiming an image-space LoRA effect.
 
 SWARM_LORA_ACCEPTANCE_MANIFEST=/path/to/manifest.json \
     python -m pytest tests/live/test_qwen_segment_lora.py -v -s
