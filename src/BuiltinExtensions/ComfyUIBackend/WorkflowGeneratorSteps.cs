@@ -1946,7 +1946,9 @@ public class WorkflowGeneratorSteps
                     clip = segmentBaseClip;
                     if (part.ContextID > 0)
                     {
-                        (JArray newModel, JArray newClip) = g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
+                        (JArray newModel, JArray newClip) = nativeQwenSegment && g.HasLorasForConfinement(part.ContextID)
+                            ? g.LoadLorasForConfinementInsideWrappers(part.ContextID, model.Path, clip.Path)
+                            : g.LoadLorasForConfinement(part.ContextID, model.Path, clip.Path);
                         model = model.WithPath(newModel);
                         clip = clip.WithPath(newClip);
                     }
@@ -1969,15 +1971,33 @@ public class WorkflowGeneratorSteps
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     if (nativeQwenSegment)
                     {
-                        (string modelNodeType, JObject modelInputs) = model.SourceNodeData;
-                        string loraName = modelInputs?["lora_name"]?.ToString() ?? "(none)";
-                        string loraStrength = modelInputs?["strength_model"]?.ToString() ?? "(n/a)";
+                        string loraName = "(none)";
+                        string loraStrength = "(n/a)";
+                        List<string> modelChain = [];
+                        JArray cursor = model.Path;
+                        for (int depth = 0; depth < 24 && cursor is not null; depth++)
+                        {
+                            string nodeId = cursor[0]?.ToString();
+                            if (nodeId is null || g.Workflow[nodeId] is not JObject node)
+                            {
+                                break;
+                            }
+                            string nodeType = node["class_type"]?.ToString() ?? "(unknown)";
+                            modelChain.Add(nodeType);
+                            JObject inputs = node["inputs"] as JObject;
+                            if (nodeType is "LoraLoaderModelOnly" or "LoraLoader")
+                            {
+                                loraName = inputs?["lora_name"]?.ToString() ?? "(unknown)";
+                                loraStrength = inputs?["strength_model"]?.ToString() ?? "(unknown)";
+                            }
+                            cursor = inputs?["model"] as JArray;
+                        }
                         string logPrompt = (part.Prompt ?? "").Replace('\r', ' ').Replace('\n', ' ');
                         if (logPrompt.Length > 160)
                         {
                             logPrompt = logPrompt[..160];
                         }
-                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_node={modelNodeType ?? "(unknown)"} lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
+                        Logs.Info($"[QWEN21-SEG] sampler section={part.ContextID} mode='{qwenSegmentMode}' steps={steps} start={startStep} cfg={cfg:0.###} seed={seed} model_chain='{string.Join(">", modelChain)}' lora='{loraName}' lora_strength={loraStrength} prompt='{logPrompt}'");
                     }
                     WGNodeData beforeImage = g.CurrentMedia;
                     // CreateKSampler uses CurrentVae for Qwen 2.1 ReferenceLatent encoding.
