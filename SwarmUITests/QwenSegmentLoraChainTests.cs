@@ -87,6 +87,21 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void MaskedLanPaintMustRejectDifferentialDiffusionOnSamplerModelPath()
+    {
+        WorkflowGenerator g = Prepare();
+        g.Workflow["diff"] = new JObject
+        {
+            ["class_type"] = "DifferentialDiffusion",
+            ["inputs"] = new JObject { ["model"] = new JArray("patched", 0) }
+        };
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("diff", 0), 11, false));
+        Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
     public static void GlobalLoRAIsExpectedInASegment()
     {
         WorkflowGenerator g = Prepare(segmentConfinement: 0);
