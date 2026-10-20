@@ -299,6 +299,41 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
     [TestCase(true)]
     [TestCase(false)]
+    public void RealPromptPreparsePreservesSelectedSectionLoraOnSegmentSampler(bool matchesSection)
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Prompt, "base scene <segment:face,1,0.8>portrait change");
+        g.UserInput.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8>segment negative");
+        g.UserInput.Set(T2IParamTypes.LoraSectionConfinement,
+            new List<string> { matchesSection ? "11" : "12" });
+        // Production input uses PreparsePromptLikes to supply the //cid; the earlier
+        // fixture inserted it by hand and could never catch a request-path mismatch.
+        g.UserInput.PreparsePromptLikes();
+        PromptRegion.Part part = new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt)).Parts
+            .Single(p => p.Type == PromptRegion.PartType.Segment);
+        Assert.That(part.ContextID, Is.EqualTo(11));
+        WorkflowGenerator.Steps.Single(step => step.Priority == -15).Action(g);
+        Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty,
+            "The base model cannot silently consume an adapter assigned to a segment.");
+        RunSegment(g);
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        JArray modelPath = (JArray)sampler.Value["inputs"]!["model"]!;
+        JProperty modelNode = g.Workflow.Property(modelPath[0]!.Value<string>()!)!;
+        if (matchesSection)
+        {
+            Assert.That(modelNode.Value["class_type"]!.Value<string>(), Is.EqualTo("LoraLoaderModelOnly"));
+            Assert.That(modelNode.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
+            Assert.That(modelNode.Value["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
+        }
+        else
+        {
+            Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty,
+                "Negative control: a mismatch between the prompt's generated cid and selected scope must not apply the LoRA.");
+        }
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
     public void RealBaseLoaderToSegmentHandoffKeepsSectionLoRaDistinct(bool matchesSection)
     {
         // Unlike Prepare()'s synthetic base-model node, invoke the production
