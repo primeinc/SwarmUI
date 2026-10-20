@@ -29,24 +29,20 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException($"Unknown Qwen Image 2.1 segment sampling mode '{mode}'.");
         }
 
-        // A confined model LoRA must be encoded with the same Swarm/CLIP route that
-        // already works in ordinary generation. A source-image reference can overwhelm
-        // an identity edit, so only text-only segments add the crop automatically.
+        // A static UNET LoRA changes the model, not whether its text encoder
+        // receives the source image. Do not silently strip references just
+        // because a LoRA is confined to this segment.
         bool confinedLora = HasLorasForConfinement(sectionId);
         bool dynamicLora = UserInput.DynamicLoraIndices.Count > 0;
         bool originalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         List<JArray> references = [];
-        if (originalReference && !confinedLora && !dynamicLora)
+        if (originalReference && !dynamicLora)
         {
             references.Add(NodePath(crop.ScaledImage, 0));
         }
         if (UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> images)
             && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
         {
-            if (dynamicLora && images.Count > 0)
-            {
-                throw new SwarmUserErrorException("Native Qwen Image 2.1 reference conditioning cannot apply Swarm's scheduled dynamic LoRA hooks. Disable Prompt Images for that segment or use a static LoRA.");
-            }
             if (references.Count + images.Count > 16)
             {
                 throw new SwarmUserErrorException($"Qwen Image 2.1 supports at most sixteen reference images; got {references.Count + images.Count}.");
@@ -63,11 +59,23 @@ public partial class WorkflowGenerator
 
         JArray positive;
         JArray negative;
-        if (references.Count == 0)
+        if (dynamicLora || references.Count == 0)
         {
-            // Exactly the ordinary Qwen LoRA/dynamic-hook/prompt-tag conditioner.
+            // Use the SAME conditioning path as an ordinary Qwen image edit when
+            // scheduled LoRA hooks are present, rather than reimplementing hooks.
             positive = CreateConditioning(prompt ?? "", clip.Path, FinalLoadedModel, true, steps: steps);
             negative = CreateConditioning(negativePrompt ?? "", clip.Path, FinalLoadedModel, false, steps: steps);
+            // The ordinary sampling path attaches VAE reference latents using
+            // BuildInputImageHandling. Reuse it for the segment source as well.
+            if (originalReference)
+            {
+                (positive, negative) = WithSegmentSamplingVae(vae, () =>
+                {
+                    (JArray p, JArray n, _, _) = BuildInputImageHandling(
+                        [NodePath(crop.ScaledImage, 0)], positive, negative, NodePath(crop.MaskedLatent, 0));
+                    return (p, n);
+                });
+            }
         }
         else
         {
