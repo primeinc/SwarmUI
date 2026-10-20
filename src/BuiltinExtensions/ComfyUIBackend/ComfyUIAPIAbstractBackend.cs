@@ -977,16 +977,23 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// </summary>
     public static void PreflightRawQwenSegmentNodes(string rawWorkflow, IReadOnlySet<string> availableNodeTypes)
     {
+        // Use an unmistakable JSON-number sentinel for raw macros, including
+        // ones EMBEDDED inside a quoted class_type (eg "Inpaint${kind}").
+        // Replacing them with plain null only catches a class_type that is
+        // entirely a macro; "Inpaint${kind}" becomes "Inpaintnull" and can
+        // bypass preflight before an irreversible external image upload.
+        const string unresolvedClassMacro = "-9223372036854775000";
         string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
-            rawWorkflow, "${", "}", _ => "null");
+            rawWorkflow, "${", "}", _ => unresolvedClassMacro);
         JObject inventory = JObject.Parse(structuralGraph);
         // A macro-driven class_type cannot be verified before uploading
         // referenced files. Reject it rather than discovering unsupported
         // native nodes only after irreversible API-by-URL uploads.
         if (inventory.Properties().Any(property =>
             property.Value?["class_type"] is null
-            || property.Value["class_type"].Type == JTokenType.Null
-            || property.Value["class_type"].ToString() == "null"))
+            || property.Value["class_type"].Type != JTokenType.String
+            || property.Value["class_type"].ToString().Contains(
+                unresolvedClassMacro, StringComparison.Ordinal)))
         {
             throw new SwarmUserErrorException(
                 "Raw Comfy workflow class_type must be statically specified before image upload. " +
