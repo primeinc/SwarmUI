@@ -169,6 +169,9 @@ public partial class WorkflowGenerator
     /// <summary>If true, user-selected VAE may be wrong, so ignore it.</summary>
     public bool NoVAEOverride = false;
 
+    /// <summary>If true, the active stage model being segmented was produced by the refiner model-loader pipeline. Unlike IsRefinerStage, this persists after refiner sampling ends.</summary>
+    public bool CurrentModelFromRefiner = false;
+
     /// <summary>If true, the generator is currently working on the refiner stage.</summary>
     public bool IsRefinerStage = false;
 
