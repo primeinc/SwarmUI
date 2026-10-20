@@ -18,7 +18,29 @@ public partial class WorkflowGenerator
     /// </summary>
     public static string FlattenQwen21SegmentPrompt(string prompt)
     {
-        string text = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "");
+        string raw = prompt ?? "";
+        // ProcessPromptLikeForLength is Swarm's existing tag flattener,
+        // but its estimators would replace scheduled alternatives with the
+        // LONGEST variant (and silently discard embedded tokens). Those
+        // operations are estimates, not Qwen prompt semantics. Never pick a
+        // different instruction behind the user's back.
+        string[] unsupportedResidualTags = [
+            "<alternate:", "<alternate[", "<alt:", "<alt[",
+            "<fromto:", "<fromto[", "<random:", "<random[",
+            "<repeat:", "<repeat[", "<wildcard:", "<wc:",
+            "<embed:", "<embedding:", "<break>", "<lora:"
+        ];
+        foreach (string tag in unsupportedResidualTags)
+        {
+            if (raw.Contains(tag, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen segment has unsupported residual Swarm tag '{tag}'. " +
+                    "This tag cannot be flattened without changing the authored prompt; " +
+                    "resolve the tag before native Qwen conditioning.");
+            }
+        }
+        string text = T2IPromptHandling.ProcessPromptLikeForLength(raw);
         if (string.IsNullOrWhiteSpace(text))
         {
             throw new SwarmUserErrorException("Qwen segment prompt has no text after Swarm markup processing.");
