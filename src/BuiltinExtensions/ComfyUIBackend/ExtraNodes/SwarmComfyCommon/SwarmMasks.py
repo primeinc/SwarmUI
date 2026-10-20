@@ -184,6 +184,16 @@ class SwarmMaskBounds:
                 desired_width = height * actual_aspect
                 x_start = max(0, x_start - (desired_width - width) / 2)
                 x_end = min(mask.shape[1], x_start + desired_width)
+        if reject_empty:
+            # This existing Swarm coordinate node is the only runtime holder
+            # of the actual detection bounds. Log the concrete geometry so
+            # visual crop failures can be distinguished from sampler failures.
+            selected_pixels = torch.count_nonzero(mask > 0).item()
+            total_pixels = mask.numel()
+            print(f"[QWEN21-SEG] detector-bounds mask={mask.shape[1]}x{mask.shape[0]} "
+                  f"selected={selected_pixels}/{total_pixels} ({selected_pixels / total_pixels:.4f}) "
+                  f"crop=({int(x_start)},{int(y_start)},{int(x_end - x_start)},{int(y_end - y_start)}) "
+                  f"padding={grow} target_aspect={aspect_x}:{aspect_y}", flush=True)
         return (int(x_start), int(y_start), int(x_end - x_start), int(y_end - y_start))
 
 
