@@ -899,8 +899,8 @@ public class T2IParamTypes
         SegmentQwenUseOriginalReference = Register<bool>(new("Segment Qwen 2.1 Original Reference", "",
             "true", IgnoreIf: "true", FeatureFlag: "comfyui", IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.5
             ));
-        SegmentQwen21Sampling = Register<string>(new("Segment Qwen 2.1 Sampling", "",
-            "Reference Edit", IgnoreIf: "Reference Edit", FeatureFlag: "comfyui", GetValues: _ => ["Reference Edit", "Masked Img2Img"], IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.6
+        SegmentQwen21Sampling = Register<string>(new("Segment Qwen 2.1 Sampling", "Masked Img2Img is the native masked Qwen 2.1 inpainting workflow and is the default for segment edits. Reference Edit is unmasked whole-crop image editing, with the segment mask applied only when stitching.",
+            "Masked Img2Img", IgnoreIf: "Masked Img2Img", FeatureFlag: "comfyui", GetValues: _ => ["Masked Img2Img", "Reference Edit"], IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.6
             ));
         // ================================================ Advanced Sampling ================================================
         GroupAdvancedSampling = new("Advanced Sampling", Open: false, OrderPriority: 15, IsAdvanced: true);
