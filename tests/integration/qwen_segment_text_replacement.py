@@ -39,6 +39,7 @@ PROMPT = "Edit the image, replace the girl with a black boy with blue eyes"
 TAG = "<segment:girl,0.8,0.1>"
 NODE_IDS = {
     "before": "__swarm_text_probe_before",
+    "native_crop": "__swarm_text_probe_native_crop",
     "crop_before": "__swarm_text_probe_crop_before",
     "crop_after": "__swarm_text_probe_crop_after",
     "mask_image": "__swarm_text_probe_mask_image",
@@ -47,7 +48,7 @@ NODE_IDS = {
     "mask_used": "__swarm_text_probe_mask_used",
     "after": "__swarm_text_probe_after",
 }
-OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "mask_used", "after")
+OUTPUT_KINDS = ("before", "native_crop", "crop_before", "crop_after", "mask", "mask_used", "after")
 _HTTP = build_opener(ProxyHandler({}))
 
 
@@ -142,7 +143,20 @@ def inspect_and_instrument(original):
             "inputs": {"images": image_ref},
         }
     preview("before", compositor["destination"])
-    preview("crop_before", graph[diagnostics_id]["inputs"]["source"])
+    scaled_ref = graph[diagnostics_id]["inputs"]["source"]
+    if not isinstance(scaled_ref, list) or len(scaled_ref) != 2:
+        raise AssertionError("Qwen segment diagnostics lacks its linked scaled crop")
+    scaler = graph.get(str(scaled_ref[0]), {})
+    if scaler.get("class_type") != "SwarmImageScaleForMP":
+        raise AssertionError("Qwen segment source did not pass through SwarmImageScaleForMP")
+    unscaled_ref = scaler["inputs"]["image"]
+    if not isinstance(unscaled_ref, list) or len(unscaled_ref) != 2:
+        raise AssertionError("Qwen scaler has no original-size crop")
+    crop_node = graph.get(str(unscaled_ref[0]), {})
+    if crop_node.get("class_type") != "SwarmImageCrop":
+        raise AssertionError("Qwen edit is not using a real SwarmImageCrop")
+    preview("native_crop", unscaled_ref)
+    preview("crop_before", scaled_ref)
     preview("crop_after", [diagnostics_id, 0])
     graph[NODE_IDS["mask_image"]] = {
         "class_type": "MaskToImage",
@@ -255,8 +269,12 @@ def main(argv=None):
         used_mask_coverage = float(np.mean(used_mask > 0.05))
         crop_change = measure(images["crop_before"], images["crop_after"])
         composite_change = measure(images["before"], images["after"])
+        original_w, original_h = images["before"].size
+        crop_w, crop_h = images["native_crop"].size
+        native_crop_fraction = (crop_w * crop_h) / (original_w * original_h)
         failure = ("EMPTY_DETECTION" if mask_coverage < 0.005 else
                    "BROAD_DETECTION" if mask_coverage > 0.90 else
+                   "FULL_FRAME_CROP" if native_crop_fraction >= 0.90 else
                    "SAMPLER_CROP_UNCHANGED" if crop_change < 1.0 else
                    "FINAL_COMPOSITE_UNCHANGED" if composite_change < 1.0 else
                    "IMAGE_CHANGED_SEMANTIC_REVIEW_REQUIRED")
@@ -264,6 +282,9 @@ def main(argv=None):
             "attempt": i+1, "segment_seed": sampler[seed_key], "prompt_id": pid,
             "mask_fraction_above_5_percent": mask_coverage,
             "compositor_mask_fraction_above_5_percent": used_mask_coverage,
+            "native_crop_fraction_of_original": native_crop_fraction,
+            "native_crop_dimensions": [crop_w, crop_h],
+            "source_dimensions": [original_w, original_h],
             "crop_mean_absolute_rgb_difference": crop_change,
             "final_mean_absolute_rgb_difference": composite_change,
             "diagnostic": failure,

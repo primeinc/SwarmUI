@@ -152,8 +152,17 @@ class SwarmMaskBounds:
     DESCRIPTION = "Returns the bounding box of the mask (as pixel coordinates x,y,width,height), optionally grown by the number of pixels specified in 'grow'."
 
     def get_bounds(self, mask, grow, aspect_x=0, aspect_y=0):
-        if len(mask.shape) == 3:
+        # Reject empty detections rather than silently cropping the full image.
+        # The Qwen segment caller thresholds crop bounds independently of its
+        # final composite mask, so other masking behavior remains unchanged.
+        if len(mask.shape) == 4:
+            mask = mask[0, 0]
+        elif len(mask.shape) == 3:
             mask = mask[0]
+        elif len(mask.shape) != 2:
+            raise ValueError("SwarmMaskBounds: expected a 2D, 3D, or 4D mask")
+        if not torch.all(torch.isfinite(mask)) or not torch.any(mask > 0):
+            raise ValueError("SwarmMaskBounds: empty or invalid mask; no crop bounds")
         sum_x = (torch.sum(mask, dim=0) != 0).to(dtype=torch.int)
         sum_y = (torch.sum(mask, dim=1) != 0).to(dtype=torch.int)
         def getval(arr, direction):
