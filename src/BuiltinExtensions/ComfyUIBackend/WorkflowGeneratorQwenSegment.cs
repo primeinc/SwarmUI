@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -11,33 +10,20 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Preserve a user's multiword natural-language edit request verbatim.
-    /// Only a bare single-token trigger (after flattening Swarm markup) is
-    /// unambiguous enough to turn into a replacement instruction.
-    /// No fixed English verb allowlist can safely classify every instruction.
+    /// Translate the already-processed Swarm prompt syntax into the plain
+    /// text expected by native TextEncodeQwenImage21. Never generate an edit
+    /// instruction, insert an image token, or reinterpret the author's words.
+    /// PromptRegion already removed the segment directive and the request
+    /// parser already resolved Swarm wildcards and dynamic prompt tags.
     /// </summary>
-    public static string BuildQwen21SegmentEditInstruction(
-        string prompt, string target, bool hasCroppedReference = true)
+    public static string FlattenQwen21SegmentPrompt(string prompt)
     {
-        string raw = (prompt ?? "").Trim();
-        string text = T2IPromptHandling.ProcessPromptLikeForLength(raw).Trim();
+        string text = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "");
         if (string.IsNullOrWhiteSpace(text))
         {
-            throw new SwarmUserErrorException("Qwen segment edit requires an instruction or replacement description.");
+            throw new SwarmUserErrorException("Qwen segment prompt has no text after Swarm markup processing.");
         }
-        if (text.Any(char.IsWhiteSpace))
-        {
-            // "Give the girl blue eyes" must not become "Replace ... with Give ...".
-            // Descriptive multiword phrases are also left untouched rather than
-            // making up an edit intention. For targeted replacement, the user
-            // may supply a complete instruction, as in the known reproduction.
-            return text;
-        }
-        string subject = string.IsNullOrWhiteSpace(target) ||
-            target.StartsWith("yolo-", StringComparison.OrdinalIgnoreCase) || target.Contains('|')
-                ? "selected subject" : target.Trim();
-        string reference = hasCroppedReference ? " in <image1>" : "";
-        return $"Replace the {subject}{reference} with {text}. Keep the rest of the image unchanged.";
+        return text;
     }
 
     /// <summary>
@@ -51,7 +37,7 @@ public partial class WorkflowGenerator
 
     public (JArray Positive, JArray Negative, JArray Latent) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
-        JArray croppedImage, JArray croppedMask, int sectionId, string segmentTarget = null)
+        JArray croppedImage, JArray croppedMask, int sectionId)
     {
         if (croppedImage is null || croppedMask is null || clip is null || vae is null)
         {
@@ -76,16 +62,16 @@ public partial class WorkflowGenerator
             throw new SwarmUserErrorException("Native TextEncodeQwenImage21 does not support VAE tiling for reference images.");
         }
 
-        // Swarm weight tags are parsed by SwarmTextEncodeAdvanced, not by the
-        // native Qwen encoder. Reuse Swarm\'s existing prompt-text flattener
-        // so Qwen sees the actual subject and LoRA trigger, not literal markup.
+        // The native Qwen encoder has no Swarm weight-markup parser. Flatten
+        // Swarm tags only; pass the user's actual segment and negative text
+        // without generating replacement sentences or image references.
         bool useOriginal = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
         JObject inputs = new()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["prompt"] = BuildQwen21SegmentEditInstruction(prompt, segmentTarget, hasCroppedReference: useOriginal),
-            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? "").Trim(),
+            ["prompt"] = FlattenQwen21SegmentPrompt(prompt),
+            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? ""),
             ["resolution"] = 0
         };
         int slot = 1;
