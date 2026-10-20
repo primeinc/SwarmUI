@@ -29,7 +29,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.SamplerParam ??= new(new T2IParamType("Sampler", "", "euler", ID: "sampler"));
         ComfyUIBackendExtension.SchedulerParam ??= new(new T2IParamType("Scheduler", "", "simple", ID: "scheduler"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
-        ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents"));
+        ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
     }
 
     [SetUp]
@@ -69,8 +69,9 @@ public class QwenSegmentPipelineTests : SwarmUITest
         };
         T2IParamInput input = new(null);
         input.Set(T2IParamTypes.Model, model);
-        input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,0.8,{creativity}//cid=11>make the face blue" + (secondSegment ? "<segment:hair,0.8,1//cid=12>make the hair red" : ""));
-        input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,0.8,1//cid=11>segment negative");
+        input.Set(T2IParamTypes.Prompt, $"base scene <segment:face,{creativity},0.8//cid=11>make the face blue" + (secondSegment ? "<segment:hair,1,0.8//cid=12>make the hair red" : ""));
+        input.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8//cid=11>segment negative");
+        Assert.That(new PromptRegion(input.Get(T2IParamTypes.Prompt)).Parts.First().Strength2, Is.EqualTo(creativity).Within(0.00001), "Fixture must use the actual target,creativity,threshold tag order");
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
         input.Set(T2IParamTypes.Steps, 20);
@@ -173,7 +174,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     public void MaskedModeKeepsPartialDenoiseAndMaskedCrop()
     {
         WorkflowGenerator g = Prepare(creativity: 0.6);
-        g.UserInput.InternalSet.ValuesInput["segmentqwen21sampling"] = "Masked Img2Img";
+        g.UserInput.InternalSet.ValuesInput[T2IParamTypes.CleanTypeName("Segment Qwen 2.1 Sampling")] = "Masked Img2Img";
         RunSegment(g);
         Assert.That(Nodes(g, "TextEncodeQwenImage21"), Has.Length.EqualTo(1), "QWEN_NATIVE_SEGMENT_MISSING");
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
