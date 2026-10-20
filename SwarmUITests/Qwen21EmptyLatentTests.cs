@@ -58,8 +58,8 @@ public class Qwen21EmptyLatentTests : SwarmUITest
         Assert.That(node["inputs"]?["height"]?.ToObject<int>(), Is.EqualTo(height),
             "Do not halve the text-to-image canvas height");
         Assert.That(node["inputs"]?["batch_size"]?.ToObject<int>(), Is.EqualTo(batchSize));
-        Assert.That(latent.Width?.ToObject<int>(), Is.EqualTo(width));
-        Assert.That(latent.Height?.ToObject<int>(), Is.EqualTo(height));
+        Assert.That(latent.Width, Is.EqualTo(width));
+        Assert.That(latent.Height, Is.EqualTo(height));
     }
     [Test]
     public void MainQwenImage21ReferencesMustKeepIndependentGeometryAndVisionSockets()
