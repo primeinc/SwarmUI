@@ -299,7 +299,8 @@ def main(argv=None):
     # A checked-in plugin does not prove Comfy loaded or registered it.
     for expected_node in (
         "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
-        "KSampler", "LanPaint_ImageDecode", "SwarmRequireNonEmptyMask",
+        "SwarmClipSeg", "SwarmRequireNonEmptyMask", "LanPaint_ImageEncode",
+        "LanPaint_KSampler", "LanPaint_ImageDecode",
     ):
         registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
         if expected_node not in registered:
