@@ -197,6 +197,9 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
         with patch.object(probe, "fetch_json", side_effect=schema_fetch):
             with self.assertRaisesRegex(AssertionError, "image_2"):
                 probe.validate_runtime_node_contracts("http://example.invalid", graph)
+            declared["image_2"] = ["MASK"]
+            with self.assertRaisesRegex(AssertionError, "non-IMAGE"):
+                probe.validate_runtime_node_contracts("http://example.invalid", graph)
             declared["image_2"] = ["IMAGE"]
             self.assertTrue(
                 probe.validate_runtime_node_contracts("http://example.invalid", graph))
@@ -225,6 +228,9 @@ class OfflineGraphPreflightUnitTests(unittest.TestCase):
 
         with patch.object(probe, "fetch_json", side_effect=schema_fetch):
             with self.assertRaisesRegex(AssertionError, "qwen21_prevent_empty_text"):
+                probe.validate_runtime_node_contracts("http://example.invalid", graph)
+            declared["qwen21_prevent_empty_text"] = ["IMAGE"]
+            with self.assertRaisesRegex(AssertionError, "as BOOLEAN"):
                 probe.validate_runtime_node_contracts("http://example.invalid", graph)
             declared["qwen21_prevent_empty_text"] = ["BOOLEAN"]
             self.assertTrue(probe.validate_runtime_node_contracts(
