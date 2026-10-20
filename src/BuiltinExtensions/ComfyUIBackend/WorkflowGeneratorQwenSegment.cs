@@ -30,7 +30,7 @@ public partial class WorkflowGenerator
         }
 
         bool useOriginalReference = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
-        string encoder = CreateNode("SwarmQwenImage21SegmentEncode", new JObject()
+        JObject encoderInputs = new()
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
@@ -38,7 +38,27 @@ public partial class WorkflowGenerator
             ["prompt"] = prompt ?? "",
             ["negative_prompt"] = negativePrompt ?? "",
             ["use_original_reference"] = useOriginalReference
-        });
+        };
+        // Qwen supports sixteen individual references; the segment crop consumes one
+        // when enabled. Keep every optional prompt image in its own native vision slot.
+        if (UserInput.TryGet(T2IParamTypes.PromptImages, out System.Collections.Generic.List<Image> referenceImages)
+            && UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none")
+        {
+            int maxPromptImages = useOriginalReference ? 15 : 16;
+            if (referenceImages.Count > maxPromptImages)
+            {
+                throw new SwarmUserErrorException($"Qwen Image 2.1 segment accepts at most {maxPromptImages} Prompt Images with the current Original Reference setting; got {referenceImages.Count}.");
+            }
+            for (int i = 0; i < referenceImages.Count; i++)
+            {
+                JArray referenceImage = GetPromptImage(true, true, i);
+                if (referenceImage is not null)
+                {
+                    encoderInputs[$"image_{i + 1}"] = referenceImage;
+                }
+            }
+        }
+        string encoder = CreateNode("SwarmQwenImage21SegmentEncode", encoderInputs);
 
         int startStep = (int)Math.Round(steps * (1 - creativity));
         JArray latent;
