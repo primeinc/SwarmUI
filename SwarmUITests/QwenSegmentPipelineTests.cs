@@ -58,7 +58,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = priorHashSetting;
     }
 
-    private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false)
+    private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false, bool withLora = true)
     {
         T2IModelCompatClass compat = qwen ? T2IModelClassSorter.CompatQwenImage21 : T2IModelClassSorter.CompatKrea2;
         T2IModel model = new(null, "/fixture", "/fixture/model.safetensors", "model.safetensors")
@@ -75,9 +75,12 @@ public class QwenSegmentPipelineTests : SwarmUITest
         input.Set(T2IParamTypes.Steps, 20);
         input.Set(T2IParamTypes.CFGScale, 1.0);
         input.Set(T2IParamTypes.Seed, 42L);
-        input.Set(T2IParamTypes.Loras, secondSegment ? new List<string> { "face", "hair" } : new List<string> { "face" });
-        input.Set(T2IParamTypes.LoraWeights, secondSegment ? new List<string> { "0.8", "0.6" } : new List<string> { "0.8" });
-        input.Set(T2IParamTypes.LoraSectionConfinement, secondSegment ? new List<string> { "11", "12" } : new List<string> { "11" });
+        if (withLora)
+        {
+            input.Set(T2IParamTypes.Loras, secondSegment ? new List<string> { "face", "hair" } : new List<string> { "face" });
+            input.Set(T2IParamTypes.LoraWeights, secondSegment ? new List<string> { "0.8", "0.6" } : new List<string> { "0.8" });
+            input.Set(T2IParamTypes.LoraSectionConfinement, secondSegment ? new List<string> { "11", "12" } : new List<string> { "11" });
+        }
         WorkflowGenerator g = new() { UserInput = input, Workflow = new(), FinalLoadedModel = model, ModelFolderFormat = "/", Features = ["variation_seed"] };
         g.CreateNode("UNETLoader", new JObject() { ["unet_name"] = "model.safetensors" }, "base-model");
         g.CreateNode("CLIPLoader", new JObject() { ["clip_name"] = "text.safetensors" }, "base-clip");
@@ -107,7 +110,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [TestCase(true)]
     public void ReferenceEditUsesPlainCropLatentAndRuntimeDiagnostics(bool beforeRefiner)
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: false);
         RunSegment(g, beforeRefiner);
 
         Assert.That(Nodes(g, "TextEncodeQwenImage21"), Is.Empty, "No dependency on the newer upstream node is allowed.");
@@ -151,7 +154,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void ReferenceEditUsesCreativityAsEditControl()
     {
-        WorkflowGenerator g = Prepare(creativity: 0.8);
+        WorkflowGenerator g = Prepare(creativity: 0.8, withLora: false);
         RunSegment(g);
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.EqualTo(4));
@@ -163,7 +166,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void ReferenceEditDoesNotRequireNativeComfyEncoderFeature()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: false);
         Assert.That(g.Features, Does.Not.Contain("qwen21_native_conditioning"));
         RunSegment(g);
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
@@ -173,8 +176,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void TextOnlySegmentStillUsesQwenEncoderWithoutLora()
     {
-        WorkflowGenerator g = Prepare();
-        g.UserInput.Remove(T2IParamTypes.Loras);
+        WorkflowGenerator g = Prepare(withLora: false);
         RunSegment(g);
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty);
         JProperty encoder = Nodes(g, "SwarmQwenImage21SegmentEncode").Single();
@@ -188,7 +190,8 @@ public class QwenSegmentPipelineTests : SwarmUITest
         g.UserInput.Set(T2IParamTypes.SegmentModel, g.FinalLoadedModel);
         g.NodeHelpers["modelloader_model.safetensors_Refiner"] = "base-model:0:base-clip:0:base-vae:0";
         RunSegment(g);
-        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty);
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.EqualTo(2));
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Has.Length.EqualTo(1));
     }
 
@@ -205,7 +208,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void MaskedModeKeepsPartialDenoiseAndDifferentialDiffusion()
     {
-        WorkflowGenerator g = Prepare(creativity: 0.6);
+        WorkflowGenerator g = Prepare(creativity: 0.6, withLora: false);
         g.UserInput.InternalSet.ValuesInput[T2IParamTypes.CleanTypeName("Segment Qwen 2.1 Sampling")] = "Masked Img2Img";
         RunSegment(g);
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
@@ -221,11 +224,13 @@ public class QwenSegmentPipelineTests : SwarmUITest
     {
         WorkflowGenerator g = Prepare(secondSegment: true);
         RunSegment(g);
-        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty);
         Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(2));
 
-        JProperty[] encoders = Nodes(g, "SwarmQwenImage21SegmentEncode");
-        Assert.That(encoders.Select(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim()), Is.EquivalentTo(new[] { "make the face blue", "make the hair red" }));
+        JProperty[] encoders = Nodes(g, "SwarmTextEncodeAdvanced");
+        Assert.That(encoders, Has.Length.EqualTo(4));
+        Assert.That(encoders.Select(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim()),
+            Does.Contain("make the face blue").And.Contain("make the hair red"));
 
         JProperty[] samplers = Nodes(g, "SwarmKSampler");
         JToken firstModel = g.Workflow[samplers[0].Value["inputs"]!["model"]![0]!.Value<string>()!]!;
@@ -233,6 +238,34 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(firstModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
         Assert.That(secondModel["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("hair.safetensors"));
         Assert.That(secondModel["inputs"]!["model"], Is.EqualTo(firstModel["inputs"]!["model"]));
+    }
+
+    [Test]
+    public void ScopedQwenLoraCutsReferenceConditioningAndUsesTextOnlyImg2Img()
+    {
+        WorkflowGenerator g = Prepare();
+        RunSegment(g);
+
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty,
+            "A confined Qwen LoRA must not compete with source-subject reference conditioning.");
+        Assert.That(Nodes(g, "ReferenceLatent"), Is.Empty);
+        JProperty[] textEncoders = Nodes(g, "SwarmTextEncodeAdvanced");
+        Assert.That(textEncoders, Has.Length.EqualTo(2));
+        Assert.That(textEncoders.Any(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim() == "make the face blue"), Is.True);
+        Assert.That(textEncoders.All(e => e.Value["inputs"]!["images"] is null), Is.True);
+
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        JProperty plainCropEncode = Nodes(g, "VAEEncode").Single(p =>
+            p.Value["inputs"]!["pixels"] is JArray pixels
+            && JToken.DeepEquals(pixels, new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
+        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(plainCropEncode.Name, 0)));
+
+        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
+        Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)));
+        Assert.That(lora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
+
+        JProperty diagnostic = Nodes(g, "SwarmQwen21SegmentDiagnostics").Single();
+        Assert.That(diagnostic.Value["inputs"]!["mode"]!.Value<string>(), Is.EqualTo("LoRA Img2Img"));
     }
 
     [Test]
