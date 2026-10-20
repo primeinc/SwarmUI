@@ -116,8 +116,9 @@ class SwarmQwenImage21SegmentEncode:
             positive = node_helpers.conditioning_set_values(positive, {"reference_latents": ref_latents}, append=True)
             negative = node_helpers.conditioning_set_values(negative, {"reference_latents": ref_latents}, append=True)
 
-        # Keep the native-compatible third output for workflow/debug parity. Segment Reference Edit
-        # intentionally does not sample from it; it uses a VAE encoding of the crop as its edit anchor.
+        # Match upstream TextEncodeQwenImage21 output 2: a fresh Qwen latent sized
+        # to the source/reference crop. Reference Edit samples this latent; the
+        # source image influences generation through reference conditioning.
         latent = {
             "samples": torch.zeros(
                 [1, 64, height // 16, width // 16],
