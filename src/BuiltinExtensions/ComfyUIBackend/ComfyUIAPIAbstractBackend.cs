@@ -1044,9 +1044,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         catch (Exception ex)
         {
             Logs.Verbose($"Error: {ex.ReadableString()}");
-            string diagnosticGraph = workflow is null
-                ? "(workflow generation incomplete)"
-                : JObject.Parse(workflow).ToDenseDebugString(noSpacing: true);
+            string diagnosticGraph = workflow ?? "(workflow generation incomplete)";
+            if (workflow is not null)
+            {
+                try
+                {
+                    diagnosticGraph = JObject.Parse(workflow).ToDenseDebugString(noSpacing: true);
+                }
+                catch (JsonException)
+                {
+                    // Invalid workflow JSON is itself a possible cause of
+                    // failure. Logging must not replace the original exception.
+                }
+            }
             Logs.Debug($"Failed to process comfy workflow for inputs {user_input} with raw workflow {diagnosticGraph}");
             throw;
         }
