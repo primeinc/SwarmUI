@@ -2128,6 +2128,22 @@ public class WorkflowGeneratorSteps
                     g.CurrentMedia = g.CurrentMedia.AsRawImage(vae);
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
                     JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: nativeQwenSegment, preserveSoftMask: nativeQwenSegment, useNativeComposite: nativeQwenSegment);
+                    // The sampler preview is the entire generated crop, before
+                    // masking. This second preview is the EXACT crop of the final
+                    // composited result and therefore shows what was really applied.
+                    if (nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false))
+                    {
+                        string finalPreviewCrop = g.CreateNode("ImageCrop", new JObject()
+                        {
+                            ["image"] = composited,
+                            ["x"] = NodePath(g.MaskShrunkInfo.BoundsNode, 0),
+                            ["y"] = NodePath(g.MaskShrunkInfo.BoundsNode, 1),
+                            ["width"] = NodePath(g.MaskShrunkInfo.BoundsNode, 2),
+                            ["height"] = NodePath(g.MaskShrunkInfo.BoundsNode, 3)
+                        });
+                        new WGNodeData([finalPreviewCrop, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat())
+                            .SaveOutput(null, null, g.GetStableDynamicID(50000, 0));
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }
