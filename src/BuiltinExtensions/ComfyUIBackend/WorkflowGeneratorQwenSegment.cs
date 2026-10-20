@@ -48,8 +48,8 @@ public partial class WorkflowGenerator
         {
             ["clip"] = clip.Path,
             ["vae"] = vae.Path,
-            ["prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? ""),
-            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? ""),
+            ["prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(prompt ?? "").Trim(),
+            ["negative_prompt"] = T2IPromptHandling.ProcessPromptLikeForLength(negativePrompt ?? "").Trim(),
             ["resolution"] = 0
         };
         bool useOriginal = UserInput.Get(T2IParamTypes.SegmentQwenUseOriginalReference, true, sectionId: sectionId);
