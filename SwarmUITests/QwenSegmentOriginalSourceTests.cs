@@ -49,17 +49,19 @@ public class QwenSegmentOriginalSourceTests
     }
 
     /// <summary>Executes the real Swarm generator, not a synthetic node-graph fixture.</summary>
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false)]
-    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true)]
-    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true)]
-    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images)
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1)]
+    [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 2)]
+    [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 2)]
+    public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize)
     {
         if (T2IParamTypes.Model is null)
         {
@@ -143,6 +145,7 @@ public class QwenSegmentOriginalSourceTests
         }
         input.Set(T2IParamTypes.Prompt, prompt);
         input.Set(T2IParamTypes.Seed, 20261020L);
+        input.Set(T2IParamTypes.BatchSize, batchSize);
         input.Set(T2IParamTypes.Steps, 12);
         input.Set(T2IParamTypes.Width, 1024);
         input.Set(T2IParamTypes.Height, 1024);
@@ -176,6 +179,41 @@ public class QwenSegmentOriginalSourceTests
         };
         Newtonsoft.Json.Linq.JObject graph = generator.Generate();
         var nodes = graph.Properties().Select(p => (Id: p.Name, Node: (Newtonsoft.Json.Linq.JObject)p.Value)).ToArray();
+        if (batchSize > 1)
+        {
+            var cropNodes = nodes.Where(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved").ToArray();
+            var detectors = nodes.Where(x => x.Node["class_type"]?.ToString() == "SwarmClipSeg").ToArray();
+            var samplers = nodes.Where(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler").ToArray();
+            var encoders = nodes.Where(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21").ToArray();
+            var stitches = nodes.Where(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved").ToArray();
+            var splitNodes = nodes.Where(x => x.Node["class_type"]?.ToString() == "ImageFromBatch").ToArray();
+            Assert.That(cropNodes, Has.Length.EqualTo(batchSize), "Each batch item needs its own crop");
+            Assert.That(detectors, Has.Length.EqualTo(batchSize), "Each batch item needs its own detector");
+            Assert.That(samplers, Has.Length.EqualTo(batchSize), "Each batch item needs independent inference");
+            Assert.That(encoders, Has.Length.EqualTo(batchSize), "Each batch item needs its own Qwen reference");
+            Assert.That(stitches, Has.Length.EqualTo(batchSize), "Each batch item needs its matching stitch");
+            Assert.That(splitNodes, Has.Length.EqualTo(batchSize), "Split source batch before detection");
+            var indexes = splitNodes.Select(x => x.Node["inputs"]?["batch_index"]?.ToObject<int>()).ToArray();
+            Assert.That(indexes, Is.EquivalentTo(new int?[] { 0, 1 }));
+            for (int i = 0; i < batchSize; i++)
+            {
+                string sourceId = cropNodes[i].Node["inputs"]?["image"]?[0]?.ToString();
+                Assert.That(graph[sourceId]?["class_type"]?.ToString(), Is.EqualTo("ImageFromBatch"));
+                Assert.That(detectors[i].Node["inputs"]?["images"]?.ToString(),
+                    Is.EqualTo(cropNodes[i].Node["inputs"]?["image"]?.ToString()));
+                Assert.That(encoders[i].Node["inputs"]?["prompt"]?.ToString(),
+                    Is.EqualTo(" Edit the image, replace the girl with a black boy with blue eyes"));
+                Assert.That(encoders[i].Node["inputs"]?["images.image_1"]?.ToString(),
+                    Is.EqualTo(new Newtonsoft.Json.Linq.JArray(cropNodes[i].Id, 1).ToString()));
+                Assert.That(stitches[i].Node["inputs"]?["stitcher"]?.ToString(),
+                    Is.EqualTo(new Newtonsoft.Json.Linq.JArray(cropNodes[i].Id, 0).ToString()));
+            }
+            var seeds = samplers.Select(x => x.Node["inputs"]?["seed"]?.ToObject<long>()).ToArray();
+            Assert.That(seeds.Distinct().Count(), Is.EqualTo(batchSize), "Batch copies require distinct sampler noise");
+            Assert.That(nodes.Count(x => x.Node["class_type"]?.ToString() is "SaveImage" or "SwarmSaveImageWS"),
+                Is.EqualTo(1), "One final batch output, not per-crop diagnostics");
+            return;
+        }
         var crop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
         var detector = nodes.Single(x => x.Node["class_type"]?.ToString() == "SwarmClipSeg");
         var sampler = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler");
