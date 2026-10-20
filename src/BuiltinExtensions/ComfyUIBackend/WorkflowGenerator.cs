@@ -624,9 +624,22 @@ public partial class WorkflowGenerator
     /// <param name="threshold">Optional minimum value threshold.</param>
     /// <param name="thresholdMax">Optional maximum value of the threshold.</param>
     /// <returns>(boundsNode, croppedMask, maskedLatent, scaledImage).</returns>
-    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1)
+    public ImageMaskCropData CreateImageMaskCrop(JArray mask, JArray image, int growBy, JArray vae, T2IModel model, double threshold = 0.01, double thresholdMax = 1, JArray boundsMask = null)
     {
-        if (threshold > 0)
+        // Qwen segment crop bounds are determined by the raw detection, not
+        // the blur / grow that is applied exclusively during compositing.
+        // Upstream ThresholdMask creates stable binary bounds; the original
+        // soft mask is still cropped and used as the final blend mask.
+        JArray maskForBounds = boundsMask ?? mask;
+        if (boundsMask is not null)
+        {
+            maskForBounds = NodePath(CreateNode("ThresholdMask", new JObject()
+            {
+                ["mask"] = maskForBounds,
+                ["value"] = 0.5
+            }), 0);
+        }
+        else if (threshold > 0)
         {
             string thresholded = CreateNode("SwarmMaskThreshold", new JObject()
             {
@@ -635,6 +648,7 @@ public partial class WorkflowGenerator
                 ["max"] = thresholdMax
             });
             mask = [thresholded, 0];
+            maskForBounds = mask;
         }
         string targetRes = UserInput.Get(T2IParamTypes.SegmentTargetResolution, "0x0");
         (string targetWidth, string targetHeight) = targetRes.BeforeAndAfter('x');
@@ -643,12 +657,12 @@ public partial class WorkflowGenerator
         bool isCustomRes = targetX > 0 && targetY > 0;
         string boundsNode = CreateNode("SwarmMaskBounds", new JObject()
         {
-            ["mask"] = mask,
+            ["mask"] = maskForBounds,
             ["grow"] = growBy,
             ["aspect_x"] = isCustomRes ? targetX : 0,
             ["aspect_y"] = isCustomRes ? targetY : 0
         });
-        string croppedImage = CreateNode("SwarmImageCrop", new JObject()
+        string croppedImage = CreateNode(boundsMask is null ? "SwarmImageCrop" : "ImageCrop", new JObject()
         {
             ["image"] = image,
             ["x"] = NodePath(boundsNode, 0),
@@ -706,7 +720,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Recomposites a masked image edit, after <see cref="CreateImageMaskCrop(JArray, JArray, int)"/> was used.</summary>
-    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false, bool preserveSoftMask = false)
+    public JArray RecompositeCropped(string boundsNode, JArray croppedMask, JArray firstImage, JArray newImage, bool stripSourceAlpha = false, bool preserveSoftMask = false, bool useNativeComposite = false)
     {
         // Segment masks govern where an edit is applied. Qwen Image 2.1 can return RGBA pixels,
         // and the compositor otherwise multiplies the segment mask by the generated alpha.
@@ -740,13 +754,9 @@ public partial class WorkflowGenerator
                 ["mask"] = croppedMask,
                 ["value"] = 0.5
             });
-            string featheredEdge = CreateNode("SwarmMaskBlur", new JObject()
-            {
-                ["mask"] = NodePath(subjectMask, 0),
-                ["blur_radius"] = 2,
-                ["sigma"] = 1.0
-            });
-            croppedMask = NodePath(featheredEdge, 0);
+            // Thresholding the compositing mask is a stock ComfyUI operation.
+            // Avoid custom Python post-processors in the Qwen edit path.
+            croppedMask = NodePath(subjectMask, 0);
         }
         else if (!preserveSoftMask && !useRawMask)
         {
@@ -758,21 +768,23 @@ public partial class WorkflowGenerator
             });
             croppedMask = [thresholded, 0];
         }
-        string nodeClass = "ImageCompositeMasked";
-        if (Features.Contains("variation_seed") && !RestrictCustomNodes)
-        {
-            nodeClass = "SwarmImageCompositeMaskedColorCorrecting";
-        }
-        string composited = CreateNode(nodeClass, new JObject()
+        // The Qwen path uses the unchanged ComfyUI ImageCompositeMasked node.
+        // Other model families retain Swarm's optional color correction behavior.
+        bool customComposite = !useNativeComposite && Features.Contains("variation_seed") && !RestrictCustomNodes;
+        JObject compositeInputs = new()
         {
             ["destination"] = firstImage,
             ["source"] = NodePath(scaledBack, 0),
             ["mask"] = croppedMask,
             ["x"] = NodePath(boundsNode, 0),
             ["y"] = NodePath(boundsNode, 1),
-            ["resize_source"] = false,
-            ["correction_method"] = UserInput.Get(T2IParamTypes.ColorCorrectionBehavior, "None")
-        });
+            ["resize_source"] = false
+        };
+        if (customComposite)
+        {
+            compositeInputs["correction_method"] = UserInput.Get(T2IParamTypes.ColorCorrectionBehavior, "None");
+        }
+        string composited = CreateNode(customComposite ? "SwarmImageCompositeMaskedColorCorrecting" : "ImageCompositeMasked", compositeInputs);
         return [composited, 0];
     }
 
