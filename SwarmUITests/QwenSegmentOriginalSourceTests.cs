@@ -57,6 +57,18 @@ public class QwenSegmentOriginalSourceTests
         {
             T2IParamTypes.RegisterDefaults();
         }
+        // Normal application startup registers ComfyUI extension parameters.
+        // NUnit's source-only test process does not run extension startup.
+        // Register only the parameter handles exercised by this graph.
+        static void ensureComfyParam(ref T2IRegisteredParam<string> param, string name, string defaultValue)
+        {
+            param ??= T2IParamTypes.Register<string>(
+                new("Qwen Smoke " + name, "Test-only Comfy graph parameter", defaultValue));
+        }
+        ensureComfyParam(ref ComfyUIBackendExtension.PreferredDType, "Preferred DType", "automatic");
+        ensureComfyParam(ref ComfyUIBackendExtension.SamplerParam, "Sampler", "euler");
+        ensureComfyParam(ref ComfyUIBackendExtension.SchedulerParam, "Scheduler", "simple");
+        ensureComfyParam(ref ComfyUIBackendExtension.TextEncodedImage, "Text Encoded Image", "auto");
         T2IModelClass modelClass = new()
         {
             ID = T2IModelClassSorter.CompatQwenImage21.ID,
