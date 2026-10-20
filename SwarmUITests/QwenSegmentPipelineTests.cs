@@ -315,6 +315,25 @@ public class QwenSegmentPipelineTests : SwarmUITest
     }
 
     [Test]
+    public void NativeQwenSegmentPreservesConditioningPostTransforms()
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.ConditioningMultiplier, 0.7);
+        g.UserInput.Set(T2IParamTypes.NegativeConditioningMultiplier, 0.5);
+        g.UserInput.Set(T2IParamTypes.NegativePrompt, "");
+        g.UserInput.Set(T2IParamTypes.ZeroNegative, true);
+        RunSegment(g);
+
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        JProperty positive = Nodes(g, "ConditioningMultiply").Single(p => p.Name == sampler.Value["inputs"]!["positive"]![0]!.Value<string>());
+        Assert.That(positive.Value["inputs"]!["multiplier"]!.Value<double>(), Is.EqualTo(0.7).Within(0.001));
+        JProperty zero = Nodes(g, "ConditioningZeroOut").Single();
+        Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(zero.Name, 0)));
+        JProperty negative = Nodes(g, "ConditioningMultiply").Single(p => p.Name == zero.Value["inputs"]!["conditioning"]![0]!.Value<string>());
+        Assert.That(negative.Value["inputs"]!["multiplier"]!.Value<double>(), Is.EqualTo(0.5).Within(0.001));
+    }
+
+    [Test]
     public void ZeroCreativityStillSavesRequestedSegmentMask()
     {
         WorkflowGenerator g = Prepare(creativity: 0);
