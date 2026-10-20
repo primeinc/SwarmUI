@@ -84,69 +84,79 @@ def inspect_and_instrument(original):
     if detection.get("match_text", "").strip().casefold() != "girl":
         raise AssertionError(f"Expected CLIPSeg match_text='girl', got {detection.get('match_text')!r}")
     if abs(float(detection.get("threshold", -1)) - 0.1) > 1e-4:
-        raise AssertionError(f"Expected exact reported mask threshold 0.1, got {detection.get('threshold')!r}")
+        raise AssertionError(f"Expected exact reported detection threshold 0.1, got {detection.get('threshold')!r}")
+
+    if any(n["class_type"] == "SwarmQwenImage21SegmentEncode" for n in graph.values()):
+        raise AssertionError("OBSOLETE HANDROLLED QWEN ENCODER: Swarm must use native TextEncodeQwenImage21")
     enc_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "SwarmQwenImage21SegmentEncode"],
-        "Qwen 2.1 segment encoder",
+        [k for k, v in graph.items() if v["class_type"] == "TextEncodeQwenImage21"],
+        "native ComfyUI TextEncodeQwenImage21",
     )
     encoder = graph[enc_id]["inputs"]
     if encoder.get("prompt", "").strip() != PROMPT:
         raise AssertionError(f"Expected exact segment instruction {PROMPT!r}, got {encoder.get('prompt')!r}")
-    diagnostics_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "SwarmQwen21SegmentDiagnostics"],
-        "Qwen segment diagnostics node",
+    if "images.image_2" in encoder:
+        raise AssertionError(
+            "DUPLICATE EDIT SOURCE: the one-image InitEdit has an extra reference. "
+            "Refusing costly GPU generation on a known-bad graph."
+        )
+    crop_id = capture.link(encoder.get("images.image_1"), graph)
+    if crop_id is None or graph[crop_id]["class_type"] != "SwarmImageScaleForMP":
+        raise AssertionError("Native Qwen vision input must come from the detected, scaled segment crop")
+    raw_crop_ref = graph[crop_id]["inputs"].get("image")
+    raw_crop_id = capture.link(raw_crop_ref, graph)
+    if raw_crop_id is None or graph[raw_crop_id]["class_type"] not in ("ImageCrop", "SwarmImageCrop"):
+        raise AssertionError("Segment crop preview is not connected to the actual cropped source image")
+
+    sampler_id = require_single(
+        [k for k, v in graph.items()
+         if v["class_type"] == "KSampler" and
+         v["inputs"].get("latent_image") == [enc_id, 2]],
+        "native KSampler consuming Qwen's own empty edit latent",
     )
-    compositor_id = require_single(
-        [key for key, node in graph.items()
-         if node["class_type"] in capture.COMPOSITES
-         and diagnostics_id in capture.upstream(
-             graph, capture.roots(node["inputs"].get("source"), graph))],
-        "segment compositor whose source is the real Qwen diagnostics output",
-    )
-    compositor = graph[compositor_id]["inputs"]
-    if "destination" not in compositor:
-        raise AssertionError("Segment compositor has no pre-segmentation destination image")
-    report = capture.analyze(graph)
-    segment_samplers = [
-        seg for seg in report["segments"]
-        if any(c["id"] == compositor_id for c in seg["compositors"])
-    ]
-    segment = require_single(segment_samplers, "segment sampler feeding the final composite")
-    sampler_id = segment["sampler"]
     sampler = graph[sampler_id]["inputs"]
     steps = int(sampler.get("steps", 0))
-    actual_start = int(sampler.get("start_at_step", -1))
-    # This case is specifically the user's FOUR-step Turbo configuration.
-    # The old bug incorrectly executed only 3/4 iterations: steps=4, start=1.
-    # ComfyUI's partial-denoise contract now schedules five and starts at one,
-    # retaining all four requested model evaluations.
-    expected_iterations = 4
-    effective_iterations = steps - actual_start
-    if effective_iterations != expected_iterations:
-        raise AssertionError(
-            f"QWEN SEGMENT STEP REGRESSION: base requested {expected_iterations} "
-            f"denoising iterations but segment will execute {effective_iterations} "
-            f"(scheduled_steps={steps}, start_at_step={actual_start}). "
-            "Do not run costly GPU inference against a truncated 4-step LoRA schedule."
-        )
+    denoise = float(sampler.get("denoise", 0))
+    if steps != 4:
+        raise AssertionError(f"Four-step Turbo edit was given {steps} actual sampler steps")
+    if abs(denoise - 0.8) > 1e-4:
+        raise AssertionError(f"Expected native ComfyUI denoise 0.8, got {denoise}")
+    if "start_at_step" in sampler:
+        raise AssertionError("Native KSampler must own denoise scheduling, not Swarm's start_at_step")
+
+    compositor_id = require_single(
+        [key for key, node in graph.items()
+         if node["class_type"] == "ImageCompositeMasked"
+         and sampler_id in capture.upstream(
+             graph, capture.roots(node["inputs"].get("source"), graph))],
+        "native ImageCompositeMasked of the sampled Qwen crop",
+    )
+    compositor = graph[compositor_id]["inputs"]
+    if "destination" not in compositor or "source" not in compositor or "mask" not in compositor:
+        raise AssertionError("Incomplete native compositor inputs")
+    if graph[capture.link(compositor["source"], graph)]["class_type"] != "ImageScale":
+        raise AssertionError("Composite source must be the actual sampled crop scaled back to its detected bounds")
+
     for node_id in NODE_IDS.values():
         if node_id in graph:
             raise AssertionError(f"Probe node id collides with real workflow: {node_id}")
+
     def preview(kind, image_ref):
         graph[NODE_IDS[kind]] = {
             "class_type": "PreviewImage",
             "inputs": {"images": image_ref},
         }
+
+    # Compare the same pre/post crop geometry: original bounds crop versus
+    # generated crop resized back to those same bounds for compositing.
     preview("before", compositor["destination"])
-    preview("crop_before", graph[diagnostics_id]["inputs"]["source"])
-    preview("crop_after", [diagnostics_id, 0])
+    preview("crop_before", raw_crop_ref)
+    preview("crop_after", compositor["source"])
     graph[NODE_IDS["mask_image"]] = {
         "class_type": "MaskToImage",
         "inputs": {"mask": [detector_id, 0]},
     }
     preview("mask", [NODE_IDS["mask_image"], 0])
-    # The detector output and the mask actually fed to the final compositor
-    # can differ after thresholding and cropping. Capture BOTH from real nodes.
     graph[NODE_IDS["mask_used_image"]] = {
         "class_type": "MaskToImage",
         "inputs": {"mask": compositor["mask"]},
@@ -155,11 +165,10 @@ def inspect_and_instrument(original):
     preview("after", [compositor_id, 0])
     return graph, {"detector": detector_id, "encoder": enc_id,
                    "sampler": sampler_id, "compositor": compositor_id,
-                   "steps": steps, "start_at_step": actual_start,
-                   "effective_steps": effective_iterations,
-                   "expected_iterations": expected_iterations,
-                   "creativity": 0.8, "clipseg_threshold": 0.1}
-
+                   "steps": steps, "native_denoise": denoise,
+                   "effective_steps": steps,
+                   "expected_iterations": 4,
+                   "creativity": denoise, "clipseg_threshold": 0.1}
 
 def read_result(base, prompt_id, timeout_seconds):
     deadline = time.monotonic() + timeout_seconds
