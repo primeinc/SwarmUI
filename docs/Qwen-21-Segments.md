@@ -3,9 +3,11 @@
 ## Actual native paths
 
 SwarmUI retains its existing `<segment:...>` prompt parser and CLIPSeg/YOLO
-detection. It uses **unmodified** upstream ComfyUI Qwen 2.1 conditioning and
-Luis Quesada's Inpaint Crop & Stitch, with optional upstream LanPaint nodes.
-No custom Qwen tokenizer, VAE encoder, sampler, crop math, or image stitcher.
+detection. For Qwen 2.1 text conditioning it routes the author's Swarm tags
+through `SwarmTextEncodeAdvanced` and ComfyUI's unchanged `ReferenceLatent`
+node, preserving the upstream Qwen tokenizer and using Luis Quesada's Inpaint
+Crop & Stitch with optional LanPaint nodes. No separate Qwen tokenizer,
+inpaint sampler, crop math, or stitcher is reimplemented.
 
 For Qwen edits with an explicitly supplied Init Image or Prompt Image,
 the crop and detector must receive that original photograph, regardless of
@@ -35,16 +37,16 @@ Original source -> SwarmClipSeg(text) -> normalized detector mask
         +--------> InpaintCropImproved(image, binary subject mask)
                                |0 stitcher   |1 cropped image   |2 cropped mask
                                                 |
-                         TextEncodeQwenImage21.images.image_1
-                              positive / negative / output-2 empty edit latent
+                         SwarmTextEncodeAdvanced(images=crop)
+                           | positive and negative text conditioning
+                         VAEEncode(crop) -> ReferenceLatent (both paths)
                                               |
-Reference Edit [advanced option]: KSampler(model, Qwen output-2 latent, denoise=1)
-                                              |
-                             LanPaint_ImageDecode(image=crop, no mask)
-                                              |
-                           SplitImageWithAlpha -> InpaintStitchImproved(stitcher)
-                                              |
-                                        final original-size image
+Reference Edit [advanced option]: LatentMultiply(VAE crop, 0)
+                                    -> KSampler(denoise=1)
+                                    -> LanPaint_ImageDecode(image=crop, no mask)
+                                    -> SplitImageWithAlpha
+                                    -> InpaintStitchImproved(stitcher)
+                                    -> final original-size image
 
 Masked Img2Img [default]: same crop -> LanPaint_ImageEncode(image=crop, mask=crop mask)
                                     -> LanPaint_KSampler(denoise=requested strength)
@@ -60,27 +62,25 @@ default to the existing upstream masked path, which sends the actual crop
 mask into LanPaint_ImageEncode and its KSampler. Reference Edit remains an
 explicit advanced option for users who specifically want unmasked crop edits.
 
-The segment's text is authored by the user and is **never rewritten**.
-The existing Swarm prompt parser removes the `<segment:...>` directive and
-resolves Swarm tags. The Qwen adapter flattens residual Swarm weight markup
-only and passes the resulting text directly to native
-`TextEncodeQwenImage21`. It must not turn LoRA triggers into replacement
-sentences, classify edit verbs, add a target description, or insert
-`<image1>` unless the user wrote that token. Image references are supplied
-through the encoder's image inputs, not inferred from text. A bare LoRA
-trigger remains a bare LoRA trigger; the user determines any edit instruction.
-Qwen 2.1 itself inserts image references into its tokenizer template when
-reference images are attached: `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
-comfy/text_encoders/qwen_image21.py#QwenImage21Tokenizer.tokenize_with_weights`.
-The inherited `qwen3vl.py#Qwen3VLTokenizer.tokenize_with_weights` calls the
-ordinary token parser with `disable_weights=True`, so residual Swarm
-`<weight[1.2]:...>` formatting is flattened to its text, **not** claimed
-to preserve numerical text emphasis that this native encoder cannot apply.
-Residual scheduled Swarm tags such as `<alternate:...>` and
-`<fromto[...]:...>` are rejected rather than applying
-`ProcessPromptLikeForLength`'s length-estimation substitution (which
-can silently choose an unintended instruction). Only supported literal
-flattening is allowed; unsupported syntax fails explicitly.
+The segment's text is authored by the user and is **not rewritten**.
+The Swarm request parser removes the `<segment:...>` directive; the segment's
+remaining authored text is then supplied to `SwarmTextEncodeAdvanced`
+with its Swarm weight, scheduling, embedding, and LoRA-hook markup intact.
+That existing Swarm node interprets the tags when it builds the positive
+and negative conditioning. It must not invent a replacement sentence,
+classify verbs, add a target description, or insert an image token.
+The crop is provided through the encoder's `images` input, with its
+matching `VAEEncode` reference latent attached via the upstream
+`ReferenceLatent` nodes on both conditioning paths.
+
+ComfyUI's Qwen 2.1 tokenizer inserts image references into its template
+when image tensors are supplied. Its inherited Qwen3VL tokenizer disables
+ordinary textual token weighting internally. Swarm therefore processes
+its own attention weights and scheduled steps *before* calling that tokenizer
+rather than passing literal `<weight...>` strings to the old native Qwen
+`TextEncodeQwenImage21` node. Passing through `SwarmTextEncodeAdvanced`
+is the branch's graph-level implementation of full Swarm segment-tag support;
+this graph construction is not proof of image-space LoRA effectiveness.
 Values at or below 0.5 in SwarmClipSeg's **normalized output mask** fail
 before upstream CropAndStitch can fall back to the entire image. Accepted
 fractional confidence values are converted to a solid subject mask using
@@ -88,9 +88,9 @@ ComfyUI's native ThresholdMask before the unchanged crop adapter. Its own
 feathering still handles the mask boundary; the subject interior no longer
 blends old and replacement identities.
 
-The Qwen native edit encoder returns a **zero-filled** output-2 latent, not
-the original image encoded as an img2img latent. Therefore Reference Edit
-uses `denoise=1`, a full native noise schedule. The segment tag's creativity
+The Reference Edit branch now constructs its zero-filled native-format latent
+from `VAEEncode(cropped source) -> LatentMultiply(multiplier=0)`.
+The standard `KSampler` uses `denoise=1`, a full noise schedule. The segment tag's creativity
 value remains the `denoise` control of **Masked Img2Img**, not of the
 empty-latent Reference Edit sampler. InpaintStitchImproved owns the
 only pixel-space blend into the source image. Masked Img2Img additionally
@@ -112,8 +112,11 @@ model's scheduler and step requirements instead of extrapolating them.
 ## Exact bundled upstream provenance
 
 - `Comfy-Org/ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17`:
-  `comfy_extras/nodes_qwen.py::TextEncodeQwenImage21.execute` and native
-  `KSampler`. Qwen module is bundled unchanged in
+  `comfy/text_encoders/qwen_image21.py::QwenImage21Tokenizer.tokenize_with_weights`,
+  `comfy_extras/nodes_edit_model.py::ReferenceLatent.execute`, and native
+  `KSampler`. The original `TextEncodeQwenImage21.execute` is an
+  upstream *comparison* contract; this Swarm segment graph no longer creates
+  that node. The upstream Qwen module remains separately bundled at
   `ExtraNodes/ComfyQwenNodes_Upstream.py`.
 - `lquesada/ComfyUI-Inpaint-CropAndStitch@348a8bbaad1a9000523e42dd3eaf6ab34a8fe62f`:
   `inpaint_cropandstitch.py::InpaintCropImproved.inpaint_crop` and
@@ -127,12 +130,14 @@ model's scheduler and step requirements instead of extrapolating them.
   `tutorials/image/qwen/qwen-image-2-1.mdx`, "Workflow settings / Sampler
   settings": `cfg=1`, `euler`, `simple`; higher CFG harms image quality.
 
-A Swarm-managed Comfy backend must actually register
-`TextEncodeQwenImage21`, `InpaintCropImproved`,
-`InpaintStitchImproved`, and `LanPaint_ImageDecode` from `/object_info`.
-Masked Img2Img additionally requires `LanPaint_ImageEncode` and
-`LanPaint_KSampler`; Reference Edit uses stock `KSampler`.
-An external Comfy instance may require the same upstream nodes installed.
+The selected Comfy backend must register every node used in its generated
+graph, including `SwarmTextEncodeAdvanced`, `VAEEncode`,
+`ReferenceLatent`, `GetImageSize`, `InpaintCropImproved`,
+`InpaintStitchImproved`, and `LanPaint_ImageDecode`.
+Masked Img2Img also needs `LanPaint_ImageEncode` and
+`LanPaint_KSampler`; Reference Edit uses `LatentMultiply` and
+`KSampler`. Registration is checked against that backend's actual
+`/object_info`, not inferred from packages installed on another backend.
 
 ## Diagnostics and acceptance
 
@@ -150,8 +155,8 @@ Reported reproduction:
 ```
 
 `tests/integration/qwen_segment_text_replacement.py` rejects real exported
-graphs whose crop source contains an upstream base sampler, validates native
-Qwen Reference Edit sampler links and parameters, queues a real Comfy backend,
+graphs whose crop source contains an upstream base sampler, validates the
+current Swarm-conditioning/ReferenceLatent and masked-sampler paths, queues a real Comfy backend,
 and captures before/crop/mask/after images for semantic review.
 `tests/live/test_qwen_segment_lora.py` checks an actual LoRA node is on the
 sampler model path and compares OFF/ON/OFF model-backed output from real global
