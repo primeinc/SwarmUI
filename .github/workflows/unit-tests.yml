@@ -40,6 +40,8 @@ jobs:
           run: |
             python3 -m pip install 'numpy<3' pillow scipy
             python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - name: Run shipped Swarm prompt tag parser CPU controls
+          run: python3 -m unittest discover -s tests -p test_qwen_swarm_prompt_parser_cpu.py -v
         - name: Run offline exported-Qwen-graph preflight negative controls
           run: python3 -m unittest discover -s tests -p test_qwen_segment_preflight_offline.py -v
         - name: Run CPU-tensor segment detection guard controls
