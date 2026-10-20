@@ -26,7 +26,7 @@ import pytest
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-from qwen_segment_lora_confinement import region_rms, assert_same_detector_mask
+from qwen_segment_lora_confinement import region_rms, assert_same_detector_mask, normalized_lora_path
 
 
 pytestmark = pytest.mark.inference
@@ -216,12 +216,8 @@ def graph_variant(original, case, stage, strength):
     # The LoRA's full relative path is its identity. Comparing only the
     # basename could silently test a different adapter with the same filename
     # in another folder, falsely passing a rendered ON/OFF comparison.
-    def normalize_lora(name):
-        normalized = str(name).replace("\\", "/").strip("/")
-        return normalized[:-len(".safetensors")] if normalized.lower().endswith(".safetensors") else normalized
-
-    actual = normalize_lora(node["inputs"].get("lora_name", ""))
-    expected = normalize_lora(case["lora_name"])
+    actual = normalized_lora_path(node["inputs"].get("lora_name", ""))
+    expected = normalized_lora_path(case["lora_name"])
     if actual != expected:
         raise AssertionError(f"{stage}: requested adapter {expected} but graph uses {actual}")
     if node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
