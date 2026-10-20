@@ -46,7 +46,12 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         string[] usedTypes = [.. workflow.Properties()
             .Select(property => property.Value?["class_type"]?.ToString())
             .Where(name => !string.IsNullOrWhiteSpace(name))];
-        if (!usedTypes.Contains("InpaintCropImproved"))
+        // Native Qwen segmented editing and plain Qwen 2.1 text-to-image both
+        // depend on custom Comfy nodes. Validate either graph before external
+        // backend image uploads or workflow submission.
+        bool isSegmentEdit = usedTypes.Contains("InpaintCropImproved");
+        bool isQwen21ImageGeneration = usedTypes.Contains("SwarmEmptyQwenImage21Latent");
+        if (!isSegmentEdit && !isQwen21ImageGeneration)
         {
             return;
         }
@@ -62,7 +67,9 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         if (missing.Length > 0)
         {
             throw new SwarmUserErrorException(
-                "The selected ComfyUI backend does not have the required Qwen segmented-edit nodes registered: " +
+                "The selected ComfyUI backend does not have required " +
+                (isSegmentEdit ? "Qwen segmented-edit" : "Qwen Image 2.1 text-to-image") +
+                " nodes registered: " +
                 string.Join(", ", missing) +
                 ". Install/enable those node packages on THIS backend and refresh its /object_info. " +
                 "Other ComfyUI backends advertising the feature do not make these nodes available here.");
