@@ -23,7 +23,7 @@ jobs:
         - name: Validate live acceptance test syntax (NOT inference)
           run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
-          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py
+          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py
         - name: Validate browser JS syntax (NOT browser execution)
           run: node --check src/wwwroot/js/genpage/gentab/loras.js
 
