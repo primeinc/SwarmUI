@@ -32,7 +32,7 @@ fallback crops. Neither this wiring nor CPU tests prove semantic replacement.
 
 The live, opt-in `tests/integration/qwen_segment_text_replacement.py`
 preflights **real exported Comfy API graphs** and the running backend's
-`object_info/TextEncodeQwenImage21` before allowing GPU inference.
+`object_info/TextEncodeQwenImage21` before allowing model-backed inference.
 It rejects a disconnected detector, wrong full-frame reference, obsolete
 custom encoder, non-native sampler, missing crop, blurred-mask-driven
 crop bounds, empty-mask fallthrough, and non-native compositor.
@@ -46,9 +46,18 @@ The exact previously failing prompt remains:
 
 Source-level tests and successful CI do **not** establish semantic identity
 replacement. A pixel delta, a LoRA loader on the model path, and four
-denoising callbacks are necessary but insufficient evidence. Closure
-requires actual generated results that replace the child as requested
+denoising callbacks are necessary but insufficient evidence. Closure requires actual generated results that replace the child as requested
 with correct crop and final composite, plus positive/negative LoRA controls.
+
+No GPU or model weights are required for the source-level C# tests, real CPU
+PyTorch mask-guard controls, unchanged upstream crop/stitch tensor tests, or
+offline inspection of an exported Comfy API graph. These tests can disprove
+incorrect sampler links, LoRA loader identity, output multiplicity, mask
+thresholds, and pixel blending. They cannot demonstrate whether Qwen turns
+a particular girl into the requested boy or whether a particular LoRA changes
+model output. Those two acceptance claims require the relevant weights and a
+runnable inference backend, not necessarily GPU hardware. Do not call source
+and tensor contracts untestable just because no local GPU is connected.
 
 ## References
 
