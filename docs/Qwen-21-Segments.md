@@ -10,27 +10,42 @@ SwarmClipSeg(text, source frame) -> detected MASK
    |
    +--> InpaintCropImproved(image=source frame, mask=detected MASK)
            0: STITCHER ----------------------------> InpaintStitchImproved.stitcher
-           1: IMAGE --> TextEncodeQwenImage21.image_1
-                            outputs 0: positive --> KSampler.positive
-                                    1: negative --> KSampler.negative
-                                    2: latent   --> KSampler.latent_image
-                                                   KSampler(steps=4, denoise=0.8)
-                                                           |
-                                                        VAEDecode
-                                                           |
-                                                  SplitImageWithAlpha
-                                                           |
-                                             InpaintStitchImproved.inpainted_image
-                                                           |
-                                                       final IMAGE
-           2: MASK --> diagnostics or masked-img2img conditioning
+           1: IMAGE --> TextEncodeQwenImage21.images.image_1
+                  |           0: positive -----> LanPaint_KSampler.positive
+                  |           1: negative -----> LanPaint_KSampler.negative
+                  |
+                  +------> LanPaint_ImageEncode.image
+           2: MASK ------> LanPaint_ImageEncode.mask
+                                      | 0: masked LATENT
+                                      +------------> LanPaint_KSampler.latent_image
+                                                      (steps=4, denoise=0.8,
+                                                       LanPaint_NumSteps=5)
+                                                            | 0: sampled LATENT
+                                      +---------------------+
+                                      v
+                       LanPaint_ImageDecode(samples, VAE,
+                                              image=crop output 1,
+                                              mask=crop output 2)
+                                      | 0: image-space crop
+                                      v
+                              SplitImageWithAlpha
+                                      |
+                                      +--> InpaintStitchImproved.inpainted_image
+                                                        |
+                                                    final IMAGE
 ```
 
-The *same* crop adapter produces the Qwen reference and the opaque stitch
-metadata. Nothing recomputes crop coordinates for the final composite. The
-native Qwen text encoder also owns the vision resize, reference latents and
-matching empty edit latent. Native ComfyUI `KSampler` determines the denoise
-sigma schedule; 4 requested steps means 4 model evaluations.
+The *same* crop adapter produces the Qwen reference, cropped mask and
+opaque stitch metadata. Nothing recomputes crop coordinates for the final
+composite. The native Qwen text encoder owns vision processing and reference
+conditioning, while LanPaint's unmodified image encoder, masked sampler and
+image decoder handle inpainting at the exact crop resolution.
+
+The user-requested outer schedule is `steps=4`, `denoise=0.8`, routed through
+`LanPaint_KSampler` and its call to ComfyUI's `nodes.common_ksampler`.
+`LanPaint_NumSteps=5` is a **separate inner Langevin update count**, not the
+four outer sampler steps and not evidence that just four GPU forwards occur.
+Actual inference time and results require the live backend.
 
 ### Copied, licensed, and pinned upstream packages
 
@@ -43,12 +58,16 @@ sigma schedule; 4 requested steps means 4 model evaluations.
   implementation, registration, JS, license, metadata and original README.
   The crop/stitch plugin is a **separately GPL-3.0-licensed component**;
   SwarmUI's own MIT license is not a relicense of that upstream code.
+- `scraed/LanPaint@2d7912f9a5efe5ece8de334c7ca18317b8288c39`,
+  `src/LanPaint/nodes.py` and supporting files, copied **unchanged** into
+  `ExtraNodes/LanPaintUpstream/`. Original GPL-3.0 license included.
 
 Swarm's managed Comfy backend adds its shipped `ExtraNodes` directory to
 ComfyUI's custom-node search path. A real backend must expose
-`TextEncodeQwenImage21`, `InpaintCropImproved` and
-`InpaintStitchImproved` from `/object_info` before inference. The live test
-checks all three. No additional ComfyUI-Manager installation is required for a
+`TextEncodeQwenImage21`, `InpaintCropImproved`,
+`InpaintStitchImproved`, `LanPaint_ImageEncode`, `LanPaint_KSampler` and
+`LanPaint_ImageDecode` from `/object_info` before inference. The live test
+checks all six. No additional ComfyUI-Manager installation is required for a
 Swarm-managed backend. An external backend must have equivalent registered
 nodes; shipping a file does not alter that external process.
 
@@ -77,9 +96,13 @@ For an InitEdit with one Prompt Image, the detected crop replaces the original
 whole frame in Qwen's `images.image_1` slot. The original full frame is
 **not duplicated** as image 2. Additional explicit Prompt Images are preserved.
 
-Reference Edit samples the native Qwen empty latent. Masked Img2Img uses
-Swarm's existing `DoMaskedVAEEncode` on the exact crop and mask returned by
-the plugin. The legacy non-Qwen segmentation pipeline is unchanged.
+Both Qwen sampling modes use the upstream `LanPaint_ImageEncode` result,
+including its masked latent. The `Masked Img2Img` option additionally routes
+through the established `DifferentialDiffusion` model transform where enabled;
+the native Qwen empty latent output is **not** used as the sampler input.
+LanPaint's `LanPaint_ImageDecode` blends the decoded image with the original
+crop according to the mask before the crop/stitch plugin handles the final
+canvas composite. The non-Qwen segmentation pipeline is unchanged.
 
 ### Always-on Qwen segment diagnostics
 
@@ -116,8 +139,9 @@ acceptance.
 `tests/test_qwen_native_bundle.py` checks immutable upstream Git blob
 digests, registrations and source routing. The build and Python compilation
 gates are source-level. `tests/integration/qwen_segment_text_replacement.py`
-requires the actual backend's three registered nodes, validates the direct
-Crop -> Qwen -> Sampler -> Stitch references in an exported real workflow,
+requires the actual backend's six registered nodes, validates the direct
+Crop -> Qwen conditioning + masked LanPaint encode -> LanPaint sampler ->
+LanPaint decode -> Stitch references in an exported real workflow,
 then queues and captures actual GPU output. `tests/live/test_qwen_segment_lora.py`
 exercises real off/on/off LoRA effects through ordinary and segmented samplers.
 
@@ -132,6 +156,9 @@ does not certify pixel or semantic correctness.
   `InpaintStitchImproved.inpaint_stitch`, plus upstream test suite.
 - `Comfy-Org/ComfyUI@e3bee7ff...`,
   `comfy_extras/nodes_qwen.py::TextEncodeQwenImage21.execute`,
-  `nodes.py::KSampler.sample`.
+  `nodes.py::common_ksampler`.
+- `scraed/LanPaint@2d7912f9...`,
+  `src/LanPaint/nodes.py::LanPaint_ImageEncode.encode`,
+  `LanPaint_KSampler.sample`, `LanPaint_ImageDecode.decode`.
 - SwarmUI `WorkflowGeneratorSteps.cs::RunSegmentationProcessing`,
   `WorkflowGeneratorQwenSegment.cs::CreateQwen21SegmentConditioning`.
