@@ -9,8 +9,10 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Builds Qwen Image 2.1 segment conditioning from the actual crop using a Swarm-owned
-    /// compatibility node that mirrors the upstream edit contract and emits a fresh latent.
+    /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
+    /// Reference Edit follows the same edit-stage sampler contract used by the working Base2Edit
+    /// implementation: native-style Qwen conditioning plus a plain VAE encoding of the crop,
+    /// with edit strength expressed through start_at_step.
     /// </summary>
     public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
@@ -36,10 +38,22 @@ public partial class WorkflowGenerator
             ["negative_prompt"] = negativePrompt ?? ""
         });
 
-        JArray latent = mode == "Reference Edit" ? NodePath(encoder, 2) : NodePath(crop.MaskedLatent, 0);
-        int startStep = mode == "Reference Edit" ? 0 : (int)Math.Round(steps * (1 - creativity));
+        int startStep = (int)Math.Round(steps * (1 - creativity));
+        JArray latent;
+        if (mode == "Reference Edit")
+        {
+            // Base2Edit's working Qwen 2.1 edit path samples from the current image latent.
+            // Do not use the encoder's fresh/noise latent here, and do not attach the segment
+            // mask to this latent; the existing pixel-space composite confines the final paste.
+            string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
+            latent = NodePath(encodedCrop, 0);
+        }
+        else
+        {
+            latent = NodePath(crop.MaskedLatent, 0);
+        }
 
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder}");
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
         return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
     }
 }
