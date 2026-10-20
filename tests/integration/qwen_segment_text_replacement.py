@@ -83,16 +83,16 @@ def inspect_and_instrument(original):
     if not capture.graph_or_none(graph):
         raise AssertionError("Not an actual SwarmUI-exported Comfy API workflow")
 
-    # A production export without optional diagnostics must have exactly
-    # one user-visible saved result, not a gallery of internal crops/masks.
-    # Check before adding the intentional evidence PreviewImage probes below.
+    # A production export must have one final output SINK. This alone says
+    # nothing about IMAGE batch size; verify actual image count from history
+    # during inference before claiming a single final result.
     final_outputs = [
         k for k, v in graph.items()
         if v["class_type"] in ("SwarmSaveImageWS", "SaveImage", "PreviewImage")
     ]
     if len(final_outputs) != 1:
         raise AssertionError(
-            f"Expected exactly one user-visible output in the original graph, "
+            f"Expected exactly one final output sink in the original graph, "
             f"got {len(final_outputs)}: {final_outputs}"
         )
 
@@ -255,6 +255,7 @@ def inspect_and_instrument(original):
     preview("mask_used", [NODE_IDS["mask_used_image"], 0])
     preview("after", [stitch_id, 0])
     return graph, {
+        "final_output_sink": final_outputs[0],
         "detector": detector_id, "validated_mask": guard_id,
         "solid_subject_mask": solid_mask_id, "crop_adapter": crop_id,
         "source_reference": crop_id,
@@ -267,7 +268,45 @@ def inspect_and_instrument(original):
         "mask_used_definition": "adapter output 2 (cropped mask), not inaccessible private stitcher blend",
     }
 
-def read_result(base, prompt_id, timeout_seconds):
+def require_single_final_image(outputs, save_node_id):
+    # A single SaveImage/SwarmSaveImageWS node may consume a batch. If
+    # this backend does not expose output metadata, do not manufacture
+    # one-image acceptance from merely having one output node.
+    saved = outputs.get(save_node_id, {})
+    images = saved.get("images")
+    if not isinstance(images, list):
+        raise AssertionError(
+            f"Single final image UNVERIFIED: output sink {save_node_id} "
+            "has no Comfy history.outputs[save_id].images list; "
+            "use Swarm's surfaced-output count as separate evidence")
+    if len(images) != 1:
+        raise AssertionError(
+            f"Expected one final saved image, got {len(images)} in sink {save_node_id}")
+    return images[0]
+
+
+def validate_runtime_node_contracts(base_url, graph):
+    # Inspect every actual submitted node, including instrumented previews,
+    # splitters and mask converters. A fixed allowlist can miss a real failure.
+    schemas = {}
+    for class_type in sorted({node["class_type"] for node in graph.values()}):
+        registered = fetch_json(base_url, "object_info/" + class_type)
+        if class_type not in registered:
+            raise AssertionError(
+                f"Actual Comfy backend is missing node {class_type} "
+                "required by the submitted graph")
+        schemas[class_type] = registered[class_type]
+    for node_id, node in graph.items():
+        required = set(schemas[node["class_type"]].get("input", {}).get("required", {}))
+        missing = sorted(required - set(node["inputs"]))
+        if missing:
+            raise AssertionError(
+                f"Native node {node_id} ({node['class_type']}) is missing required "
+                f"Comfy inputs: {missing}")
+    return schemas
+
+
+def read_result(base, prompt_id, timeout_seconds, final_output_sink):
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         record = fetch_json(base, "history/" + prompt_id).get(prompt_id)
@@ -278,7 +317,10 @@ def read_result(base, prompt_id, timeout_seconds):
         if status.get("status_str") == "error":
             raise AssertionError(f"Actual Comfy execution failed: {status}")
         outputs = record.get("outputs", {})
-        if all(outputs.get(NODE_IDS[kind], {}).get("images") for kind in OUTPUT_KINDS):
+        if status.get("completed") and all(
+            outputs.get(NODE_IDS[kind], {}).get("images") for kind in OUTPUT_KINDS
+        ):
+            require_single_final_image(outputs, final_output_sink)
             result = {}
             for kind in OUTPUT_KINDS:
                 images = outputs[NODE_IDS[kind]]["images"]
@@ -337,6 +379,8 @@ def main(argv=None):
             "image_space_lora_effect_verified": False,
             "runtime_node_registration_verified": False,
             "native_schema_completeness_verified": False,
+            "one_final_output_sink_verified": True,
+            "exactly_one_final_image_verified": False,
         }, indent=2))
         return 0
     if not args.comfy_url or args.outdir is None:
@@ -344,31 +388,9 @@ def main(argv=None):
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
-    # Probe EVERY load-bearing runtime node before scheduling model-backed inference.
-    # A checked-in plugin does not prove Comfy loaded or registered it.
-    for expected_node in (
-        "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
-        "SwarmClipSeg", "SwarmRequireNonEmptyMask", "ThresholdMask", "LanPaint_ImageEncode",
-        "LanPaint_KSampler", "LanPaint_ImageDecode",
-    ):
-        registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
-        if expected_node not in registered:
-            raise AssertionError(f"Actual Comfy backend does not expose {expected_node}; "
-                                 "a checked-in plugin is not proof that the runtime loaded it.")
-        # Comfy's live object_info is the actual input contract, not Python
-        # function defaults or C# compilation. Fail before expensive inference
-        # if any graph node omits a required native field.
-        node_schema = registered[expected_node]
-        required = set(node_schema.get("input", {}).get("required", {}))
-        for node_id, node in graph.items():
-            if node["class_type"] != expected_node:
-                continue
-            missing = sorted(required - set(node["inputs"]))
-            if missing:
-                raise AssertionError(
-                    f"Native {expected_node} node {node_id} is missing required "
-                    f"Comfy inputs: {missing}"
-                )
+    # Compare ALL actual submitted node schemas before expensive inference.
+    # The diagnostic PreviewImage/MaskToImage nodes are also load-bearing.
+    validate_runtime_node_contracts(args.comfy_url, graph)
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
@@ -390,7 +412,7 @@ def main(argv=None):
         pid = queued.get("prompt_id")
         if not isinstance(pid, str) or not pid:
             raise AssertionError(f"Real Comfy backend refused to queue this workflow: {queued}")
-        images = read_result(args.comfy_url, pid, args.timeout)
+        images = read_result(args.comfy_url, pid, args.timeout, spec["final_output_sink"])
         for kind, image in images.items():
             image.save(args.outdir / f"run-{i+1:02d}-{kind}.png")
         mask = np.asarray(images["mask"].convert("L"), dtype=np.float32) / 255
