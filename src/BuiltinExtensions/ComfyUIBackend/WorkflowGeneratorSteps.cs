@@ -2203,10 +2203,10 @@ public class WorkflowGeneratorSteps
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.SegmentCFGScale, part.ContextID) ?? g.UserInput.GetNullable(T2IParamTypes.RefinerCFGScale, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7, sectionId: part.ContextID);
                     WGNodeData beforeImage = g.CurrentMedia;
-                    // Always emit native-node diagnostics until segmented Qwen is
-                    // proven on real GPU images. Swarm's existing intermediate
-                    // saving path needs no new custom ComfyUI node.
-                    bool traceQwen = nativeQwenSegment;
+                    // Diagnostic images must never become additional user-visible
+                    // generation results unless intermediates were requested.
+                    // Backend graph/LoRA logs remain available on every run.
+                    bool traceQwen = nativeQwenSegment && g.UserInput.Get(T2IParamTypes.OutputIntermediateImages, false);
                     void TraceQwenImage(string stage, JArray imagePath)
                     {
                         if (!traceQwen)
@@ -2225,19 +2225,22 @@ public class WorkflowGeneratorSteps
                             $"crop_mask={qwenCropMask[0]}:2 detected_mask={detectedMaskNode} " +
                             $"encoder={segmentLatent[0]} model={model.Path[0]} clip={clip.Path[0]} vae={vae.Path[0]} " +
                             $"mode={qwenSegmentMode} sampler={(qwenSegmentMode == "Reference Edit" ? "KSampler" : "LanPaint_KSampler")} steps={steps} denoise={part.Strength2:0.####} seed={seed} cfg={cfg:0.####} " +
-                            $"diagnostics=always");
-                        TraceQwenImage("00_source_full_frame", beforeImage.Path);
-                        string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
+                            $"trace_images={traceQwen}");
+                        if (traceQwen)
                         {
-                            ["mask"] = NodePath(detectedMaskNode, 0)
-                        });
-                        TraceQwenImage("01_raw_detector_mask", NodePath(rawMaskImage, 0));
-                        TraceQwenImage("02_exact_qwen_reference_crop", qwenCrop);
-                        string adapterMaskImage = g.CreateNode("MaskToImage", new JObject()
-                        {
-                            ["mask"] = qwenCropMask
-                        });
-                        TraceQwenImage("03_adapter_crop_mask", NodePath(adapterMaskImage, 0));
+                            TraceQwenImage("00_source_full_frame", beforeImage.Path);
+                            string rawMaskImage = g.CreateNode("MaskToImage", new JObject()
+                            {
+                                ["mask"] = NodePath(detectedMaskNode, 0)
+                            });
+                            TraceQwenImage("01_raw_detector_mask", NodePath(rawMaskImage, 0));
+                            TraceQwenImage("02_exact_qwen_reference_crop", qwenCrop);
+                            string adapterMaskImage = g.CreateNode("MaskToImage", new JObject()
+                            {
+                                ["mask"] = qwenCropMask
+                            });
+                            TraceQwenImage("03_adapter_crop_mask", NodePath(adapterMaskImage, 0));
+                        }
                     }
                     string sampler;
                     if (nativeQwenSegment)
