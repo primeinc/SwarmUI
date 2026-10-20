@@ -23,10 +23,16 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from PIL import Image, ImageChops, ImageStat
 import pytest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+from qwen_segment_lora_confinement import region_rms, assert_same_detector_mask
 
 
 pytestmark = pytest.mark.inference
 _OUTPUT = "swarm_lora_live_capture"
+_MASK_IMAGE = "swarm_lora_binary_mask_image"
+_MASK_OUTPUT = "swarm_lora_binary_mask_capture"
 _LORAS = {"LoraLoader", "LoraLoaderModelOnly"}
 _SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced", "LanPaint_KSampler", "LanPaint_KSamplerAdvanced"}
 _IMAGE_OUTPUTS = {"SaveImage", "PreviewImage", "SwarmSaveImageWS"}
@@ -102,14 +108,22 @@ class ComfyClient:
             if status.get("status_str") != "success" or status.get("completed") is not True:
                 time.sleep(1)
                 continue
-            images = history.get("outputs", {}).get(_OUTPUT, {}).get("images", [])
-            if len(images) != 1:
-                raise AssertionError(f"{label}: expected one Comfy saved image; got {images}")
-            image = images[0]
-            query = urlencode({"filename": image["filename"], "subfolder": image["subfolder"],
-                               "type": image["type"]})
-            with Image.open(BytesIO(self.request("view?" + query))) as decoded:
-                return decoded.convert("RGB").copy()
+            outputs = history.get("outputs", {})
+            def read_one_saved(node_id, mode):
+                images = outputs.get(node_id, {}).get("images", [])
+                if len(images) != 1:
+                    raise AssertionError(
+                        f"{label}: expected one Comfy saved {node_id} image; got {images}")
+                media = images[0]
+                query = urlencode({
+                    "filename": media["filename"], "subfolder": media.get("subfolder", ""),
+                    "type": media.get("type", "output"),
+                })
+                with Image.open(BytesIO(self.request("view?" + query))) as decoded:
+                    return decoded.convert(mode).copy()
+            final = read_one_saved(_OUTPUT, "RGB")
+            mask = read_one_saved(_MASK_OUTPUT, "L") if _MASK_OUTPUT in graph else None
+            return final, mask
         raise AssertionError(f"{label}: Comfy prompt {prompt_id} timed out after {self.timeout}s")
 
 
@@ -297,6 +311,18 @@ def graph_variant(original, case, stage, strength):
     graph[_OUTPUT] = {"class_type": "SaveImage", "inputs": {
         "images": [str(ref[0]), int(ref[1])], "filename_prefix": "swarm_lora_live_acceptance"
     }}
+    if stage == "segment":
+        # Diagnostic-only output. This is not an additional production result:
+        # it records the real full-canvas detector mask used by the native crop.
+        if _MASK_IMAGE in graph or _MASK_OUTPUT in graph:
+            raise AssertionError("LoRA mask diagnostic node ID collision")
+        graph[_MASK_IMAGE] = {"class_type": "MaskToImage", "inputs": {
+            "mask": threshold_ref
+        }}
+        graph[_MASK_OUTPUT] = {"class_type": "SaveImage", "inputs": {
+            "images": [_MASK_IMAGE, 0],
+            "filename_prefix": "swarm_lora_segment_mask_acceptance",
+        }}
     return graph
 
 
@@ -321,18 +347,39 @@ def test_real_global_and_segment_lora_effect(case):
         graph = read_graph(case["_root"] / case[f"{stage}_graph"])
         off = graph_variant(graph, case, stage, 0.0)
         on = graph_variant(graph, case, stage, strength)
-        image_off_first = client.run_image(off, f"{case['name']} {stage} OFF-1")
-        image_on = client.run_image(on, f"{case['name']} {stage} ON")
-        image_off_again = client.run_image(off, f"{case['name']} {stage} OFF-2")
-        baseline_noise = rms(image_off_first, image_off_again)
-        effect = rms(image_off_first, image_on)
-        threshold = max(case["_min_rms"], baseline_noise * 8)
-        print(f"{case['name']} {stage}: real-image LoRA RMS {effect:.3f}; "
-              f"zero-weight repeat noise {baseline_noise:.3f}; required > {threshold:.3f}")
-        assert effect > threshold, (
-            f"{case['name']}: {stage.upper()} LORA INEFFECTIVE. Real ComfyUI forward "
-            f"and saved image have no distinct adapter effect; RMS {effect:.3f}."
-        )
-        metrics[stage] = effect
+        image_off_first, mask_off_first = client.run_image(off, f"{case['name']} {stage} OFF-1")
+        image_on, mask_on = client.run_image(on, f"{case['name']} {stage} ON")
+        image_off_again, mask_off_again = client.run_image(off, f"{case['name']} {stage} OFF-2")
+        if stage == "segment":
+            detector_mask = assert_same_detector_mask(
+                mask_off_first, mask_on, mask_off_again)
+            baseline_inside, baseline_outside = region_rms(
+                image_off_first, image_off_again, detector_mask)
+            effect_inside, effect_outside = region_rms(
+                image_off_first, image_on, detector_mask)
+            threshold = max(case["_min_rms"], baseline_inside * 8)
+            leakage_limit = max(1.0, baseline_outside * 8)
+            print(f"{case['name']} segment: LoRA inside RMS {effect_inside:.3f} "
+                  f"(required > {threshold:.3f}); outside RMS {effect_outside:.3f} "
+                  f"(allowed <= {leakage_limit:.3f}); detector mask stable")
+            assert effect_inside > threshold, (
+                f"{case['name']}: SEGMENT LORA INEFFECTIVE INSIDE THE SUBJECT. "
+                f"Actual image-space RMS={effect_inside:.3f}.")
+            assert effect_outside <= leakage_limit, (
+                f"{case['name']}: SEGMENT LORA LEAKS OUTSIDE THE DETECTED SUBJECT. "
+                f"Outside/blend-excluded RMS={effect_outside:.3f}; "
+                f"limit={leakage_limit:.3f}.")
+            metrics[stage] = effect_inside
+        else:
+            baseline_noise = rms(image_off_first, image_off_again)
+            effect = rms(image_off_first, image_on)
+            threshold = max(case["_min_rms"], baseline_noise * 8)
+            print(f"{case['name']} global: real-image LoRA RMS {effect:.3f}; "
+                  f"zero-weight repeat noise {baseline_noise:.3f}; "
+                  f"required > {threshold:.3f}")
+            assert effect > threshold, (
+                f"{case['name']}: GLOBAL LORA INEFFECTIVE. Real ComfyUI forward "
+                f"and saved image have no distinct adapter effect; RMS {effect:.3f}.")
+            metrics[stage] = effect
     print(f"{case['name']} accepted: global RMS={metrics['global']:.3f}, "
           f"segment RMS={metrics['segment']:.3f}. Real weights; no fakes.")
