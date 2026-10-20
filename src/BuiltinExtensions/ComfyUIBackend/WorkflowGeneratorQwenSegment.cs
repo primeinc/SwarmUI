@@ -56,4 +56,48 @@ public partial class WorkflowGenerator
         Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
         return (NodePath(encoder, 0), NodePath(encoder, 1), latent, startStep);
     }
+    /// <summary>
+    /// Builds the segment path used when the section contains a static Qwen LoRA.
+    /// This deliberately cuts Qwen's reference-image conditioning so the adapter is not
+    /// fighting an instruction to preserve the source subject. The existing crop latent
+    /// remains the img2img anchor and the pixel-space segment mask still confines the paste.
+    /// </summary>
+    public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21LoraImg2ImgConditioning(
+        string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
+        ImageMaskCropData crop, int steps, double creativity, int sectionId)
+    {
+        if (crop?.ScaledImage is null || vae is null || clip is null)
+        {
+            throw new SwarmUserErrorException("Qwen Image 2.1 LoRA segment is missing its scaled crop, text encoder, or VAE.");
+        }
+
+        int width = UserInput.GetImageWidth();
+        int height = UserInput.GetImageHeight();
+
+        string encodeText(string text)
+        {
+            return CreateNode("SwarmTextEncodeAdvanced", new JObject()
+            {
+                ["clip"] = clip.Path,
+                ["lora_hooks"] = CreateDynamicLoraHooks(),
+                ["steps"] = steps,
+                ["prompt"] = text ?? "",
+                ["width"] = width,
+                ["height"] = height,
+                ["target_width"] = width,
+                ["target_height"] = height
+                // Deliberately no "images" input: match Qwen 2.1 T2I conditioning.
+            });
+        }
+
+        string positive = encodeText(prompt);
+        string negative = encodeText(negativePrompt);
+        string encodedCrop = CreateVAEEncode(vae.Path, NodePath(crop.ScaledImage, 0));
+        int startStep = (int)Math.Round(steps * (1 - creativity));
+
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='LoRA Img2Img' steps={steps} start={startStep} creativity={creativity:0.###} conditioning=text-only latent=plain-crop-vae reference=cut");
+        return (NodePath(positive, 0), NodePath(negative, 0), NodePath(encodedCrop, 0), startStep);
+    }
+
+
 }
