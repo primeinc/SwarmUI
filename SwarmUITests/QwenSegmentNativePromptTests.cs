@@ -122,6 +122,44 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             Is.EqualTo("LanPaint_ImageEncode"), "Masked Img2Img uses the native masked encoder");
     }
 
+    private static void RequirePairedQwenReferenceLinks(JObject graph)
+    {
+        JProperty[] encoders = [.. graph.Properties().Where(p =>
+            p.Value?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced")];
+        Assert.That(encoders, Has.Length.EqualTo(2));
+        JProperty cropVae = graph.Properties().Single(p =>
+            p.Value?["class_type"]?.ToString() == "VAEEncode"
+            && p.Value?["inputs"]?["pixels"]?.ToString()
+                == new JArray("crop", 1).ToString());
+        foreach (JProperty encoder in encoders)
+        {
+            JArray expectedText = new(encoder.Name, 0);
+            JArray expectedLatent = new(cropVae.Name, 0);
+            JProperty[] attached = [.. graph.Properties().Where(p =>
+                p.Value?["class_type"]?.ToString() == "ReferenceLatent"
+                && p.Value?["inputs"]?["conditioning"]?.ToString() == expectedText.ToString()
+                && p.Value?["inputs"]?["latent"]?.ToString() == expectedLatent.ToString())];
+            Assert.That(attached, Has.Length.EqualTo(1),
+                "Every authored text encoder needs its own native ReferenceLatent pointing at the exact crop VAE");
+        }
+    }
+
+    [Test]
+    public static void ReferenceConnectionsAreCheckedAndBrokenLinksFail()
+    {
+        var (_, _, graph, _) = ConditionersFor("Replace the subject.", "blurry");
+        Assert.DoesNotThrow(() => RequirePairedQwenReferenceLinks(graph));
+        JProperty negativeEncoder = graph.Properties().Single(p =>
+            p.Value?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced"
+            && p.Value?["inputs"]?["prompt"]?.ToString() == "blurry");
+        JProperty negativeReference = graph.Properties().Single(p =>
+            p.Value?["class_type"]?.ToString() == "ReferenceLatent"
+            && p.Value?["inputs"]?["conditioning"]?.ToString()
+                == new JArray(negativeEncoder.Name, 0).ToString());
+        negativeReference.Value["inputs"]["latent"] = new JArray("disconnected_crop", 0);
+        Assert.Throws<AssertionException>(() => RequirePairedQwenReferenceLinks(graph));
+    }
+
     [Test]
     public static void DisablingOriginalReferenceDoesNotInventAnImageOrTextToken()
     {
