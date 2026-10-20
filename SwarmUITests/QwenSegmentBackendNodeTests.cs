@@ -83,7 +83,7 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         HashSet<string> types = [
             "InpaintCropImproved", "TextEncodeQwenImage21",
             "SwarmRequireNonEmptyMask", "ThresholdMask",
-            "InpaintStitchImproved"
+            "InpaintStitchImproved", "KSampler", "SaveImage"
         ];
         Assert.DoesNotThrow(() =>
             ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, types));
