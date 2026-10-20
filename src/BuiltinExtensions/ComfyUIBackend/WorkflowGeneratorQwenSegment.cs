@@ -52,6 +52,28 @@ public partial class WorkflowGenerator
                         && raw[close + 1] == ':'
                         && double.TryParse(raw[(boundary + 1)..close].Trim(), out double weight)
                         && double.IsFinite(weight);
+                    // A numeric prefix alone is not a complete Swarm tag.
+                    // Match nested angle brackets before the length estimator
+                    // can touch the input. A missing outer '>' must fail rather
+                    // than reaching the native Qwen encoder unchanged.
+                    if (isValid)
+                    {
+                        int depth = 1;
+                        bool complete = false;
+                        for (int pos = close + 2; pos < raw.Length; pos++)
+                        {
+                            if (raw[pos] == '<')
+                            {
+                                depth++;
+                            }
+                            else if (raw[pos] == '>' && --depth == 0)
+                            {
+                                complete = true;
+                                break;
+                            }
+                        }
+                        isValid = complete;
+                    }
                     if (!isValid)
                     {
                         throw new SwarmUserErrorException(
