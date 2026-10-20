@@ -31,6 +31,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         ComfyUIBackendExtension.RefinerUpscaleMethod ??= new(new T2IParamType("Refiner Upscale Method", "", "None", ID: "refinerupscalemethod"));
         ComfyUIBackendExtension.RefinerSamplerParam ??= new(new T2IParamType("Refiner Sampler", "", "euler", ID: "refinersampler"));
         ComfyUIBackendExtension.RefinerSchedulerParam ??= new(new T2IParamType("Refiner Scheduler", "", "simple", ID: "refinerscheduler"));
+        ComfyUIBackendExtension.RefinerHyperTile ??= new(new T2IParamType("Refiner HyperTile", "", "128", ID: "refinerhypertile"));
         ComfyUIBackendExtension.TextEncodedImage ??= new(new T2IParamType("Text Encoded Image", "", "auto", ID: "textencodedimage"));
         ComfyUIBackendExtension.EnableReferenceLatents ??= new(new T2IRegisteredParam<string>(new T2IParamType("Enable Reference Latents", "", "none", ID: "enablereferencelatents")).Type);
         // Scoped-Qwen tests reload the model through the full Comfy model-generation pipeline.
