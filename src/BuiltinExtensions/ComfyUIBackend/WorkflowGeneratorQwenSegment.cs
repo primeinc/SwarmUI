@@ -12,9 +12,9 @@ public partial class WorkflowGenerator
     /// Builds Qwen Image 2.1 segment conditioning from the actual crop.
     /// Reference Edit follows the same edit-stage sampler contract used by the working Base2Edit
     /// implementation: native-style Qwen conditioning plus a plain VAE encoding of the crop,
-    /// with edit strength expressed through start_at_step.
+    /// with edit strength expressed through a longer noise schedule (retaining the requested iteration count).
     /// </summary>
-    public (JArray Positive, JArray Negative, JArray Latent, int StartStep) CreateQwen21SegmentConditioning(
+    public (JArray Positive, JArray Negative, JArray Latent, int StartStep, int SamplingSteps) CreateQwen21SegmentConditioning(
         string prompt, string negativePrompt, WGNodeData clip, WGNodeData vae,
         ImageMaskCropData crop, int steps, double creativity, int sectionId)
     {
@@ -71,7 +71,20 @@ public partial class WorkflowGenerator
         }
         string encoder = CreateNode("SwarmQwenImage21SegmentEncode", encoderInputs);
 
-        int startStep = (int)Math.Round(steps * (1 - creativity));
+        // ComfyUI KSampler.set_steps(steps, denoise) expands the sigma schedule to
+        // int(steps / denoise), then keeps its final (steps + 1) sigmas.
+        // SwarmKSampler uses start_at_step instead: expand the schedule here as
+        // well, otherwise a 4-step turbo LoRA at creativity 0.8 runs only 3 steps.
+        int samplingSteps = steps;
+        int startStep;
+        if (mode == "Reference Edit" && creativity > 0 && creativity < 1)
+        {
+            (samplingSteps, startStep) = PlanQwen21ReferenceEditSteps(steps, creativity);
+        }
+        else
+        {
+            startStep = (int)Math.Round(steps * (1 - creativity));
+        }
         JArray latent;
         if (mode == "Reference Edit")
         {
@@ -113,7 +126,25 @@ public partial class WorkflowGenerator
             }), 0);
         }
 
-        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' steps={steps} start={startStep} creativity={creativity:0.###} encoder={encoder} original_reference={useOriginalReference} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
-        return (positive, negative, latent, startStep);
+        Logs.Info($"[QWEN21-SEG] build section={sectionId} mode='{mode}' configured_steps={steps} scheduled_steps={samplingSteps} start={startStep} executed_steps={samplingSteps - startStep} creativity={creativity:0.###} encoder={encoder} original_reference={useOriginalReference} latent={(mode == "Reference Edit" ? "plain-crop-vae" : "masked-crop-vae")}");
+        return (positive, negative, latent, startStep, samplingSteps);
+    }
+
+    /// <summary>Use upstream ComfyUI's partial-denoise sigma schedule while keeping
+    /// exactly the user-configured count of model evaluations. This controls the
+    /// Reference Edit schedule only; Masked Img2Img retains its existing behavior.</summary>
+    public static (int SamplingSteps, int StartStep) PlanQwen21ReferenceEditSteps(int steps, double creativity)
+    {
+        if (steps < 1 || steps > 10000 || !double.IsFinite(creativity) || creativity <= 0 || creativity > 1)
+        {
+            throw new SwarmUserErrorException($"Invalid Qwen reference-edit step count ({steps}) or creativity ({creativity}).");
+        }
+        double scheduleLength = steps / creativity;
+        if (!double.IsFinite(scheduleLength) || scheduleLength > 10000)
+        {
+            throw new SwarmUserErrorException($"Qwen Reference Edit requires {scheduleLength:0} scheduled steps for creativity {creativity:0.###} and {steps} sampling iterations, but the sampler supports at most 10000.");
+        }
+        int samplingSteps = Math.Max(steps, (int)scheduleLength);
+        return (samplingSteps, samplingSteps - steps);
     }
 }
