@@ -142,13 +142,14 @@ class SwarmRequireNonEmptyMask:
         return {"required": {
             "mask": ("MASK",),
             "minimum_confidence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            "maximum_coverage": ("FLOAT", {"default": 0.99, "min": 0.01, "max": 1.0, "step": 0.01}),
         }}
 
     RETURN_TYPES = ("MASK",)
     FUNCTION = "validate"
     CATEGORY = "SwarmUI/masks"
 
-    def validate(self, mask, minimum_confidence=0.5):
+    def validate(self, mask, minimum_confidence=0.5, maximum_coverage=0.99):
         # Match the downstream CropAndStitch hipass filter exactly. A mask
         # containing only scores below that cutoff would otherwise be emptied
         # after this guard, silently triggering upstream full-frame fallback.
@@ -158,6 +159,21 @@ class SwarmRequireNonEmptyMask:
         has_subject = torch.any(kept, dim=(-2, -1))
         if has_subject.numel() == 0 or not torch.all(has_subject).item():
             raise ValueError("Qwen segment: no subject detected above native crop cutoff in one or more masks; refusing full-frame fallback")
+        # SwarmClipSeg normalizes the detector's confidence map after its own
+        # authored threshold. ThresholdMask(value=0) then makes ANY positive
+        # score fully opaque. A weak but widespread background signal can
+        # therefore become a near-full-canvas edit, destroying the scene.
+        # Reject instead of silently changing the user's CLIPSeg threshold.
+        if not (0.0 < maximum_coverage <= 1.0):
+            raise ValueError("Qwen segment: maximum_coverage must be in (0, 1]")
+        coverage = kept.float().mean(dim=(-2, -1))
+        if torch.any(coverage > maximum_coverage).item():
+            raise ValueError(
+                "Qwen segment: detected mask covers nearly the entire source canvas "
+                f"({float(coverage.max()):.1%} > {maximum_coverage:.1%}); "
+                "refusing an unintended full-frame replacement. Refine the "
+                "segment target or its authored detector threshold."
+            )
         return (mask,)
 
 
