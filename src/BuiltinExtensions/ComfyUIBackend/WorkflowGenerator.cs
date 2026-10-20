@@ -678,13 +678,26 @@ public partial class WorkflowGenerator
             ["width"] = NodePath(boundsNode, 2),
             ["height"] = NodePath(boundsNode, 3)
         });
-        string scaledImage = CreateNode("SwarmImageScaleForMP", new JObject()
-        {
-            ["image"] = NodePath(croppedImage, 0),
-            ["width"] = isCustomRes ? targetX : model?.StandardWidth <= 0 ? UserInput.GetImageWidth() : model.StandardWidth,
-            ["height"] = isCustomRes ? targetY : model?.StandardHeight <= 0 ? UserInput.GetImageHeight() : model.StandardHeight,
-            ["can_shrink"] = true
-        });
+        int targetWidth = isCustomRes ? targetX : model?.StandardWidth <= 0 ? UserInput.GetImageWidth() : model.StandardWidth;
+        int targetHeight = isCustomRes ? targetY : model?.StandardHeight <= 0 ? UserInput.GetImageHeight() : model.StandardHeight;
+        // Upstream ComfyUI ImageScaleToTotalPixels matches Swarm's existing
+        // MP-based resize: same bilinear filter and 64-pixel resolution steps.
+        // The standard non-Qwen path keeps its existing exact legacy node.
+        string scaledImage = boundsMask is null
+            ? CreateNode("SwarmImageScaleForMP", new JObject()
+            {
+                ["image"] = NodePath(croppedImage, 0),
+                ["width"] = targetWidth,
+                ["height"] = targetHeight,
+                ["can_shrink"] = true
+            })
+            : CreateNode("ImageScaleToTotalPixels", new JObject()
+            {
+                ["image"] = NodePath(croppedImage, 0),
+                ["upscale_method"] = "bilinear",
+                ["megapixels"] = targetWidth * (double)targetHeight / (1024 * 1024),
+                ["resolution_steps"] = 64
+            });
         JArray encoded = DoMaskedVAEEncode(vae, [scaledImage, 0], [croppedMask, 0], null);
         return new(boundsNode, croppedMask, $"{encoded[0]}", scaledImage);
     }
