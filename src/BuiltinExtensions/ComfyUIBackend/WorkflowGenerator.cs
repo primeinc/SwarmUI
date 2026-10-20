@@ -613,7 +613,7 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>For <see cref="CreateImageMaskCrop(JArray, JArray, int, JArray, T2IModel, double, double)"/>.</summary>
-    public record class ImageMaskCropData(string BoundsNode, string CroppedMask, string MaskedLatent, string ScaledImage);
+    public record class ImageMaskCropData(string BoundsNode, string CroppedMask, string MaskedLatent, string ScaledImage, string SourceCrop = null);
 
     /// <summary>Creates an automatic image mask-crop before sampling, to be followed by <see cref="RecompositeCropped(string, string, JArray, JArray)"/> after sampling.</summary>
     /// <param name="mask">The mask node input.</param>
@@ -700,7 +700,7 @@ public partial class WorkflowGenerator
                 ["resolution_steps"] = 64
             });
         JArray encoded = DoMaskedVAEEncode(vae, [scaledImage, 0], [croppedMask, 0], null);
-        return new(boundsNode, croppedMask, $"{encoded[0]}", scaledImage);
+        return new(boundsNode, croppedMask, $"{encoded[0]}", scaledImage, croppedImage);
     }
 
     /// <summary>Returns a masked image composite with mask thresholding.</summary>
