@@ -100,7 +100,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
 
     [TestCase(false)]
     [TestCase(true)]
-    public void ReferenceEditUsesFreshQwenLatentAndRuntimeDiagnostics(bool beforeRefiner)
+    public void ReferenceEditUsesCropLatentAndRuntimeDiagnostics(bool beforeRefiner)
     {
         WorkflowGenerator g = Prepare();
         RunSegment(g, beforeRefiner);
@@ -115,7 +115,9 @@ public class QwenSegmentPipelineTests : SwarmUITest
         JProperty sampler = Nodes(g, "SwarmKSampler").Single();
         Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
         Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
-        Assert.That(sampler.Value["inputs"]!["latent_image"], Is.EqualTo(new JArray(encoder.Name, 2)));
+        string latentNodeId = sampler.Value["inputs"]!["latent_image"]![0]!.Value<string>()!;
+        Assert.That(g.Workflow[latentNodeId]!["class_type"]!.Value<string>(), Is.EqualTo("VAEEncode"));
+        Assert.That(g.Workflow[latentNodeId]!["inputs"]!["pixels"], Is.EqualTo(new JArray(Nodes(g, "SwarmImageScaleForMP").Single().Name, 0)));
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Fresh-latent Reference Edit must not be patched for denoise-mask differential diffusion.");
 
@@ -226,10 +228,14 @@ public class QwenSegmentPipelineTests : SwarmUITest
         g.LoadingAdditionalLoraConfinement = 11;
 
         WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -10).Action(g);
-        WorkflowGenerator.ModelGenSteps.Single(step => step.Priority == -3).Action(g);
+        string compileId = g.CreateNode("TorchCompileModel", new JObject()
+        {
+            ["model"] = g.LoadingModel,
+            ["backend"] = "inductor"
+        });
 
         JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
-        JProperty compile = Nodes(g, "TorchCompileModel").Single();
+        JProperty compile = g.Workflow.Property(compileId)!;
         Assert.That(compile.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)),
             "Scoped Qwen LoRA must be inside the compiled model graph, matching global LoRA ordering.");
     }
