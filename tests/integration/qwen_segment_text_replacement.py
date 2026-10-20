@@ -243,6 +243,10 @@ def main(argv=None):
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
+    registered = fetch_json(args.comfy_url, "object_info/TextEncodeQwenImage21")
+    if "TextEncodeQwenImage21" not in registered:
+        raise AssertionError("The actual Comfy backend has not registered TextEncodeQwenImage21. "
+                             "A Python source file on disk does not establish runtime node availability.")
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
