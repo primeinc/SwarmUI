@@ -103,7 +103,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         }
     }
 
-    private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false)
+    private static WorkflowGenerator Prepare(bool qwen = true, double creativity = 1, bool secondSegment = false, bool withLora = false)
     {
         T2IModelCompatClass compat = qwen ? T2IModelClassSorter.CompatQwenImage21 : T2IModelClassSorter.CompatKrea2;
         T2IModel model = new(null, "/fixture", "/fixture/model.safetensors", "model.safetensors")
@@ -127,9 +127,12 @@ public class QwenSegmentPipelineTests : SwarmUITest
         input.Set(T2IParamTypes.Steps, 20);
         input.Set(T2IParamTypes.CFGScale, 1.0);
         input.Set(T2IParamTypes.Seed, 42L);
-        input.Set(T2IParamTypes.Loras, secondSegment ? new List<string> { "face", "hair" } : new List<string> { "face" });
-        input.Set(T2IParamTypes.LoraWeights, secondSegment ? new List<string> { "0.8", "0.6" } : new List<string> { "0.8" });
-        input.Set(T2IParamTypes.LoraSectionConfinement, secondSegment ? new List<string> { "11", "12" } : new List<string> { "11" });
+        if (withLora)
+        {
+            input.Set(T2IParamTypes.Loras, secondSegment ? new List<string> { "face", "hair" } : new List<string> { "face" });
+            input.Set(T2IParamTypes.LoraWeights, secondSegment ? new List<string> { "0.8", "0.6" } : new List<string> { "0.8" });
+            input.Set(T2IParamTypes.LoraSectionConfinement, secondSegment ? new List<string> { "11", "12" } : new List<string> { "11" });
+        }
         WorkflowGenerator g = new() { UserInput = input, Workflow = new(), FinalLoadedModel = model, ModelFolderFormat = "/", Features = ["variation_seed"] };
         g.CreateNode("UNETLoader", new JObject() { ["unet_name"] = "model.safetensors" }, "base-model");
         g.CreateNode("CLIPLoader", new JObject() { ["clip_name"] = "text.safetensors" }, "base-clip");
@@ -176,10 +179,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(sampler.Value["inputs"]!["start_at_step"]!.Value<int>(), Is.Zero);
         Assert.That(Nodes(g, "DifferentialDiffusion"), Is.Empty, "Plain-latent Reference Edit must not use denoise-mask DifferentialDiffusion.");
 
-        JProperty lora = Nodes(g, "LoraLoaderModelOnly").Single();
-        Assert.That(sampler.Value["inputs"]!["model"], Is.EqualTo(new JArray(lora.Name, 0)));
-        Assert.That(lora.Value["inputs"]!["lora_name"]!.Value<string>(), Is.EqualTo("face.safetensors"));
-        Assert.That(lora.Value["inputs"]!["strength_model"]!.Value<double>(), Is.EqualTo(0.8).Within(0.0001));
+        Assert.That(Nodes(g, "LoraLoaderModelOnly"), Is.Empty);
 
         JProperty diagnostic = Nodes(g, "SwarmQwen21SegmentDiagnostics").Single();
         Assert.That(diagnostic.Value["inputs"]!["generated"], Is.Not.Null);
@@ -248,10 +248,11 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void ExplicitSameModelOverrideStillUsesScopedLora()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: true);
         g.UserInput.Set(T2IParamTypes.SegmentModel, g.FinalLoadedModel);
         RunSegment(g);
-        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(1));
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty);
+        Assert.That(Nodes(g, "SwarmTextEncodeAdvanced"), Has.Length.GreaterThanOrEqualTo(2));
         Assert.That(Nodes(g, "LoraLoaderModelOnly"), Has.Length.EqualTo(1));
     }
 
@@ -282,13 +283,13 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void TwoSegmentsHaveIndependentEncodersPromptsAndLoraModelPaths()
     {
-        WorkflowGenerator g = Prepare(secondSegment: true);
+        WorkflowGenerator g = Prepare(secondSegment: true, withLora: true);
         RunSegment(g);
-        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Has.Length.EqualTo(2));
+        Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty);
         Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Has.Length.EqualTo(2));
 
-        JProperty[] encoders = Nodes(g, "SwarmQwenImage21SegmentEncode");
-        Assert.That(encoders.Select(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim()), Is.EquivalentTo(new[] { "make the face blue", "make the hair red" }));
+        JProperty[] encoders = Nodes(g, "SwarmTextEncodeAdvanced");
+        Assert.That(encoders.Select(e => e.Value["inputs"]!["prompt"]!.Value<string>()!.Trim()), Does.Contain("make the face blue").And.Contain("make the hair red"));
 
         JProperty[] samplers = Nodes(g, "SwarmKSampler");
         JToken firstModel = g.Workflow[samplers[0].Value["inputs"]!["model"]![0]!.Value<string>()!]!;
@@ -301,7 +302,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [TestCase(false)]
     public void RealPromptPreparsePreservesSelectedSectionLoraOnSegmentSampler(bool matchesSection)
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: true);
         g.UserInput.Set(T2IParamTypes.Prompt, "base scene <segment:face,1,0.8>portrait change");
         g.UserInput.Set(T2IParamTypes.NegativePrompt, "global negative <segment:face,1,0.8>segment negative");
         g.UserInput.Set(T2IParamTypes.LoraSectionConfinement,
@@ -336,7 +337,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [TestCase(false)]
     public void RealBaseLoaderToSegmentHandoffKeepsSectionLoRaDistinct(bool matchesSection)
     {
-        // Unlike Prepare()'s synthetic base-model node, invoke the production
+        // Unlike Prepare(withLora: true)'s synthetic base-model node, invoke the production
         // initial loader before creating the segmented image workflow.
         WorkflowGenerator g = Prepare();
         g.UserInput.Set(T2IParamTypes.Loras, new List<string> { "hair", "face" });
@@ -372,7 +373,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void SegmentScopedLoraIsAppliedBeforeTorchCompile()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: true);
         g.UserInput.Set(T2IParamTypes.TorchCompile, "inductor");
         RunSegment(g);
 
@@ -389,7 +390,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void NativeQwenSegmentPreservesConditioningPostTransforms()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: true);
         g.UserInput.Set(T2IParamTypes.ConditioningMultiplier, 0.7);
         g.UserInput.Set(T2IParamTypes.NegativeConditioningMultiplier, 0.5);
         g.UserInput.Set(T2IParamTypes.NegativePrompt, "");
@@ -463,7 +464,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void NativeQwenSegmentPassesDynamicLoraHooksIntoRealEncoder()
     {
-        WorkflowGenerator g = Prepare();
+        WorkflowGenerator g = Prepare(withLora: true);
         g.UserInput.DynamicLoraIndices.Add(0);
         g.UserInput.Set(T2IParamTypes.Prompt,
             "base scene <segment:face,1,0.8//cid=11>portrait <lora:face//hook=0> <fromto[0.5]:first,second>");
@@ -531,7 +532,7 @@ public class QwenSegmentPipelineTests : SwarmUITest
     [Test]
     public void KreaKeepsItsExistingSegmentPath()
     {
-        WorkflowGenerator g = Prepare(qwen: false, creativity: 0.6);
+        WorkflowGenerator g = Prepare(qwen: false, creativity: 0.6, withLora: true);
         RunSegment(g);
         Assert.That(Nodes(g, "SwarmQwenImage21SegmentEncode"), Is.Empty);
         Assert.That(Nodes(g, "SwarmQwen21SegmentDiagnostics"), Is.Empty);
