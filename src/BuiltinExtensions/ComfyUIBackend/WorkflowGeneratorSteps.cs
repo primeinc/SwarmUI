@@ -185,6 +185,30 @@ public class WorkflowGeneratorSteps
             && string.IsNullOrWhiteSpace(parsedPrompt.BackgroundPrompt);
     }
 
+    /// <summary>Evaluate the effective segment model before choosing a segmentation
+    /// source or batching strategy. An explicit segment override supersedes the base model.
+    /// </summary>
+    public static bool UsesQwen21SegmentModel(
+        bool baseIsQwen21, bool hasSegmentOverride, string segmentModelCompat)
+    {
+        return hasSegmentOverride
+            ? segmentModelCompat == T2IModelClassSorter.CompatQwenImage21.ID
+            : baseIsQwen21;
+    }
+
+    /// <summary>Replicated original-image batches need distinct sampler noise.
+    /// Offset the selected section seed for each batch item without mutating
+    /// the user's input state or other sections' seed selections.
+    /// </summary>
+    public static long Qwen21BatchSegmentSeed(long seed, int sourceImageIndex)
+    {
+        if (sourceImageIndex < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sourceImageIndex));
+        }
+        return unchecked((seed + (long)sourceImageIndex) & long.MaxValue);
+    }
+
     public static void Register()
     {
         #region Model Loader
@@ -1931,12 +1955,20 @@ public class WorkflowGeneratorSteps
         }, 1);
         #endregion
         #region Segmentation Processing
-        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner, bool isSingleImage = false)
+        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner, bool isSingleImage = false, int sourceImageIndex = 0)
         {
             PromptRegion parsedPrompt = new(g.UserInput.Get(T2IParamTypes.Prompt, ""));
             PromptRegion.Part[] parts = [.. parsedPrompt.Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
+                // Determine Qwen mode using the model actually selected for
+                // segmentation, not just the earlier base/refiner model.
+                bool hasConfiguredSegmentOverride = g.UserInput.TryGet(
+                    T2IParamTypes.SegmentModel, out T2IModel configuredSegmentModel)
+                    && configuredSegmentModel is not null;
+                bool effectiveQwen21 = UsesQwen21SegmentModel(
+                    g.IsQwenImage21(), hasConfiguredSegmentOverride,
+                    configuredSegmentModel?.ModelClass?.CompatClass?.ID);
                 // A global scene description must not replace the user's
                 // supplied photograph with a sampled base frame.
                 bool hasExplicitSource = g.UserInput.TryGet(T2IParamTypes.InitImage, out Image suppliedInit)
@@ -1946,7 +1978,7 @@ public class WorkflowGeneratorSteps
                     hasExplicitSource = suppliedRefs is { Count: > 0 };
                 }
                 bool useOriginalQwenSource = ShouldQwenSegmentUseOriginalSource(
-                    parsedPrompt, g.IsQwenImage21(), isSingleImage, hasExplicitSource);
+                    parsedPrompt, effectiveQwen21, isSingleImage, hasExplicitSource);
                 if (useOriginalQwenSource)
                 {
                     WGNodeData originalSource = null;
@@ -1997,7 +2029,7 @@ public class WorkflowGeneratorSteps
                 // Native Qwen image references represent a single source image per conditioning.
                 // Split the source batch before detection so no item can inherit another's crop.
                 int batchSize = g.UserInput.Get(T2IParamTypes.BatchSize, 1);
-                if (!isSingleImage && g.IsQwenImage21() && batchSize > 1)
+                if (!isSingleImage && effectiveQwen21 && batchSize > 1)
                 {
                     WGNodeData sourceBatch = g.CurrentMedia;
                     T2IModel sourceModel = g.FinalLoadedModel;
@@ -2022,7 +2054,7 @@ public class WorkflowGeneratorSteps
                             g.CurrentVae = sourceVaeNode;
                             g.CurrentModelFromRefiner = sourceIsRefiner;
                             g.NoVAEOverride = sourceNoVaeOverride;
-                            RunSegmentationProcessing(g, isBeforeRefiner, isSingleImage: true);
+                            RunSegmentationProcessing(g, isBeforeRefiner, isSingleImage: true, sourceImageIndex: imageIndex);
                             processedBatch = processedBatch is null
                                 ? g.CurrentMedia.Path
                                 : NodePath(g.CreateNode("ImageBatch", new JObject()
@@ -2359,6 +2391,13 @@ public class WorkflowGeneratorSteps
                         VerifyQwenSegmentLoraChain(g, model.Path, part.ContextID, segmentSourceIsRefiner);
                     }
                     long seed = g.UserInput.Get(T2IParamTypes.Seed, g.UserInput.Get(T2IParamTypes.Seed) + 2 + i, sectionId: part.ContextID, includeBase: false);
+                    // Distinct noise is required for repeated copies of one original
+                    // source. Keep explicit section seeds deterministic without
+                    // making all batch items visually identical.
+                    if (nativeQwenSegment)
+                    {
+                        seed = Qwen21BatchSegmentSeed(seed, sourceImageIndex);
+                    }
                     // ComfyUI's Qwen Image 2.1 image-edit template publishes CFG=1.
                     // Swarm's generic CFG default is 7 (degrades Qwen severely).
                     // Honor explicit section/segment CFG overrides; never inherit
