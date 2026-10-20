@@ -77,8 +77,7 @@ public class WorkflowGeneratorSteps
         static bool sameName(string first, string second)
         {
             string a = normalized(first), b = normalized(second);
-            return a == b || a.EndsWith("/" + b, StringComparison.Ordinal)
-                || b.EndsWith("/" + a, StringComparison.Ordinal);
+            return a == b;
         }
 
         // Traverse the real sampler MODEL connection upstream, not the input
@@ -137,14 +136,27 @@ public class WorkflowGeneratorSteps
         string chain = string.Join(", ", actual.Select(x => $"{x.Name}@{x.Weight:0.###}"));
         string requested = string.Join(", ", expected.Select(x => $"{x.Name}@{x.Weight:0.###} (section {x.Confinement})"));
         Logs.Info($"[QWEN21-SEG] sampler-LoRA-chain section={sectionId} refiner={isRefiner} model_node={modelPath[0]} actual=[{chain}] expected=[{requested}]");
+        // Exact adapter path identity and multiplicity matter. No basename
+        // aliases or foreign section's cached LoRA loader may count as proof.
+        List<(string Name, double Weight)> remaining = [.. actual];
         foreach ((string name, double weight, int _) in expected)
         {
-            if (!actual.Any(x => sameName(x.Name, name) && Math.Abs(x.Weight - weight) < 0.00001))
+            int match = remaining.FindIndex(x =>
+                sameName(x.Name, name) && Math.Abs(x.Weight - weight) < 0.00001);
+            if (match < 0)
             {
                 throw new SwarmUserErrorException(
                     $"Qwen segment {sectionId}: selected LoRA '{name}' at strength {weight:0.###} is NOT on the actual sampler model chain. " +
                     $"Observed chain LoRAs: [{chain}]. Aborting before GPU inference rather than silently ignoring the LoRA.");
             }
+            remaining.RemoveAt(match);
+        }
+        if (remaining.Count > 0)
+        {
+            throw new SwarmUserErrorException(
+                $"Qwen segment {sectionId}: unexpected or duplicate LoRA on the sampler chain: " +
+                string.Join(", ", remaining.Select(x => $"{x.Name}@{x.Weight:0.###}")) +
+                $". Requested section LoRAs: [{requested}].");
         }
     }
 

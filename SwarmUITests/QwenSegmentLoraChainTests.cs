@@ -102,6 +102,41 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void AnotherSegmentLoRAOnSamplerPathMustFail()
+    {
+        WorkflowGenerator g = Prepare(segmentConfinement: 12);
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void SameBasenameDifferentDirectoryMustNotCount()
+    {
+        WorkflowGenerator g = Prepare();
+        ((JObject)g.Workflow["patched"]["inputs"])["lora_name"] = "other/portrait.safetensors";
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched", 0), 11, false));
+    }
+
+    [Test]
+    public static void DuplicateLoRAOnSamplerPathMustFail()
+    {
+        WorkflowGenerator g = Prepare();
+        g.Workflow["patched2"] = new JObject
+        {
+            ["class_type"] = "LoraLoaderModelOnly",
+            ["inputs"] = new JObject
+            {
+                ["model"] = new JArray("patched", 0),
+                ["lora_name"] = "subjects/portrait.safetensors",
+                ["strength_model"] = 1.0
+            }
+        };
+        Assert.Throws<SwarmUserErrorException>(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+            g, new JArray("patched2", 0), 11, false));
+    }
+
+    [Test]
     public static void GlobalLoRAIsExpectedInASegment()
     {
         WorkflowGenerator g = Prepare(segmentConfinement: 0);
