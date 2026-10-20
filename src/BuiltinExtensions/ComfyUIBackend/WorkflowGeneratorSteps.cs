@@ -2130,6 +2130,19 @@ public class WorkflowGeneratorSteps
                     }
                     g.SaveOptionalIntermediate(); // Keep the pre-composite segment output available when intermediates are enabled.
                     JArray composited = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], beforeImage.Path, g.CurrentMedia.Path, stripSourceAlpha: nativeQwenSegment, preserveSoftMask: nativeQwenSegment);
+                    if (nativeQwenSegment)
+                    {
+                        // The pre-composite crop diagnostic cannot show a lost edit at the final mask.
+                        // Inspect the actual full-image result at runtime without changing its pixels.
+                        string finalDiagnostic = g.CreateNode("SwarmQwen21CompositeDiagnostics", new JObject()
+                        {
+                            ["before"] = beforeImage.Path,
+                            ["after"] = composited,
+                            ["mask"] = NodePath(segmentNode, 0),
+                            ["section_id"] = Math.Max(0, part.ContextID)
+                        });
+                        composited = NodePath(finalDiagnostic, 0);
+                    }
                     g.CurrentMedia = g.CurrentMedia.WithPath(composited);
                     g.MaskShrunkInfo = priorMaskShrunkInfo;
                 }
