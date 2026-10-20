@@ -204,6 +204,22 @@ public class QwenSegmentPipelineTests : SwarmUITest
         Assert.That(sampler.Value["inputs"]!["latent_image"], Is.Not.EqualTo(new JArray(Nodes(g, "SetLatentNoiseMask").Single().Name, 0)));
     }
 
+    [TestCase(true)]
+    [TestCase(false)]
+    public void ReferenceEditOriginalReferenceSwitchMustReachEncoder(bool enabled)
+    {
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.SegmentQwenUseOriginalReference, enabled);
+        RunSegment(g);
+
+        JProperty encoder = Nodes(g, "SwarmQwenImage21SegmentEncode").Single();
+        Assert.That(encoder.Value["inputs"]!["use_original_reference"]?.Value<bool>(), Is.EqualTo(enabled),
+            "The segment encoder must receive the user's original-reference setting; checking only the sampler helper leaves a bypass.");
+        JProperty sampler = Nodes(g, "SwarmKSampler").Single();
+        Assert.That(sampler.Value["inputs"]!["positive"], Is.EqualTo(new JArray(encoder.Name, 0)));
+        Assert.That(sampler.Value["inputs"]!["negative"], Is.EqualTo(new JArray(encoder.Name, 1)));
+    }
+
     [Test]
     public void ReferenceEditDoesNotRequireNativeComfyEncoderFeature()
     {
