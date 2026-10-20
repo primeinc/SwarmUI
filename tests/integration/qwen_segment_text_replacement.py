@@ -184,6 +184,12 @@ def inspect_and_instrument(original):
         raise AssertionError(f"Native Qwen CFG should be 1.0, got {cfg}")
     if int(sampler.get("LanPaint_NumSteps", 0)) != 5:
         raise AssertionError("LanPaint's upstream inner update schedule is missing")
+    if sampler.get("LanPaint_PromptMode") != "Image First":
+        raise AssertionError("LanPaint's required prompt mode is not wired")
+    if sampler.get("LanPaint_Info") != "LanPaint KSampler.":
+        raise AssertionError("LanPaint's required information input is missing")
+    if sampler.get("Inpainting_mode") != "🖼️ Image Inpainting":
+        raise AssertionError("LanPaint's required native inpainting mode is missing")
     if any(v["class_type"] == "KSampler" and
            v["inputs"].get("latent_image") == [enc_id, 2]
            for v in graph.values()):
