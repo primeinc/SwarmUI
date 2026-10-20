@@ -10,6 +10,66 @@ from integration.qwen_segment_lora_confinement import (
 )
 
 
+def load_actual_live_model_chain():
+    """Execute the exact shipped live model_chain AST without queuing inference."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent / "live/test_qwen_segment_lora.py"
+    syntax = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    functions = [node for node in syntax.body
+                 if isinstance(node, ast.FunctionDef) and node.name == "model_chain"]
+    if len(functions) != 1:
+        raise AssertionError("Live LoRA acceptance model_chain missing or duplicated")
+    scope = {"_SAMPLERS": {"KSampler", "LanPaint_KSampler"},
+             "_LORAS": {"LoraLoader", "LoraLoaderModelOnly"}}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), scope)
+    return scope["model_chain"]
+
+
+class LiveLoRAModelChainContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.check = staticmethod(load_actual_live_model_chain())
+
+    @staticmethod
+    def graph():
+        return {
+            "sampler": {"class_type": "LanPaint_KSampler", "inputs": {"model": ["patched", 0]}},
+            "patched": {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": ["raw", 0], "lora_name": "subjects/portrait.safetensors",
+                                   "strength_model": 1.0}},
+            "raw": {"class_type": "UNETLoader", "inputs": {"unet_name": "test.safetensors"}},
+        }
+
+    def test_valid_lora_to_real_source_loader(self):
+        self.assertEqual(self.check(self.graph(), "sampler"), ["patched", "raw"])
+
+    def test_missing_model_upstream_rejected(self):
+        graph = self.graph()
+        graph["patched"]["inputs"]["model"] = ["lost_source", 0]
+        with self.assertRaisesRegex(AssertionError, "missing node"):
+            self.check(graph, "sampler")
+
+    def test_selected_lora_self_cycle_rejected(self):
+        graph = self.graph()
+        graph["patched"]["inputs"]["model"] = ["patched", 0]
+        with self.assertRaisesRegex(AssertionError, "cycle"):
+            self.check(graph, "sampler")
+
+    def test_lora_wrapper_without_parent_rejected(self):
+        graph = self.graph()
+        del graph["patched"]["inputs"]["model"]
+        with self.assertRaisesRegex(AssertionError, "no upstream MODEL"):
+            self.check(graph, "sampler")
+
+    def test_malformed_link_rejected(self):
+        graph = self.graph()
+        graph["patched"]["inputs"]["model"] = ["raw"]
+        with self.assertRaisesRegex(AssertionError, "Malformed"):
+            self.check(graph, "sampler")
+
+
 class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
     @staticmethod
     def sample():
