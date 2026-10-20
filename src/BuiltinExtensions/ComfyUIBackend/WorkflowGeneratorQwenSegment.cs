@@ -24,20 +24,28 @@ public partial class WorkflowGenerator
         // LONGEST variant (and silently discard embedded tokens). Those
         // operations are estimates, not Qwen prompt semantics. Never pick a
         // different instruction behind the user's back.
-        string[] unsupportedResidualTags = [
-            "<alternate:", "<alternate[", "<alt:", "<alt[",
-            "<fromto:", "<fromto[", "<random:", "<random[",
-            "<repeat:", "<repeat[", "<wildcard:", "<wc:",
-            "<embed:", "<embedding:", "<break>", "<lora:"
-        ];
-        foreach (string tag in unsupportedResidualTags)
+        // Use Swarm's own registered tag names, not a hand-maintained list.
+        // A tag boundary matters: an ordinary Qwen token such as <image1>
+        // or free text such as <alternative> must not be misclassified.
+        foreach (string registeredTag in T2IPromptHandling.PromptTagLengthEstimators.Keys)
         {
-            if (raw.Contains(tag, StringComparison.OrdinalIgnoreCase))
+            if (registeredTag.Equals("weight", StringComparison.OrdinalIgnoreCase))
             {
-                throw new SwarmUserErrorException(
-                    $"Qwen segment has unsupported residual Swarm tag '{tag}'. " +
-                    "This tag cannot be flattened without changing the authored prompt; " +
-                    "resolve the tag before native Qwen conditioning.");
+                continue; // This one may be flattened without changing its words.
+            }
+            string marker = "<" + registeredTag;
+            int scan = 0;
+            while ((scan = raw.IndexOf(marker, scan, StringComparison.OrdinalIgnoreCase)) >= 0)
+            {
+                int boundary = scan + marker.Length;
+                if (boundary < raw.Length && raw[boundary] is ':' or '[' or '>')
+                {
+                    throw new SwarmUserErrorException(
+                        $"Qwen segment has unsupported residual Swarm tag '<{registeredTag}>'. " +
+                        "This tag cannot be flattened without changing the authored prompt; " +
+                        "resolve it before native Qwen conditioning.");
+                }
+                scan = boundary;
             }
         }
         string text = T2IPromptHandling.ProcessPromptLikeForLength(raw);
