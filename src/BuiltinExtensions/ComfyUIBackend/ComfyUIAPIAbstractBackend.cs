@@ -70,10 +70,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     }
 
     /// <summary>
-    /// Qwen multi-reference support is a NEW SwarmTextEncodeAdvanced input
-    /// schema, even though its class name already existed on older backends.
-    /// NodeTypes alone cannot prove that a remote API-by-URL ComfyUI registered
-    /// the image_N sockets needed for independent reference geometry.
+    /// Qwen-specific SwarmTextEncodeAdvanced input sockets are newer than the
+    /// node's class name. NodeTypes alone cannot prove that an API-by-URL
+    /// backend has the independent image_N sockets or native Qwen empty-text
+    /// tokenizer option. Check the exact selected backend's /object_info.
     /// </summary>
     public static void ValidateQwen21IndependentVisionSockets(JObject workflow, JObject backendObjectInfo)
     {
@@ -91,9 +91,15 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             foreach (JProperty input in inputs.Properties())
             {
-                if (!input.Name.StartsWith("image_", StringComparison.Ordinal)
-                    || !int.TryParse(input.Name.AsSpan("image_".Length), out int index)
-                    || index < 1 || index > 16 || input.Value.Type == JTokenType.Null)
+                if (input.Value.Type == JTokenType.Null)
+                {
+                    continue;
+                }
+                bool isImageSlot = input.Name.StartsWith("image_", StringComparison.Ordinal)
+                    && int.TryParse(input.Name.AsSpan("image_".Length), out int index)
+                    && index >= 1 && index <= 16;
+                bool isNativeEmptyTextOption = input.Name == "qwen21_prevent_empty_text";
+                if (!isImageSlot && !isNativeEmptyTextOption)
                 {
                     continue;
                 }
@@ -101,7 +107,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 {
                     throw new SwarmUserErrorException(
                         $"The selected ComfyUI backend has an outdated SwarmTextEncodeAdvanced node: " +
-                        $"its /object_info does not register '{input.Name}' for Qwen 2.1 independent references. " +
+                        $"its /object_info does not register '{input.Name}' required for Qwen 2.1 segmented editing. " +
                         "Update SwarmComfyCommon/SwarmText.py on THIS backend and refresh /object_info. " +
                         "Do not batch differently sized Qwen references as a workaround: ImageBatch resizes them.");
                 }
