@@ -1818,6 +1818,32 @@ public class WorkflowTraceTests : SwarmUITest
         }
     }
 
+    /// <summary>Returns the bytes of a committed media fixture (Fixtures/media, made by the justfile there).</summary>
+    public static byte[] MediaFixture(string name) => File.ReadAllBytes(Path.Combine(TestContext.CurrentContext.TestDirectory, "Fixtures", "media", name));
+
+    /// <summary>Media records and media parameter values carry what the file's header says: an image's size, an animation's frame count, and the duration of audio and video, with audio's sample rate and channels.
+    /// The fixture values are ffprobe's: a 0.5 s, 8000 Hz mono WAV and a 1 s, 64x48, 8-frame MP4. A video's frame size is not read, and bytes no reader recognizes give nothing.</summary>
+    [Test]
+    public void TestMediaHeadersGiveSizeFramesAndDuration()
+    {
+        AudioFile wav = new(MediaFixture("tone-0.5s-8khz-mono.wav"), MediaType.AudioWav);
+        VideoFile mp4 = new(MediaFixture("pattern-1s-64x48-8fps.mp4"), MediaType.VideoMp4);
+        Assert.That(WorkflowTrace.MediaSize(new("promptaudios.0", wav, null, null)), Is.EqualTo(" 0.5s 8000Hz 1ch audio/wav"));
+        Assert.That(WorkflowTrace.MediaSize(new("promptvideos.0", mp4, null, null)), Is.EqualTo(" 1s video/mp4"));
+        Assert.That(WorkflowTrace.MediaHeader(new ImageFile() { RawData = mp4.RawData.ToArray(), Type = mp4.Type }), Is.EqualTo(" 1s"), "a video that LoadVideo wraps in an ImageFile is read as video");
+        Assert.That($"{WorkflowTrace.FormatParamValue(null, wav)}", Is.EqualTo($"media#{MetadataHelper.Sha8(wav.RawData)} 0.5s 8000Hz 1ch audio/wav"), "a media parameter value carries the header too");
+        using SixLabors.ImageSharp.Image<Rgba32> animation = new(20, 10);
+        animation.Frames.CreateFrame();
+        animation.Frames.CreateFrame();
+        using MemoryStream gif = new();
+        SixLabors.ImageSharp.ImageExtensions.SaveAsGif(animation, gif);
+        Assert.That(WorkflowTrace.MediaHeader(new Image(gif.ToArray(), MediaType.ImageGif)), Is.EqualTo(" 20x10 3 frames"));
+        using MemoryStream png = new();
+        SixLabors.ImageSharp.ImageExtensions.SaveAsPng(new SixLabors.ImageSharp.Image<Rgba32>(20, 10), png);
+        Assert.That(WorkflowTrace.MediaHeader(new Image(png.ToArray(), MediaType.ImagePng)), Is.EqualTo(" 20x10"));
+        Assert.That(WorkflowTrace.MediaHeader(new VideoFile([1, 2, 3, 4], MediaType.VideoMp4)), Is.Empty, "bytes no reader recognizes give nothing");
+    }
+
     /// <summary>A text-to-image backend that is not a ComfyUI backend, for <see cref="TestBackendWithoutTraceLeavesANotice"/>.</summary>
     public class NonComfyBackend : AbstractT2IBackend
     {

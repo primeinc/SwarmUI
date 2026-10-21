@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -1539,40 +1540,69 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return value;
     }
 
-    /// <summary>Returns " WxH mime" for a media record. The size is the generator's resize target if it resized the image, else the image's own decode if Swarm already decoded it (<see cref="ImageFile._CacheISImg"/>),
-    /// else read from its header (ImageSharp Identify, which parses the header chunks without decoding pixels). Computed once per record.</summary>
+    /// <summary>Returns " WxH mime" for a media record: the generator's resize target if it resized the image, else what the file's header says (<see cref="MediaHeader"/>). Computed once per record.</summary>
     public static string MediaSize(MediaRecord media)
     {
         if (media.SizeText is not null)
         {
             return media.SizeText;
         }
-        int? width = media.Width, height = media.Height;
-        if ((width is null || height is null) && media.Media is ImageFile img && img.Type.MetaType == MediaMetaType.Image && img.RawData is not null)
+        string size = media.Width is not null && media.Height is not null ? $" {media.Width}x{media.Height}" : MediaHeader(media.Media);
+        media.SizeText = $"{size} {media.Media?.Type?.MimeType ?? "?"}";
+        return media.SizeText;
+    }
+
+    /// <summary>What <see cref="MediaHeader"/> read from each media file's bytes, by array reference, so a file is read once however often a trace names it.</summary>
+    public static readonly ConditionalWeakTable<byte[], string> MediaHeaders = new();
+
+    /// <summary>Returns what a media file's header says, without decoding it. An image or animation gives " WxH", with " N frames" when it has more than one: Swarm's own decode if it already has one (<see cref="ImageFile._CacheISImg"/>), else ImageSharp Identify, which parses the header chunks.
+    /// Audio and video give the duration to a hundredth of a second, as " 1.5s", and audio adds " 8000Hz 1ch": ATL, which Swarm reads media metadata with, autodetecting the format the way <see cref="VideoFile.GetMetadata"/> does (ATL estimates a PCM WAV's duration from its data size, within a millisecond).
+    /// Neither library reads a video's frame size, so a video has none here. Empty when nothing is readable.</summary>
+    public static string MediaHeader(MediaFile media)
+    {
+        if (media?.RawData is not byte[] raw || media.Type is null)
         {
-            try
+            return "";
+        }
+        if (MediaHeaders.TryGetValue(raw, out string known))
+        {
+            return known;
+        }
+        static string frameSize(int width, int height, int frames) => frames > 1 ? $" {width}x{height} {frames} frames" : $" {width}x{height}";
+        MediaMetaType kind = media.Type.MetaType;
+        string header = "";
+        try
+        {
+            if (kind == MediaMetaType.Image || kind == MediaMetaType.Animation)
             {
-                if (img._CacheISImg is SixLabors.ImageSharp.Image decoded)
+                if (media is ImageFile img && img._CacheISImg is SixLabors.ImageSharp.Image decoded)
                 {
-                    width = decoded.Width;
-                    height = decoded.Height;
+                    header = frameSize(decoded.Width, decoded.Height, decoded.Frames.Count);
                 }
                 else
                 {
-                    SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(img.RawData);
-                    width = info.Width;
-                    height = info.Height;
+                    SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(raw);
+                    header = frameSize(info.Width, info.Height, info.FrameMetadataCollection.Count);
                 }
             }
-            catch (Exception)
+            else if (kind == MediaMetaType.Video || kind == MediaMetaType.Audio)
             {
-                width = null;
-                height = null;
+                using MemoryStream stream = new(raw, false);
+                ATL.Track track = new(stream);
+                header = track.DurationMs > 0 ? $" {(track.DurationMs / 1000).ToString("0.##", CultureInfo.InvariantCulture)}s" : "";
+                if (kind == MediaMetaType.Audio)
+                {
+                    header += track.SampleRate > 0 ? $" {track.SampleRate.ToString("0.##", CultureInfo.InvariantCulture)}Hz" : "";
+                    header += track.ChannelsArrangement?.NbChannels > 0 ? $" {track.ChannelsArrangement.NbChannels}ch" : "";
+                }
             }
         }
-        string size = width is null || height is null ? "" : $" {width}x{height}";
-        media.SizeText = $"{size} {media.Media?.Type?.MimeType ?? "?"}";
-        return media.SizeText;
+        catch (Exception)
+        {
+            header = "";
+        }
+        MediaHeaders.AddOrUpdate(raw, header);
+        return header;
     }
 
     /// <summary>Formats a table of parameter reads as "key": "value (source)", with "then" and the last value when it differs from the first, and the distinct values when there are more than two.</summary>
@@ -1620,11 +1650,11 @@ public class WorkflowTrace(WorkflowGenerator gen)
             string str => text(str),
             bool or int or long or float or double => JToken.FromObject(value),
             T2IModel model => $"{T2IParamTypes.CleanModelName(model.Name)} [{model.ModelClass?.ID ?? "?"}]",
-            MediaFile media => $"media#{MetadataHelper.Sha8(media.RawData)} {media.Type?.MimeType ?? "?"}",
+            MediaFile media => $"media#{MetadataHelper.Sha8(media.RawData)}{MediaHeader(media)} {media.Type?.MimeType ?? "?"}",
             List<string> list => new JArray(list.Select(s => (JToken)text(s))),
             List<T2IModel> models => new JArray(models.Select(m => (JToken)T2IParamTypes.CleanModelName(m.Name))),
             JToken tok => tok.ToString(Formatting.None),
-            System.Collections.IEnumerable items => new JArray(items.Cast<object>().Select(i => i is MediaFile m ? (JToken)$"media#{MetadataHelper.Sha8(m.RawData)} {m.Type?.MimeType ?? "?"}" : (JToken)$"{i}")),
+            System.Collections.IEnumerable items => new JArray(items.Cast<object>().Select(i => i is MediaFile m ? (JToken)$"media#{MetadataHelper.Sha8(m.RawData)}{MediaHeader(m)} {m.Type?.MimeType ?? "?"}" : (JToken)$"{i}")),
             _ => $"{value}"
         };
     }
