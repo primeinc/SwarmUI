@@ -61,7 +61,7 @@ jobs:
           run: python3 -m unittest discover -s tests -p test_qwen_live_mask_chain_cpu.py -v
         - name: Install CPU tensor dependencies for upstream CropAndStitch tests
           run: |
-            python3 -m pip install 'numpy<3' pillow scipy safetensors
+            python3 -m pip install 'numpy<3' pillow scipy safetensors requests
             python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
         - name: Run native Qwen Image 2.1 64-channel empty-latent tensor controls (CPU)
           run: python3 -m unittest discover -s tests -p test_qwen21_empty_latent_cpu.py -v
