@@ -211,6 +211,7 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ["crop"] = Node("InpaintCropImproved"),
             ["guard"] = Node("SwarmRequireNonEmptyMask")
         };
+        graph["guard"]["inputs"]["mask"] = new JArray("crop", 2);
         graph["guard"]["inputs"]["minimum_confidence"] = 0.0;
         graph["guard"]["inputs"]["maximum_coverage"] = 0.99;
 
@@ -248,7 +249,7 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             {
                 "crop": {"class_type":"InpaintCropImproved","inputs":{}},
                 "guard": {"class_type":"SwarmRequireNonEmptyMask",
-                    "inputs":{"minimum_confidence":0.0,"maximum_coverage":0.99}}
+                    "inputs":{"mask":["crop",2],"minimum_confidence":0.0,"maximum_coverage":0.99}}
             }
             """;
         HashSet<string> types = ["InpaintCropImproved", "SwarmRequireNonEmptyMask"];
