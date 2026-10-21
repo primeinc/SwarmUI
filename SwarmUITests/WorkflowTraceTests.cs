@@ -701,6 +701,49 @@ public class WorkflowTraceTests : SwarmUITest
         }
     }
 
+    /// <summary>CreateNode reuse and overwrites are attributed: a node CreateNode returns again for an identical request lists the reusing call site and stage, and a node CreateNode replaces under the same ID counts the overwrite,
+    /// in its provenance, in the image record's node table and in node_reuse.</summary>
+    [Test]
+    public void TestNodeReuseAndOverwritesAreAttributed()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        const string reuseStep = "trace test: reuse and overwrite nodes";
+        List<WorkflowGenerator.WorkflowGenStep> steps = [.. WorkflowGenerator.Steps];
+        try
+        {
+            string first = null, second = null;
+            WorkflowGenerator.AddStep(g =>
+            {
+                first = g.CreateNode("PrimitiveInt", new JObject() { ["value"] = 3 });
+                second = g.CreateNode("PrimitiveInt", new JObject() { ["value"] = 3 });
+                g.CreateNode("PrimitiveInt", new JObject() { ["value"] = 4 }, "900002");
+                g.CreateNode("PrimitiveInt", new JObject() { ["value"] = 5 }, "900002");
+            }, 10.5, reuseStep);
+            Build plain = Generate(new() { Model = model, Prompt = PromptMarkerBase }, false);
+            Build traced = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true);
+            Assert.That(SameWorkflow(traced, plain), Is.True, "tracing changed the workflow");
+            Assert.That(second, Is.EqualTo(first), "CreateNode returned the existing node for the identical request");
+            WorkflowTrace trace = traced.Trace;
+            WorkflowTrace.NodeRecord reused = trace.Nodes[first], overwritten = trace.Nodes["900002"];
+            Assert.That(reused.ReusedBy, Has.Count.EqualTo(1));
+            Assert.That(reused.ReusedBy[0], Does.StartWith($"{nameof(TestNodeReuseAndOverwritesAreAttributed)}@WorkflowTraceTests.cs:").And.EndWith($"@{reused.Stage}"));
+            Assert.That((reused.Overwrites, overwritten.Overwrites, overwritten.ReusedBy.Count), Is.EqualTo((0, 1, 0)));
+            Assert.That(trace.Provenance(reused), Does.Contain($"by '{reuseStep}'").And.EndWith(" reused x1"));
+            Assert.That(trace.Provenance(overwritten), Does.Contain($"by '{reuseStep}'").And.EndWith(" overwritten x1"));
+            JObject stored = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That($"{stored["nodes"][first]}", Does.Contain(" reused x1"));
+            Assert.That($"{stored["nodes"]["900002"]}", Does.Contain(" overwritten x1"));
+            Assert.That(stored["node_reuse"].Select(t => $"{t}"), Does.Contain($"{first}:PrimitiveInt reused by [{reused.ReusedBy[0]}] overwrites=0").And.Contain("900002:PrimitiveInt reused by [] overwrites=1"));
+            List<string> failures = [];
+            CheckTrace(traced, "node reuse", failures);
+            Assert.That(failures, Is.Empty, string.Join("\n", failures));
+        }
+        finally
+        {
+            WorkflowGenerator.Steps = steps;
+        }
+    }
+
     /// <summary>Negative controls for the fitness check: it passes a clean traced build, and fails a build where a node has no provenance record, a record with no origin, a record of the wrong class, a node left the workflow with no step recorded as removing it,
     /// a link dangles, a sampler has no call record, or the image record is missing a node or a step.</summary>
     [Test]
