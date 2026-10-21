@@ -123,8 +123,15 @@ class NativeQwenBundleTest(unittest.TestCase):
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
         masks = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmMasks.py").read_text()
         self.assertIn('["minimum_confidence"] = 0.0', steps)
-        self.assertIn('["maximum_coverage"] = 0.99', steps)
+        self.assertIn('["maximum_coverage"] = part.Strength < 0 ? 1.0 : 0.99', steps,
+                      "Negative-strength inverse edit has deliberate near-full-frame coverage")
         self.assertIn('"maximum_coverage": ("FLOAT", {"default": 0.99', masks)
+        self.assertIn('string detectorGuard = g.CreateNode("SwarmRequireNonEmptyMask"', steps,
+                      "Inverse tag must validate the non-inverted detector support before InvertMask")
+        self.assertIn('invertInput = detectorGuard', steps)
+        self.assertIn('["mask"] = NodePath(invertInput, 0)', steps)
+        self.assertIn('["maximum_coverage"] = 1.0', steps,
+                      "Inverted target can intentionally cover the whole canvas")
         self.assertIn('string solidSubjectMask = g.CreateNode("ThresholdMask"', steps)
         self.assertIn('["mask"] = NodePath(requiredMask, 0)', steps)
         self.assertIn('["value"] = 0.0', steps)
