@@ -145,6 +145,7 @@ public class QwenSegmentOriginalSourceTests
     [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false, false)]
     [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, false, 1, false, false)]
     [TestCase("<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false, false)]
+    [TestCase("<segment:girl,0.8,-0.1> Edit everything except the girl", false, true, -1, false, 1, false, false)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 0.0, false, 1, false, false)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, 1.0, false, 1, false, false)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false, false)]
@@ -419,16 +420,40 @@ public class QwenSegmentOriginalSourceTests
         // CLIPSeg already applied the explicit <segment:...threshold> cutoff.
         // The Qwen compositor may binarize its selected pixels, but it must not
         // silently impose a second 0.5 confidence threshold and discard them.
-        var requireMask = nodes.Single(x => x.Node["class_type"]?.ToString() == "SwarmRequireNonEmptyMask");
-        double requestedThreshold = System.Math.Abs(new PromptRegion(input.Get(T2IParamTypes.Prompt))
-            .Parts.Single(p => p.Type == PromptRegion.PartType.Segment).Strength);
+        PromptRegion.Part authoredSegment = new PromptRegion(input.Get(T2IParamTypes.Prompt))
+            .Parts.Single(p => p.Type == PromptRegion.PartType.Segment);
+        bool invertedSegment = authoredSegment.Strength < 0;
+        var guards = nodes.Where(x => x.Node["class_type"]?.ToString() == "SwarmRequireNonEmptyMask").ToArray();
+        var invert = nodes.SingleOrDefault(x => x.Node["class_type"]?.ToString() == "InvertMask");
+        var requireMask = invertedSegment
+            ? guards.Single(x => x.Node["inputs"]?["mask"]?.ToString()
+                == new Newtonsoft.Json.Linq.JArray(invert.Id, 0).ToString())
+            : guards.Single();
+        if (invertedSegment)
+        {
+            Assert.That(guards, Has.Length.EqualTo(2),
+                "The un-inverted detector must be guarded BEFORE the explicit complement");
+            var sourceGuard = guards.Single(x => x.Id != requireMask.Id);
+            Assert.That(invert.Node["inputs"]?["mask"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(sourceGuard.Id, 0).ToString()));
+            Assert.That(sourceGuard.Node["inputs"]?["mask"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(detector.Id, 0).ToString()));
+            Assert.That(sourceGuard.Node["inputs"]?["maximum_coverage"]?.ToObject<double>(),
+                Is.EqualTo(1.0).Within(0.00001));
+        }
+        else
+        {
+            Assert.That(invert.Id, Is.Null,
+                "Normal positive segment detection must not be inverted");
+        }
+        double requestedThreshold = System.Math.Abs(authoredSegment.Strength);
         Assert.That(detector.Node["inputs"]?["threshold"]?.ToObject<double>(),
             Is.EqualTo(requestedThreshold).Within(0.00001));
         Assert.That(requireMask.Node["inputs"]?["minimum_confidence"]?.ToObject<double>(),
             Is.Zero, "Do not erase detector-selected pixels with a second post-detection cutoff");
         Assert.That(requireMask.Node["inputs"]?["maximum_coverage"]?.ToObject<double>(),
-            Is.EqualTo(0.99).Within(0.00001),
-            "Required Comfy input: reject near-whole-canvas Qwen masks before crop/stitch");
+            Is.EqualTo(invertedSegment ? 1.0 : 0.99).Within(0.00001),
+            "Invert segment may intentionally cover >99%; ordinary detection must retain its broad-mask guard");
         Assert.That(mask.Node["inputs"]?["value"]?.ToObject<double>(),
             Is.Zero, "Binarize every positive pixel after the author's detector threshold");
         Assert.That(crop.Node["inputs"]?["mask_hipass_filter"]?.ToObject<double>(),
