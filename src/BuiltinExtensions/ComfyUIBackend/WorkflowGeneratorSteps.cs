@@ -64,23 +64,27 @@ public class WorkflowGeneratorSteps
         // invisible simply because the expected LoRA set is empty.
         List<string> weights = g.UserInput.Get(T2IParamTypes.LoraWeights, []);
         List<string> confinements = g.UserInput.Get(T2IParamTypes.LoraSectionConfinement, []);
-        static string normalized(string name)
-        {
-            string result = (name ?? "").Replace('\\', '/');
-            if (result.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-            {
-                result = result[..^".safetensors".Length];
-            }
-            // Comfy folder_paths.get_full_path passes the relative filename
-            // untrimmed to os.path.isfile. Linux model paths can differ by
-            // leading or trailing spaces before the .safetensors extension.
-            // Preserve every character except separator and optional suffix.
-            return result;
-        }
+        static string normalized(string name) => (name ?? "").Replace('\\', '/');
         static bool sameName(string first, string second)
         {
+            // Comfy's Linux file resolver preserves case and whitespace in
+            // the complete relative filename. Strip only the OPTIONAL suffix
+            // when ONE side is the legacy extensionless model selection.
+            // Stripping both suffixes would equate two different installed
+            // files: portrait.safetensors and portrait.SAFETENSORS.
             string a = normalized(first), b = normalized(second);
-            return a == b;
+            if (a == b)
+            {
+                return true;
+            }
+            const string suffix = ".safetensors";
+            bool aHasSuffix = a.EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
+            bool bHasSuffix = b.EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
+            if (aHasSuffix == bHasSuffix)
+            {
+                return false;
+            }
+            return aHasSuffix ? a[..^suffix.Length] == b : a == b[..^suffix.Length];
         }
 
         // Traverse the real sampler MODEL connection upstream, not the input
