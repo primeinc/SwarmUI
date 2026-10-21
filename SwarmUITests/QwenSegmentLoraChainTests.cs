@@ -81,6 +81,34 @@ public class QwenSegmentLoraChainTests : SwarmUITest
         Assert.That(T2IPromptHandling.MatchPromptLoraName("unrelated", catalog), Is.Null);
     }
 
+    [Test]
+    public static void UISelectedLoRAListUsesExactCatalogCaseAndRejectsAmbiguity()
+    {
+        // Validate the actual HTTP input normalization branch, not only the
+        // helper that the prompt-tag processor calls. The UI dropdown may
+        // submit two LoRA files with names differing only in Linux case.
+        T2IParamType selectedLoras = new(
+            "LoRAs", "Selected LoRA catalog inputs", "",
+            GetValues: _ => new List<string>
+            {
+                "subjects/Portrait",
+                "subjects/portrait"
+            },
+            Type: T2IParamDataType.LIST,
+            Subtype: "LoRA"
+        );
+        Assert.That(T2IParamTypes.ValidateParam(
+            selectedLoras, "subjects/portrait", null), Is.EqualTo("subjects/portrait"));
+        Assert.That(T2IParamTypes.ValidateParam(
+            selectedLoras, "subjects/Portrait", null), Is.EqualTo("subjects/Portrait"));
+        Assert.That(T2IParamTypes.ValidateParam(
+            selectedLoras, "subjects/Portrait,subjects/portrait", null),
+            Is.EqualTo("subjects/Portrait\\n|||\\nsubjects/portrait"));
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            T2IParamTypes.ValidateParam(selectedLoras, "subjects/PORTRAIT", null))
+            .Message, Does.Contain("ambiguous"));
+    }
+
     private static WorkflowGenerator Prepare(int segmentConfinement = 11, double selectedStrength = 1)
     {
         T2IParamInput input = new(null);
