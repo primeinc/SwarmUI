@@ -124,9 +124,13 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         {
             return;
         }
+        // Native Comfy TextEncodeQwenImage21 is also a valid raw image edit
+        // with no Swarm crop/empty-latent sentinels. It still has required
+        // clip, prompt, and negative_prompt inputs that must be validated
+        // BEFORE raw-workflow placeholder image uploads.
         bool isQwen = HasQwen21AdvancedEncoderInputs(workflow)
             || workflow.Properties().Any(node => node.Value?["class_type"]?.ToString() is
-                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent");
+                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent" or "TextEncodeQwenImage21");
         if (!isQwen)
         {
             return;
