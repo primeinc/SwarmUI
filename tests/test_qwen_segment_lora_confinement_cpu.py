@@ -208,7 +208,7 @@ class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
         return base, mask
 
     def test_lora_paths_match_separators_but_not_filename_case(self):
-        self.assertEqual(normalized_lora_path("subjects\\\\portrait.safetensors"),
+        self.assertEqual(normalized_lora_path("subjects\\portrait.safetensors"),
                          "subjects/portrait.safetensors")
         self.assertEqual(normalized_lora_path("subjects/portrait.SAFETENSORS"),
                          "subjects/portrait.SAFETENSORS")
@@ -218,7 +218,7 @@ class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
                             normalized_lora_path("subjects/portrait.safetensors"),
                             "Two full Linux LoRA filenames differing only in suffix case are distinct")
         self.assertTrue(same_lora_path("subjects/portrait",
-                                       "subjects\\\\portrait.safetensors"))
+                                       "subjects\\portrait.safetensors"))
         self.assertTrue(same_lora_path("subjects/portrait.SAFETENSORS",
                                        "subjects/portrait.SAFETENSORS"))
         self.assertFalse(same_lora_path("subjects/portrait.SAFETENSORS",
