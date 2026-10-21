@@ -3,7 +3,34 @@ from PIL import Image
 import numpy as np
 from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 import folder_paths
-import os, requests
+import os, requests, json, tempfile, threading
+
+_CLIPSEG_FILES = (
+    "config.json", "merges.txt", "model.safetensors",
+    "preprocessor_config.json", "special_tokens_map.json",
+    "tokenizer_config.json", "vocab.json",
+)
+_CLIPSEG_DOWNLOAD_LOCK = threading.Lock()
+
+
+def _clipseg_file_valid(path, filename):
+    """Check on-disk completeness, including safetensors size/header metadata."""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            return False
+        if filename.endswith(".json"):
+            with open(path, "r", encoding="utf-8") as f:
+                return isinstance(json.load(f), dict)
+        if filename.endswith(".safetensors"):
+            from safetensors import safe_open
+            with safe_open(path, framework="pt") as data:
+                return bool(data.keys())
+        return True
+    except (OSError, ValueError, UnicodeError, Exception):
+        # Any unreadable or invalid cached artifact must be repaired, never
+        # treated as successfully downloaded merely because its path exists.
+        return False
+
 
 def get_path():
     if "clipseg" in folder_paths.folder_names_and_paths:
@@ -15,19 +42,46 @@ def get_path():
         return path
 
 
-# Manual download of the model from a safetensors conversion.
-# Done manually to guarantee it's only a safetensors file ever and not a pickle
+# Keep the model artifacts in safetensors, never Python pickle. An interrupted
+# download must not poison subsequent detections with a preexisting directory
+# or a partially published file.
 def download_model(path, urlbase):
-    if os.path.exists(path):
-        return
-    for file in ["config.json", "merges.txt", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer_config.json", "vocab.json"]:
-        os.makedirs(path, exist_ok=True)
-        filepath = path + file
-        if not os.path.exists(filepath):
-            with open(filepath, "wb") as f:
-                print(f"[SwarmClipSeg] Downloading '{file}'...")
-                f.write(requests.get(f"{urlbase}{file}").content)
-
+    os.makedirs(path, exist_ok=True)
+    with _CLIPSEG_DOWNLOAD_LOCK:
+        for filename in _CLIPSEG_FILES:
+            filepath = os.path.join(path, filename)
+            if _clipseg_file_valid(filepath, filename):
+                continue
+            fd, pending = tempfile.mkstemp(prefix=f".{filename}.", suffix=".partial", dir=path)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    print(f"[SwarmClipSeg] Downloading/repairing '{filename}'...")
+                    response = requests.get(
+                        f"{urlbase}{filename}", stream=True, timeout=(10, 120),
+                        headers={"Accept-Encoding": "identity"})
+                    try:
+                        response.raise_for_status()
+                        expected_size = response.headers.get("Content-Length")
+                        expected_size = int(expected_size) if expected_size else None
+                        written = 0
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                out.write(chunk)
+                                written += len(chunk)
+                        if written == 0:
+                            raise IOError(f"CLIPSeg '{filename}' download was empty")
+                        if expected_size is not None and written != expected_size:
+                            raise IOError(
+                                f"CLIPSeg '{filename}' was truncated: "
+                                f"expected {expected_size} bytes, got {written}")
+                    finally:
+                        response.close()
+                if not _clipseg_file_valid(pending, filename):
+                    raise IOError(f"CLIPSeg '{filename}' has invalid model/JSON content")
+                os.replace(pending, filepath)
+            finally:
+                if os.path.exists(pending):
+                    os.unlink(pending)
 
 class SwarmClipSeg:
     @classmethod
