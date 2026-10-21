@@ -18,7 +18,7 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public class WorkflowTrace(WorkflowGenerator gen)
 {
     /// <summary>Version of the trace output format.</summary>
-    public const int FormatVersion = 1;
+    public const int FormatVersion = MetadataHelper.WorkflowTraceVersion;
 
     /// <summary>ExtraMeta key the trace summary is stored under.</summary>
     public const string MetadataKey = MetadataHelper.WorkflowTraceKey;
@@ -324,24 +324,39 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Formats a workflow path (eg ["4", 0]) as "4:0".</summary>
     public static string PathText(JArray path) => path is null ? null : path.Count == 2 ? $"{path[0]}:{path[1]}" : path.ToString(Formatting.None);
 
+    /// <summary>Parameter reads made after the generator finished, while the backend prepared the workflow text to send (<see cref="OnSendParamRead"/>, recorded by <see cref="RecordSent"/>), by "id" or "id@section".</summary>
+    public Dictionary<string, ParamReadRecord> SendParamReads = [];
+
     /// <summary>Begins tracing a generation.</summary>
     public void Begin()
     {
         Gen.UserInput.ParamReadTracker = OnParamRead;
     }
 
-    /// <summary>Records a parameter read, and the text of a prompt-view parameter (<see cref="PromptParamTexts"/>).</summary>
+    /// <summary>Records a parameter read into <see cref="ParamReads"/>, and the text of a prompt-view parameter (<see cref="PromptParamTexts"/>).</summary>
     public void OnParamRead(T2IParamType type, int section, object value, string source)
+    {
+        RecordParamRead(ParamReads, type, section, value, source);
+    }
+
+    /// <summary>Records a parameter read made while the backend prepares the workflow text to send, into <see cref="SendParamReads"/>.</summary>
+    public void OnSendParamRead(T2IParamType type, int section, object value, string source)
+    {
+        RecordParamRead(SendParamReads, type, section, value, source);
+    }
+
+    /// <summary>Records a parameter read into a read table, and the text of a prompt-view parameter (<see cref="PromptParamTexts"/>).</summary>
+    public void RecordParamRead(Dictionary<string, ParamReadRecord> reads, T2IParamType type, int section, object value, string source)
     {
         string key = section == 0 ? type.ID : $"{type.ID}@{section}";
         if (type.ViewType == ParamViewType.PROMPT && value is string text && text.Length > 0)
         {
             PromptParamTexts.TryAdd(text, key);
         }
-        if (!ParamReads.TryGetValue(key, out ParamReadRecord record))
+        if (!reads.TryGetValue(key, out ParamReadRecord record))
         {
             record = new() { Type = type, Section = section, FirstValue = value, FirstSource = source };
-            ParamReads[key] = record;
+            reads[key] = record;
         }
         record.LastValue = value;
         record.LastSource = source;
@@ -1150,8 +1165,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return result;
     }
 
-    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record: its hash and length, whether anything rewrote the generator's text, and which "${...}" placeholders the rewrite filled (such as uploaded image names).
-    /// An error is logged, never thrown: the send is unaffected.</summary>
+    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record: its hash and length, whether anything rewrote the generator's text, which "${...}" placeholders the rewrite filled (such as uploaded image names),
+    /// and the parameters the backend read while preparing the text (<see cref="SendParamReads"/>, such as the image size it resized uploaded images to). An error is logged, never thrown: the send is unaffected.</summary>
     /// <param name="workflow">The final workflow JSON text.</param>
     /// <param name="generated">The workflow text the generator returned.</param>
     public void RecordSent(string workflow, string generated)
@@ -1166,6 +1181,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             }
             bool rewritten = workflow != generated;
             List<string> filled = rewritten ? [.. Placeholders(generated).Except(Placeholders(workflow))] : [];
+            JObject sendReads = SendParamReads.Count > 0 ? FormatParamReads(SendParamReads) : null;
             foreach (JObject info in records)
             {
                 info["sent_sha256"] = sha;
@@ -1174,6 +1190,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 if (rewritten)
                 {
                     info["placeholders_filled"] = new JArray(filled.Select(p => (JToken)p));
+                }
+                if (sendReads is not null)
+                {
+                    info["params_read"] = sendReads.DeepClone();
                 }
                 info["posted"] = NotPosted;
             }
@@ -1218,15 +1238,24 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the file's metadata cannot hold it (<see cref="PickTier"/>, then <see cref="FitRecordToSave"/>).
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key.
+    /// When the file's metadata cannot hold it, the stored record drops the node list, then the parameter reads (<see cref="PickTier"/>, then <see cref="FitRecordToSave"/>).
     /// An error is logged and stored as the record, never thrown: the generation is unaffected.</summary>
-    public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
+    /// <param name="input">The input the workflow was filled from.</param>
+    /// <param name="source">"custom" or "raw".</param>
+    /// <param name="workflow">The filled workflow text.</param>
+    /// <param name="reads">The parameter reads that filled it (<see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/>), recorded as "params_read" with free text hashed, or null.</param>
+    public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow, Dictionary<string, ParamReadRecord> reads = null)
     {
         string logKey = NewLogKey();
         try
         {
             JObject summary = DescribeExternalWorkflow(source, workflow);
             summary["log_key"] = logKey;
+            if (reads is not null)
+            {
+                summary["params_read"] = FormatParamReads(reads, hashFreeText: true);
+            }
             Logs.Debug($"{LogLabel(logKey)} request {input.UserRequestId} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
             string format = ImageFormatOf(input);
             if (!MetadataMayBeLimited(input, format))
@@ -1237,7 +1266,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
             JObject withoutNodes = (JObject)summary.DeepClone();
             withoutNodes.Remove("nodes");
             withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the {FullTraceNote(logKey)}";
-            input.ExtraMeta[MetadataKey] = PickTier([summary, withoutNodes], input, format);
+            List<JObject> tiers = [summary, withoutNodes];
+            if (withoutNodes.ContainsKey("params_read"))
+            {
+                JObject withoutReads = (JObject)withoutNodes.DeepClone();
+                withoutReads.Remove("params_read");
+                withoutReads["omitted"] = $"the node list and the parameter reads, to fit the image metadata; the full description is in the {FullTraceNote(logKey)}";
+                tiers.Add(withoutReads);
+            }
+            input.ExtraMeta[MetadataKey] = PickTier(tiers, input, format);
         }
         catch (Exception ex)
         {
@@ -1465,7 +1502,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return $"@{promptParam}#{MetadataHelper.Sha8(value)}";
         }
-        if (HashFreeText && (value.Length > 64 || value.Any(char.IsWhiteSpace)) && !ModelFileExtensions.Any(e => value.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
+        if (HashFreeText && IsFreeText(value))
         {
             return $"#{MetadataHelper.Sha8(value)}({value.Length})";
         }
@@ -1538,8 +1575,36 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return media.SizeText;
     }
 
-    /// <summary>Formats a parameter value with placeholders for prompts, models, and media.</summary>
-    public static JToken FormatParamValue(T2IParamType type, object value)
+    /// <summary>Formats a table of parameter reads as "key": "value (source)", with "then" and the last value when it differs from the first, and the distinct values when there are more than two.</summary>
+    /// <param name="reads">Reads by "id" or "id@section".</param>
+    /// <param name="hashFreeText">If true, string values that could be prompt text are hashed (<see cref="IsFreeText"/>), for workflows the generator did not build.</param>
+    public static JObject FormatParamReads(Dictionary<string, ParamReadRecord> reads, bool hashFreeText = false)
+    {
+        JObject parameters = [];
+        foreach ((string key, ParamReadRecord read) in reads.OrderBy(p => p.Key))
+        {
+            JToken first = FormatParamValue(read.Type, read.FirstValue, hashFreeText);
+            JToken last = FormatParamValue(read.Type, read.LastValue, hashFreeText);
+            string firstText = first?.ToString(Formatting.None) ?? "null";
+            string lastText = last?.ToString(Formatting.None) ?? "null";
+            string text = firstText == lastText && read.FirstSource == read.LastSource ? $"{firstText} ({read.FirstSource})" : $"{firstText} ({read.FirstSource}) then {lastText} ({read.LastSource})";
+            if (read.Values.Count > 2)
+            {
+                text += $"; {read.Values.Count}{(read.Values.Count >= MaxDistinctParamValues ? "+" : "")} distinct values over {read.Count} reads: {read.Values.Select(v => FormatParamValue(read.Type, v, hashFreeText)?.ToString(Formatting.None) ?? "null").JoinString(" | ")}";
+            }
+            parameters[key] = text;
+        }
+        return parameters;
+    }
+
+    /// <summary>Returns true if a string could be prompt text: longer than 64 characters or containing whitespace, and not a model file name (<see cref="ModelFileExtensions"/>).</summary>
+    public static bool IsFreeText(string value)
+    {
+        return (value.Length > 64 || value.Any(char.IsWhiteSpace)) && !ModelFileExtensions.Any(e => value.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Formats a parameter value with placeholders for prompts, models, and media; with <paramref name="hashFreeText"/>, strings that could be prompt text are hashed too (<see cref="IsFreeText"/>).</summary>
+    public static JToken FormatParamValue(T2IParamType type, object value, bool hashFreeText = false)
     {
         if (value is null)
         {
@@ -1549,13 +1614,14 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return $"@{type.ID}#{MetadataHelper.Sha8(prompt)}({prompt.Length})";
         }
+        string text(string str) => str.Length > 120 || (hashFreeText && IsFreeText(str)) ? $"#{MetadataHelper.Sha8(str)}({str.Length})" : str;
         return value switch
         {
-            string str => str.Length > 120 ? $"#{MetadataHelper.Sha8(str)}({str.Length})" : str,
+            string str => text(str),
             bool or int or long or float or double => JToken.FromObject(value),
             T2IModel model => $"{T2IParamTypes.CleanModelName(model.Name)} [{model.ModelClass?.ID ?? "?"}]",
             MediaFile media => $"media#{MetadataHelper.Sha8(media.RawData)} {media.Type?.MimeType ?? "?"}",
-            List<string> list => new JArray(list.Select(s => (JToken)(s.Length > 120 ? $"#{MetadataHelper.Sha8(s)}({s.Length})" : s))),
+            List<string> list => new JArray(list.Select(s => (JToken)text(s))),
             List<T2IModel> models => new JArray(models.Select(m => (JToken)T2IParamTypes.CleanModelName(m.Name))),
             JToken tok => tok.ToString(Formatting.None),
             System.Collections.IEnumerable items => new JArray(items.Cast<object>().Select(i => i is MediaFile m ? (JToken)$"media#{MetadataHelper.Sha8(m.RawData)} {m.Type?.MimeType ?? "?"}" : (JToken)$"{i}")),
@@ -2172,21 +2238,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             media[nodeId] = $"@{record.Param}#{hash}{MediaSize(record)}";
         }
         result["media"] = media;
-        JObject parameters = [];
-        foreach ((string key, ParamReadRecord read) in ParamReads.OrderBy(p => p.Key))
-        {
-            JToken first = FormatParamValue(read.Type, read.FirstValue);
-            JToken last = FormatParamValue(read.Type, read.LastValue);
-            string firstText = first?.ToString(Formatting.None) ?? "null";
-            string lastText = last?.ToString(Formatting.None) ?? "null";
-            string text = firstText == lastText && read.FirstSource == read.LastSource ? $"{firstText} ({read.FirstSource})" : $"{firstText} ({read.FirstSource}) then {lastText} ({read.LastSource})";
-            if (read.Values.Count > 2)
-            {
-                text += $"; {read.Values.Count}{(read.Values.Count >= MaxDistinctParamValues ? "+" : "")} distinct values over {read.Count} reads: {read.Values.Select(v => FormatParamValue(read.Type, v)?.ToString(Formatting.None) ?? "null").JoinString(" | ")}";
-            }
-            parameters[key] = text;
-        }
-        result["params_read"] = parameters;
+        result["params_read"] = FormatParamReads(ParamReads);
         if (Gen.UserInput.SectionParamOverrides.Count > 0)
         {
             JObject sections = [];

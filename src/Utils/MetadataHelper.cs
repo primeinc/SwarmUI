@@ -21,6 +21,20 @@ public static class MetadataHelper
     /// <summary>ExtraMeta key a backend's workflow trace record is stored under (the ComfyUI backend's WorkflowTrace writes it; image metadata copies and object passes read it).</summary>
     public const string WorkflowTraceKey = "debug_trace";
 
+    /// <summary>Version of the workflow trace record format.</summary>
+    public const int WorkflowTraceVersion = 1;
+
+    /// <summary>Returns the record stored under <see cref="WorkflowTraceKey"/> before a backend generates, which a backend that traces replaces with its record: it says the named backend recorded no workflow trace.</summary>
+    /// <param name="backend">The backend, as "ID (type name)".</param>
+    public static JObject NoWorkflowTraceNotice(string backend)
+    {
+        return new JObject()
+        {
+            ["version"] = WorkflowTraceVersion,
+            ["notice"] = $"no workflow trace: backend {backend} recorded none. Only this server's ComfyUI backends record how they built the workflow; a remote Swarm backend's server keeps its own trace, if it records one, in its own log."
+        };
+    }
+
     /// <summary>Strings and byte arrays at least this long are hashed without copying them and have their hash cached in <see cref="LongHashes"/>.</summary>
     public const int CachedHashMinLength = 4096;
 

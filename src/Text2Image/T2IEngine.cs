@@ -183,6 +183,16 @@ namespace SwarmUI.Text2Image
             await CreateImageTask(user_input, batchId, claim, output, setError, isWS, Program.ServerSettings.Backends.PerRequestTimeoutMinutes, saveImages, true);
         }
 
+        /// <summary>With <see cref="Settings.AddDebugData"/> enabled, stores <see cref="MetadataHelper.NoWorkflowTraceNotice"/> for the backend as the input's workflow trace record before the backend generates.
+        /// A ComfyUI backend replaces it with its trace, so it stays only for a backend that records none.</summary>
+        public static void MarkTraceNotRecorded(T2IParamInput user_input, AbstractT2IBackend backend)
+        {
+            if (Program.ServerSettings.AddDebugData)
+            {
+                user_input.ExtraMeta[MetadataHelper.WorkflowTraceKey] = MetadataHelper.NoWorkflowTraceNotice($"{backend.AbstractBackendData?.ID} ({backend.AbstractBackendData?.BackType?.Name ?? backend.GetType().Name})");
+            }
+        }
+
         /// <summary>Internal handler route to create an image based on a user request.</summary>
         public static async Task CreateImageTask(T2IParamInput user_input, string batchId, Session.GenClaim claim, Action<JObject> output, Action<string> setError, bool isWS, float backendTimeoutMin, Action<ImageOutput, string> saveImages, bool canCallTools)
         {
@@ -311,6 +321,7 @@ namespace SwarmUI.Text2Image
                         return;
                     }
                     prepTime = Environment.TickCount64;
+                    MarkTraceNotRecorded(user_input, backend.Backend);
                     await backend.Backend.GenerateLive(user_input, batchId, obj =>
                     {
                         if (obj is MediaFile file)

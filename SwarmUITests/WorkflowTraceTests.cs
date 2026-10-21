@@ -14,6 +14,7 @@ using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SixLabors.ImageSharp.Metadata.Profiles.Exif;
 using SixLabors.ImageSharp.PixelFormats;
+using SwarmUI.Backends;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
 using SwarmUI.Media;
@@ -1747,6 +1748,117 @@ public class WorkflowTraceTests : SwarmUITest
             Assert.That($"{stored["log_key"]}", Has.Length.EqualTo(12), "the custom workflow record has its own log key");
             stored.Remove("log_key");
             Assert.That(stored.ToString(), Is.EqualTo(external.ToString()));
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+        }
+    }
+
+    /// <summary>A custom workflow with one "${...}" placeholder per fill route of <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/>: named tags, the image size, and a dynamic raw-workflow input.</summary>
+    public const string ParamReadTemplate = """
+        {
+            "1": { "class_type": "KSampler", "inputs": { "seed": "${seed}", "steps": "${steps}", "cfg": "${cfg_scale}" } },
+            "2": { "class_type": "EmptyLatentImage", "inputs": { "width": "${width}", "height": "${height}" } },
+            "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "${prompt}" } },
+            "4": { "class_type": "CLIPTextEncode", "inputs": { "text": "${negative_prompt}" } },
+            "5": { "class_type": "PrimitiveString", "inputs": { "value": "${comfyrawworkflowinputtextstyle:plain}" } }
+        }
+        """;
+
+    /// <summary>A custom workflow's record lists the parameter reads behind every filled placeholder, plus the custom-workflow and ControlNet-preview checks, with prompt and free text hashed.
+    /// A generated workflow's record lists the reads <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> made before generating under "params_read", which a generator traced alone does not make,
+    /// and the reads made while preparing the text to send, and only those, under "workflow"."params_read".</summary>
+    [Test]
+    public void TestCreateWorkflowRecordsEveryParameterRead()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        string customId = ComfyUIBackendExtension.CustomWorkflowParam.Type.ID;
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        Func<string, T2IParamInput, T2IParamType> rawInputTypes = new ComfyUIBackendExtension().DynamicParamGenerator;
+        T2IParamTypes.FakeTypeProviders.Add(rawInputTypes);
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            const string styleText = "zqxstyle custom words";
+            T2IParamInput custom = BuildInput(new()
+            {
+                Model = model,
+                Prompt = PromptMarkerBase,
+                Setters =
+                [
+                    i => i.Set(ComfyUIBackendExtension.CustomWorkflowParam, $"PARSED%trace test%{ParamReadTemplate}"),
+                    i => T2IParamTypes.ApplyParameter("comfyrawworkflowinputtextstyle", styleText, i)
+                ]
+            });
+            string filled = ComfyUIAPIAbstractBackend.CreateWorkflow(custom, w => w, null, [.. FullFeatures]);
+            Assert.That(filled, Does.Contain(styleText), "the dynamic input is filled from its parameter");
+            JObject record = (JObject)custom.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That($"{record["workflow"]["source"]}", Is.EqualTo("custom"));
+            string[] behindPlaceholders = [T2IParamTypes.Seed.Type.ID, T2IParamTypes.Steps.Type.ID, T2IParamTypes.CFGScale.Type.ID, T2IParamTypes.Width.Type.ID, T2IParamTypes.Height.Type.ID,
+                T2IParamTypes.Prompt.Type.ID, T2IParamTypes.NegativePrompt.Type.ID, "comfyrawworkflowinputtextstyle"];
+            JObject reads = (JObject)record["params_read"];
+            Assert.That(reads.Properties().Select(p => p.Name), Is.SupersetOf(behindPlaceholders.Append(customId).Append(T2IParamTypes.ControlNetPreviewOnly.Type.ID)), reads.ToString());
+            Assert.That(record.ToString(), Does.Not.Contain("zqx"), "prompt text and free text are hashed");
+            Assert.That($"{WorkflowTrace.FormatParamValue(null, styleText)}", Is.EqualTo(styleText), "negative control: without free-text hashing the style text is written raw");
+            T2IParamInput generated = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+            ComfyUIAPIAbstractBackend.CreateWorkflow(generated, w => { generated.GetImageWidth(); return w; }, null, [.. FullFeatures]);
+            JObject stored = (JObject)generated.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That(((JObject)stored["params_read"]).ContainsKey(customId), Is.True, "the custom-workflow check before generation is recorded");
+            Assert.That(((JObject)stored["workflow"]["params_read"]).Properties().Select(p => p.Name), Is.EquivalentTo(new[] { T2IParamTypes.RawResolution.Type.ID, T2IParamTypes.SideLength.Type.ID, T2IParamTypes.Width.Type.ID }));
+            WorkflowGenerator alone = new() { UserInput = BuildInput(new() { Model = model, Prompt = PromptMarkerBase }), Features = [.. FullFeatures] };
+            alone.Trace = new(alone);
+            alone.Generate();
+            Assert.That(((JObject)alone.Trace.Summary["params_read"]).ContainsKey(customId), Is.False, "negative control: the generator itself does not read the custom-workflow parameter");
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+            T2IParamTypes.FakeTypeProviders.Remove(rawInputTypes);
+        }
+    }
+
+    /// <summary>A text-to-image backend that is not a ComfyUI backend, for <see cref="TestBackendWithoutTraceLeavesANotice"/>.</summary>
+    public class NonComfyBackend : AbstractT2IBackend
+    {
+        /// <inheritdoc/>
+        public override IEnumerable<string> SupportedFeatures => [];
+
+        /// <inheritdoc/>
+        public override Task Init() => Task.CompletedTask;
+
+        /// <inheritdoc/>
+        public override Task Shutdown() => Task.CompletedTask;
+
+        /// <inheritdoc/>
+        public override Task<Image[]> Generate(T2IParamInput user_input) => Task.FromResult(Array.Empty<Image>());
+
+        /// <inheritdoc/>
+        public override Task<bool> LoadModel(T2IModel model, T2IParamInput input) => Task.FromResult(true);
+    }
+
+    /// <summary>With debug data on, an image from a backend that records no workflow trace carries a notice naming the backend; a ComfyUI backend's record replaces the notice; with debug data off there is neither.</summary>
+    [Test]
+    public void TestBackendWithoutTraceLeavesANotice()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        NonComfyBackend backend = new() { AbstractBackendData = new BackendHandler.T2IBackendData() { ID = 5, BackType = new("noncomfy", "Non-Comfy Test Backend", "", null, null, typeof(NonComfyBackend), null) } };
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+            T2IEngine.MarkTraceNotRecorded(input, backend);
+            JObject metadata = input.GenFullMetadataObject();
+            Assert.That($"{metadata["sui_extra_data"][WorkflowTrace.MetadataKey]["notice"]}", Does.StartWith("no workflow trace: backend 5 (Non-Comfy Test Backend) recorded none."));
+            Assert.That(metadata["sui_extra_data"][WorkflowTrace.MetadataKey]["version"].Value<int>(), Is.EqualTo(WorkflowTrace.FormatVersion));
+            ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
+            JObject record = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That((record["notice"], $"{record["log_key"]}".Length), Is.EqualTo(((JToken)null, 12)), "a ComfyUI backend's record replaces the notice");
+            Program.ServerSettings.AddDebugData = false;
+            T2IParamInput untraced = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+            T2IEngine.MarkTraceNotRecorded(untraced, backend);
+            Assert.That(untraced.ExtraMeta.ContainsKey(WorkflowTrace.MetadataKey), Is.False);
         }
         finally
         {
