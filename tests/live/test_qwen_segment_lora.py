@@ -54,9 +54,27 @@ def acceptance_cases():
     names = [case.get("name") for case in cases]
     if any(not isinstance(name, str) or not name for name in names) or len(set(names)) != len(names):
         raise ValueError("Cases must have unique, nonblank names")
+    # Case names label experiments. The required_loras manifest field instead
+    # enumerates actual installed adapter identities, which may have multiple
+    # OFF/ON/OFF cases with different human-readable names and seeds.
+    for case in cases:
+        if not isinstance(case.get("lora_name"), str) or not case["lora_name"]:
+            raise ValueError(f"{case['name']}: missing lora_name")
     required = manifest.get("required_loras")
-    if not isinstance(required, list) or not required or set(required) != set(names):
-        raise ValueError("required_loras must enumerate exactly the LoRAs being tested")
+    if (not isinstance(required, list) or not required
+            or any(not isinstance(name, str) or not name for name in required)):
+        raise ValueError("required_loras must name at least one real LoRA adapter")
+    if any(same_lora_path(required[i], required[j])
+           for i in range(len(required)) for j in range(i + 1, len(required))):
+        raise ValueError("duplicate adapter identity in required_loras")
+    expected = [case["lora_name"] for case in cases]
+    if (any(sum(same_lora_path(name, target) for target in required) != 1
+            for name in expected)
+            or any(not any(same_lora_path(target, name) for target in expected)
+                   for name in required)):
+        raise ValueError(
+            "required_loras must enumerate exactly the distinct case lora_name "
+            "adapter identities, not case display names; filename case matters")
     url = manifest.get("comfy_url")
     parsed = urlsplit(url) if isinstance(url, str) else None
     if not parsed or parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
