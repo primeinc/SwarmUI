@@ -65,6 +65,9 @@ def actual_clipseg_with_controlled_logits():
         "download_model": lambda *_args: None,
         "CLIPSegProcessor": ProbeProcessor,
         "CLIPSegForImageSegmentation": ControlledLogits,
+        "_load_cached_clipseg": lambda path: (
+            ProbeProcessor.from_pretrained(path),
+            ControlledLogits.from_pretrained(path)),
     }
     exec(compile(ast.Module(body=[klass], type_ignores=[]),
                  str(source_path), "exec"), bindings)
