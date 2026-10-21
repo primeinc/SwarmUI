@@ -65,6 +65,28 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     }
 
     [Test]
+    public static void InverseSegmentTagMustPutTheNegativeDetectorThresholdLast()
+    {
+        // PromptRegion parses the LAST segment numeric field as Strength
+        // (detector threshold/inversion), the penultimate as Strength2
+        // (creativity). The swapped fields used by an earlier NUnit fixture
+        // silently clamped creativity to zero and skipped editing entirely.
+        PromptRegion.Part correct = new PromptRegion(
+            "<segment:girl,0.8,-0.1> Edit everything except the girl")
+            .Parts.Single(p => p.Type == PromptRegion.PartType.Segment);
+        Assert.That(correct.DataText, Is.EqualTo("girl"));
+        Assert.That(correct.Strength2, Is.EqualTo(0.8).Within(0.00001));
+        Assert.That(correct.Strength, Is.EqualTo(-0.1).Within(0.00001));
+
+        PromptRegion.Part swapped = new PromptRegion(
+            "<segment:girl,-0.8,0.1> Edit everything except the girl")
+            .Parts.Single(p => p.Type == PromptRegion.PartType.Segment);
+        Assert.That(swapped.Strength2, Is.Zero,
+            "Negative creativity in the penultimate field is clamped to 0, not inversion");
+        Assert.That(swapped.Strength, Is.EqualTo(0.1).Within(0.00001));
+    }
+
+    [Test]
     public static void RegionParserRemovesOnlyTheSegmentDirective()
     {
         const string saved = "sunrise, a girl on the street <segment:girl,0.75,0.15//cid=11> <weight[1.2]:HannahLynn>";
