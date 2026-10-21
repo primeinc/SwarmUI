@@ -646,16 +646,18 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         // A wholly dynamic class_type is already rejected. Partial expansion
         // is equally unsafe: replacing ${node_kind} with null must NOT turn
         // "Inpaint${node_kind}" into an apparently static "Inpaintnull".
+        // This is a Qwen graph; non-Qwen raw macros remain supported.
         const string template = """
             {
                 "source": {"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "qwen_crop": {"class_type":"InpaintCropImproved","inputs":{}},
                 "dynamic": {"class_type":"__NODE_TYPE__","inputs":{"seed":${seed}}}
             }
             """;
         string raw = template.Replace("__NODE_TYPE__", classType);
         SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
             ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
-                raw, new HashSet<string> { "LoadImage" }));
+                raw, new HashSet<string> { "LoadImage", "InpaintCropImproved" }));
         Assert.That(error.Message, Does.Contain("class_type"));
         Assert.That(error.Message, Does.Contain("before image upload"));
     }
