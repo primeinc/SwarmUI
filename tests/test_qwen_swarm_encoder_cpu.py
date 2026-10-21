@@ -176,6 +176,15 @@ class RealWeightedQwenTokenizationCPU(unittest.TestCase):
                          "One original image reference")
         self.assertEqual(self.original_characters(batch), "Girl and boy",
                          "No generated replacement text, duplicate template or extra space")
+        # Adversarial control: recreate the previous unsafe shell builder.
+        # Native Qwen substitutes one space for the empty prompt used as the
+        # template shell, so older combining silently appended that space.
+        unsafe, _ = scope["combine_leaves"](
+            clip, authored, lambda text: clip.tokenize(text, prevent_empty_text=True),
+            per_leaf=True)
+        self.assertEqual(self.original_characters(unsafe["qwen3vl_8b"][0]),
+                         "Girl and boy ",
+                         "The negative control must actually reproduce the trailing-space bug")
         self.assertIn(1.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
         self.assertIn(0.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
         self.assertEqual([text for text, _, _ in calls["raw"]], ["Girl", " and ", "boy"])
