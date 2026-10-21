@@ -168,10 +168,10 @@ class PinnedComfyModelHookTests(unittest.TestCase):
         )
         if drop_cond_hooks:
             shipped = SOURCE.read_text(encoding="utf-8")
-            target = "            clip.apply_hooks_to_conds = active_hooks\\n"
+            target = "            clip.apply_hooks_to_conds = active_hooks\n"
             if shipped.count(target) != 1:
                 raise AssertionError("Shipped Swarm encoder hook assignment changed")
-            altered = shipped.replace(target, "            # mutation: remove conditioning hook assignment\\n", 1)
+            altered = shipped.replace(target, "            # mutation: remove conditioning hook assignment\n", 1)
             klass = next(node for node in ast.parse(altered, filename=str(SOURCE)).body
                          if isinstance(node, ast.ClassDef)
                          and node.name == "SwarmTextEncodeAdvanced")
