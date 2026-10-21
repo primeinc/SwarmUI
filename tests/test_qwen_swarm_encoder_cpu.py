@@ -94,12 +94,20 @@ class NativeEmptyTextContractCPU(unittest.TestCase):
 
 
 class RealWeightedQwenTokenizationCPU(unittest.TestCase):
-    """Probe real Swarm leaf combiner, including chat template and image slots."""
+    """Prove the real Swarm leaf combiner preserves the native Qwen template.
 
-    def test_weighted_prompt_has_exactly_one_chat_template_and_one_image(self):
+    Canonical QwenImage21Tokenizer adds the complete chat shell. Its inner
+    Qwen3VLSDTokenizer (used by calc_leaf) already emits raw BPE token items:
+    it does NOT add a chat template and needs no skip_template argument.
+    The only special handling needed is an empty structural shell without
+    prevent_empty_text's synthetic single-space negative instruction.
+    """
+
+    @staticmethod
+    def fixture():
         scope = actual_encoder()._source_cpu_scope
-        calls = []
-        image = object()
+        calls = {"outer": [], "raw": []}
+        vision_image = object()
 
         class FakeQwenSDTokenizer:
             start_token = None
@@ -109,21 +117,12 @@ class RealWeightedQwenTokenizationCPU(unittest.TestCase):
             def _try_get_embedding(self, _name):
                 return None, None, None
 
-            def tokenize_with_weights(self, text, disable_weights=False,
-                                      skip_template=False, **kwargs):
-                calls.append((text, skip_template, kwargs))
-                # Mirror upstream Qwen3VLTokenizer.prevent_empty_text. A
-                # nonempty weighted prompt must not acquire this blank token.
-                if text == "" and kwargs.get("prevent_empty_text", False):
-                    text = " "
-                user = [(ord(ch) + 1000, 1.0) for ch in text]
-                if skip_template:
-                    return [user]
-                # Three native chat-turn boundaries and one Qwen image placeholder.
-                shell = [(151644, 1.0), (101, 1.0), (151644, 1.0), (102, 1.0)]
-                vision = [({"type": "image", "data": image}, 1.0)]
-                end = [(151645, 1.0), (151644, 1.0), (103, 1.0)]
-                return [shell + vision + user + end]
+            def tokenize_with_weights(self, text, disable_weights=False, **kwargs):
+                # Inner Qwen3VLSDTokenizer inherits SDTokenizer and emits ONLY
+                # raw leaf tokens; its accepted **kwargs are not chat-template
+                # instructions. Adding Qwen shells here models the WRONG API.
+                calls["raw"].append((text, disable_weights, kwargs))
+                return [[(ord(ch) + 1000, 1.0) for ch in text]]
 
         class FakeQwenTokenizer:
             def __init__(self):
@@ -134,47 +133,69 @@ class RealWeightedQwenTokenizationCPU(unittest.TestCase):
                 self.tokenizer = FakeQwenTokenizer()
 
             def tokenize(self, text, **kwargs):
-                return {
-                    "qwen3vl_8b": self.tokenizer.qwen3vl_8b.tokenize_with_weights(text, **kwargs),
-                    "keep_vision": False,
-                }
+                calls["outer"].append((text, kwargs))
+                if not text and kwargs.get("prevent_empty_text", False):
+                    text = " "  # Upstream Qwen3VLTokenizer's actual rule.
+                # Outer QwenImage21Tokenizer owns the SINGLE complete chat
+                # shell, with one unchanged vision object across probes.
+                prefix = [
+                    (151644, 1.0), (101, 1.0),
+                    (151644, 1.0), (102, 1.0),
+                    ({"type": "image", "data": vision_image}, 1.0),
+                ]
+                suffix = [(151645, 1.0), (151644, 1.0), (103, 1.0)]
+                user = [(ord(ch) + 1000, 1.0) for ch in text]
+                return {"qwen3vl_8b": [prefix + user + suffix], "keep_vision": False}
 
-        clip = FakeFullClip()
-        ParsedText = scope["ParsedText"]
+        return scope, FakeFullClip(), calls
+
+    @staticmethod
+    def original_characters(batch):
+        return "".join(chr(t - 1000) for t, _ in batch
+                       if isinstance(t, int) and 1000 <= t < 2000)
+
+    def test_weighted_prompt_has_one_chat_template_one_image_and_exact_words(self):
+        scope, clip, calls = self.fixture()
+        Leaf = scope["ParsedText"]
         authored = [
-            ParsedText(text="Girl", weight=1.5),
-            ParsedText(text=" and ", weight=1),
-            ParsedText(text="boy", weight=0.5),
+            Leaf(text="Girl", weight=1.5),
+            Leaf(text=" and ", weight=1.0),
+            Leaf(text="boy", weight=0.5),
         ]
-        combine = scope["combine_leaves"]
-        tokens, weighted = combine(
-            clip, authored, lambda text: clip.tokenize(text, prevent_empty_text=True),
-            per_leaf=True, qwen21_mode=True,
+        tokens, weighted = scope["combine_leaves"](
+            clip, authored,
+            lambda text: clip.tokenize(text, prevent_empty_text=True),
+            per_leaf=True,
             blank_tokenize_fn=lambda text: clip.tokenize(text, prevent_empty_text=False))
         self.assertTrue(weighted)
         self.assertFalse(tokens["keep_vision"])
         batch = tokens["qwen3vl_8b"][0]
         values = [item[0] for item in batch]
-        self.assertEqual(values.count(151644), 3,
-                         "One native chat template, not a full template for each weighted leaf")
+        self.assertEqual(values.count(151644), 3, "Exactly one native chat shell")
         self.assertEqual(sum(isinstance(value, dict) for value in values), 1,
-                         "Image reference must occur exactly once")
-        self.assertEqual(
-            "".join(chr(t - 1000) for t in values
-                    if isinstance(t, int) and t >= 1000 and t != 151644
-                    and t != 151645),
-            "Girl and boy",
-            "Neither author text nor a synthetic empty-negative space may be inserted")
-        authored_weights = [w for t, w in batch if isinstance(t, int)
-                            and 1000 <= t < 2000]
-        self.assertIn(1.5, authored_weights)
-        self.assertIn(0.5, authored_weights)
-        self.assertTrue(all(skip for text, skip, kw in calls
-                            if text in ("Girl", " and ", "boy")),
-                        "Fragments must tokenize without duplicating Qwen's template")
-        self.assertTrue(any(text == "" and not kw.get("prevent_empty_text", True)
-                            for text, skip, kw in calls),
-                        "The nonempty prompt's structural shell cannot include the empty-negative space")
+                         "One original image reference")
+        self.assertEqual(self.original_characters(batch), "Girl and boy",
+                         "No generated replacement text, duplicate template or extra space")
+        self.assertIn(1.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
+        self.assertIn(0.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
+        self.assertEqual([text for text, _, _ in calls["raw"]], ["Girl", " and ", "boy"])
+        self.assertTrue(any(text == "" and kw.get("prevent_empty_text") is False
+                            for text, kw in calls["outer"]),
+                        "Nonempty authored text needs a BLANK structural shell")
+
+    def test_true_empty_negative_still_gets_native_space(self):
+        scope, clip, calls = self.fixture()
+        tokens, weighted = scope["combine_leaves"](
+            clip, [],
+            lambda text: clip.tokenize(text, prevent_empty_text=True),
+            per_leaf=True,
+            blank_tokenize_fn=lambda text: clip.tokenize(text, prevent_empty_text=False))
+        self.assertFalse(weighted)
+        batch = tokens["qwen3vl_8b"][0]
+        self.assertEqual(self.original_characters(batch), " ")
+        self.assertTrue(any(text == "" and kw.get("prevent_empty_text") is True
+                            for text, kw in calls["outer"]),
+                        "The actual empty negative must retain upstream substitution")
 
 
 if __name__ == "__main__":
