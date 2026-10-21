@@ -1,0 +1,1 @@
+Pinned repaired inverse Qwen mask pipeline. Source commit ca1505eb1a2e8a41afdea03ff197d21cefe2933a. Validate SwarmRequireNonEmptyMask > ThresholdMask(0) > InvertMask > post-guard > ThresholdMask(0), native CropAndStitch, and unchanged authored segment text. This is CPU/graph proof only.
