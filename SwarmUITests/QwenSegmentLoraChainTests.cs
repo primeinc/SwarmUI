@@ -103,7 +103,7 @@ public class QwenSegmentLoraChainTests : SwarmUITest
             selectedLoras, "subjects/Portrait", null), Is.EqualTo("subjects/Portrait"));
         Assert.That(T2IParamTypes.ValidateParam(
             selectedLoras, "subjects/Portrait,subjects/portrait", null),
-            Is.EqualTo("subjects/Portrait\\n|||\\nsubjects/portrait"));
+            Is.EqualTo("subjects/Portrait\n|||\nsubjects/portrait"));
         Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
             T2IParamTypes.ValidateParam(selectedLoras, "subjects/PORTRAIT", null))
             .Message, Does.Contain("ambiguous"));
