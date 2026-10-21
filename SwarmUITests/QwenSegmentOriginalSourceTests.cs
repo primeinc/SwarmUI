@@ -421,7 +421,7 @@ public class QwenSegmentOriginalSourceTests
         var sampler = nodes.Single(x => x.Node["class_type"]?.ToString() == "LanPaint_KSampler");
         var encoder = positiveEncoders.Single();
         var stitch = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintStitchImproved");
-        var mask = nodes.Single(x => x.Node["class_type"]?.ToString() == "ThresholdMask");
+        var thresholdMasks = nodes.Where(x => x.Node["class_type"]?.ToString() == "ThresholdMask").ToArray();
         // CLIPSeg already applied the explicit <segment:...threshold> cutoff.
         // The Qwen compositor may binarize its selected pixels, but it must not
         // silently impose a second 0.5 confidence threshold and discard them.
@@ -434,13 +434,25 @@ public class QwenSegmentOriginalSourceTests
             ? guards.Single(x => x.Node["inputs"]?["mask"]?.ToString()
                 == new Newtonsoft.Json.Linq.JArray(invert.Id, 0).ToString())
             : guards.Single();
+        var mask = thresholdMasks.Single(x => x.Node["inputs"]?["mask"]?.ToString()
+            == new Newtonsoft.Json.Linq.JArray(requireMask.Id, 0).ToString());
         if (invertedSegment)
         {
             Assert.That(guards, Has.Length.EqualTo(2),
                 "The un-inverted detector must be guarded BEFORE the explicit complement");
             var sourceGuard = guards.Single(x => x.Id != requireMask.Id);
+            // CLIPSeg returns fractional confidences after applying the authored threshold.
+            // Inverting raw confidence then ThresholdMask(0) turns almost every
+            // selected subject pixel opaque again. Binarize the target BEFORE
+            // inversion so the complement really excludes that subject.
+            var preInvertBinary = thresholdMasks.SingleOrDefault(x =>
+                x.Node["inputs"]?["mask"]?.ToString()
+                    == new Newtonsoft.Json.Linq.JArray(sourceGuard.Id, 0).ToString());
+            Assert.That(preInvertBinary.Node, Is.Not.Null,
+                "Native Qwen inverse edits must binarize detector support before inversion");
+            Assert.That(preInvertBinary.Node["inputs"]?["value"]?.ToObject<double>(), Is.Zero);
             Assert.That(invert.Node["inputs"]?["mask"]?.ToString(),
-                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(sourceGuard.Id, 0).ToString()));
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(preInvertBinary.Id, 0).ToString()));
             Assert.That(sourceGuard.Node["inputs"]?["mask"]?.ToString(),
                 Is.EqualTo(new Newtonsoft.Json.Linq.JArray(detector.Id, 0).ToString()));
             Assert.That(sourceGuard.Node["inputs"]?["maximum_coverage"]?.ToObject<double>(),
