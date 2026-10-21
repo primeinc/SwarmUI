@@ -187,7 +187,12 @@ class RealWeightedQwenTokenizationCPU(unittest.TestCase):
                          "The negative control must actually reproduce the trailing-space bug")
         self.assertIn(1.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
         self.assertIn(0.5, [w for t, w in batch if isinstance(t, int) and t < 2000])
-        self.assertEqual([text for text, _, _ in calls["raw"]], ["Girl", " and ", "boy"])
+        # The explicit unsafe-negative comparison below invokes the same
+        # tokenizer again; check the first authored leaf sequence, not a
+        # fictitious global one-call total. The SD tokenizer is raw already.
+        self.assertEqual([text for text, _, _ in calls["raw"] if text][:3],
+                         ["Girl", " and ", "boy"])
+        self.assertFalse(any("skip_template" in kw for _, _, kw in calls["raw"]))
         self.assertTrue(any(text == "" and kw.get("prevent_empty_text") is False
                             for text, kw in calls["outer"]),
                         "Nonempty authored text needs a BLANK structural shell")
