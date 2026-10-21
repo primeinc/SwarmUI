@@ -338,6 +338,40 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, available, backend));
     }
 
+
+    [Test]
+    public static void NativeQwen21RawEditWithoutCropMustRequireBuiltinQwenNodeBeforeUpload()
+    {
+        // The shipped upstream TextEncodeQwenImage21 outputs conditioning
+        // and a native empty latent. Raw upstream edit graphs do not require
+        // either SwarmEmptyQwenImage21Latent or InpaintCropImproved.
+        JObject native = new()
+        {
+            ["source"] = Node("LoadImage"),
+            ["qwen"] = Node("TextEncodeQwenImage21")
+        };
+        HashSet<string> installed = ["LoadImage"];
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(native, installed))
+            .Message, Does.Contain("TextEncodeQwenImage21"),
+            "A raw upstream Qwen node must be recognized even without Swarm-specific markers");
+
+        const string raw = """
+            {
+                "source":{"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "qwen":{"class_type":"TextEncodeQwenImage21","inputs":{"prompt":"Replace person"}}
+            }
+            """;
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed))
+            .Message, Does.Contain("TextEncodeQwenImage21"));
+        installed.Add("TextEncodeQwenImage21");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(native, installed));
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed));
+    }
+
     [Test]
     public static void RawQwenPreflightRejectsStaleIndependentVisionSocketsBeforeUpload()
     {
