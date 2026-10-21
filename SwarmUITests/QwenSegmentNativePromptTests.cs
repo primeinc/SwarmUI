@@ -292,7 +292,7 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             var context = new T2IPromptHandling.PromptTagContext
             {
                 Input = input,
-                Param = "prompt",
+                Param = T2IParamTypes.Prompt.Type.ID,
                 Loras = ["Audit/HannahLynn"]
             };
             string parsed = T2IPromptHandling.ProcessPromptLike(authored, context, true);
