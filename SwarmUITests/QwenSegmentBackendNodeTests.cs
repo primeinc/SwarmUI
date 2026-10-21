@@ -204,6 +204,54 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
 
 
     [Test]
+    public static void RawUpstreamQwenEditWithOwnLatentMustValidateRequiredInputs()
+    {
+        // Comfy-Org/ComfyUI nodes_qwen.py#TextEncodeQwenImage21.define_schema
+        // requires CLIP, authored positive, and authored negative inputs.
+        // Raw workflows can have their own latent and NO Swarm crop/empty
+        // latent, so Qwen schema validation must not return early.
+        JObject graph = new()
+        {
+            ["native"] = Node("TextEncodeQwenImage21")
+        };
+        graph["native"]["inputs"]["prompt"] = "Replace the subject.";
+        JObject backend = new()
+        {
+            ["TextEncodeQwenImage21"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["required"] = new JObject
+                    {
+                        ["clip"] = new JArray("CLIP"),
+                        ["prompt"] = new JArray("STRING"),
+                        ["negative_prompt"] = new JArray("STRING")
+                    }
+                }
+            }
+        };
+        SwarmUserErrorException missing = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21NativeRequiredInputs(graph, backend));
+        Assert.That(missing.Message, Does.Contain("clip"));
+        Assert.That(missing.Message, Does.Contain("negative_prompt"));
+        graph["native"]["inputs"]["clip"] = new JArray("clip_loader", 0);
+        graph["native"]["inputs"]["negative_prompt"] = "";
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21NativeRequiredInputs(graph, backend));
+        // Do not impose Qwen-only gates on unrelated Comfy raw workflows.
+        JObject other = new() { ["save"] = Node("SaveImage") };
+        backend["SaveImage"] = new JObject
+        {
+            ["input"] = new JObject
+            {
+                ["required"] = new JObject { ["images"] = new JArray("IMAGE") }
+            }
+        };
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21NativeRequiredInputs(other, backend));
+    }
+
+    [Test]
     public static void LegacyRemoteMaskGuardWithoutCoverageSocketMustFailBeforeUpload()
     {
         JObject graph = new()
