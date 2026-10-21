@@ -76,7 +76,7 @@ class RealSwarmQwenSegmentPromptParserTests(unittest.TestCase):
 
 # Reuse the already scheduled CPU prompt-parser CI job for Qwen image-slot
 # execution regressions, without changing the workflow definition.
-from test_qwen_reference_break_cpu import QwenSwarmBreakReferenceContract
+from test_qwen_reference_break_cpu import QwenSwarmBreakReferenceContract, QwenNativeWeightedShellContract
 
 
 if __name__ == "__main__":
