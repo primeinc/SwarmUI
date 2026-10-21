@@ -1036,6 +1036,23 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
+    /// <summary>
+    /// A raw Comfy ${loras} macro must select the exact installed adapter.
+    /// Qwen's model-path verification preserves case and filename whitespace,
+    /// so do not reintroduce the generic case-folding/fuzzy matcher here.
+    /// </summary>
+    public static string ResolveRawWorkflowLoraNames(
+        IEnumerable<string> requested, IEnumerable<string> available)
+    {
+        string[] catalog = [.. available];
+        string[] matches = [.. requested.Select(name => T2IPromptHandling.MatchPromptLoraName(name, catalog))];
+        if (matches.Any(name => string.IsNullOrWhiteSpace(name)))
+        {
+            throw new SwarmUserErrorException("One or more LoRA models not found.");
+        }
+        return matches.JoinString(",");
+    }
+
     public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null)
     {
         // note: gently break any standard embed with a space, *require* swarm format embeds, as comfy's raw syntax has unwanted behaviors
@@ -1094,12 +1111,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 string getLoras()
                 {
                     string[] loraNames = [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(user_input.SourceSession)];
-                    string[] matches = [.. user_input.Get(T2IParamTypes.Loras, []).Select(lora => T2IParamTypes.GetBestModelInList(lora, loraNames))];
-                    if (matches.Any(m => string.IsNullOrWhiteSpace(m)))
-                    {
-                        throw new SwarmUserErrorException("One or more LoRA models not found.");
-                    }
-                    return matches.JoinString(",");
+                    return ResolveRawWorkflowLoraNames(user_input.Get(T2IParamTypes.Loras, []), loraNames);
                 }
                 string filled = tagBasic switch
                 {
