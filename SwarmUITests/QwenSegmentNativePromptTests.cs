@@ -173,6 +173,20 @@ public class QwenSegmentNativePromptTests : SwarmUITest
         Assert.Throws<AssertionException>(() => RequirePairedQwenReferenceLinks(graph));
     }
 
+    [TestCase(true, false, 1)]
+    [TestCase(false, false, 1)]
+    [TestCase(true, true, 0)]
+    [TestCase(false, true, 0)]
+    public static void PromptImageSourceIsNotReaddedAsIndependentReference(
+        bool useOriginalReference, bool hasInitImage, int expectedFirstIndependentIndex)
+    {
+        // Without Init Image, PromptImages[0] IS the original edit source.
+        // Disabling the original-reference option must not sneak that source
+        // back into Qwen conditioning as an independent Prompt Image.
+        Assert.That(WorkflowGenerator.FirstQwen21AdditionalReferenceIndex(
+            useOriginalReference, hasInitImage), Is.EqualTo(expectedFirstIndependentIndex));
+    }
+
     [Test]
     public static void DisablingOriginalReferenceDoesNotInventAnImageOrTextToken()
     {
