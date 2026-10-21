@@ -106,6 +106,7 @@ public class NullModelTests : SwarmUITest
     public void TestQwen21VaeShapeRules()
     {
         List<Tensor> tensors = Tensors(ReadHeader(Family, "qwen_image_2.1_vae_bf16"));
+        Assert.That(8 + ReadHeaderBytes(Family, "qwen_image_2.1_vae_bf16").Length + tensors.Sum(t => t.Bytes), Is.EqualTo(RealSize(Family, "vae/qwen_image_2.1_vae_bf16.safetensors")), "the header fixture is the released file's header");
         List<string> mismatches = Mismatches(tensors, t => Qwen21VaeShape(t.Key, t.Shape, Qwen21VaeDims.Real));
         Assert.That(mismatches, Is.Empty, string.Join("\n", mismatches));
         string path = Path.Combine(Path.GetTempPath(), $"swarmui-null-vae-{Guid.NewGuid():N}.safetensors").Replace('\\', '/');
