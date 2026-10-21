@@ -586,4 +586,29 @@ public class QwenSegmentLoraChainTests : SwarmUITest
         Assert.DoesNotThrow(() => WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
             g, new JArray("patched", 0), 11, false));
     }
+    [Test]
+    public static void RawWorkflowLoraMacroMustPreserveExactLinuxAdapterIdentity()
+    {
+        // An ordinary raw Comfy workflow using ${loras} must not bypass
+        // the same exact catalog lookup used by Qwen's other LoRA paths.
+        string[] catalog = ["subjects/Portrait.safetensors", "subjects/portrait.safetensors"];
+        Assert.That(ComfyUIAPIAbstractBackend.ResolveRawWorkflowLoraNames(
+            ["subjects/portrait"], catalog),
+            Is.EqualTo("subjects/portrait.safetensors"));
+        Assert.That(ComfyUIAPIAbstractBackend.ResolveRawWorkflowLoraNames(
+            ["subjects\\\\Portrait.safetensors"], catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"));
+        Assert.That(ComfyUIAPIAbstractBackend.ResolveRawWorkflowLoraNames(
+            ["subjects/portrait", "subjects/Portrait"], catalog),
+            Is.EqualTo("subjects/portrait.safetensors,subjects/Portrait.safetensors"));
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ResolveRawWorkflowLoraNames(
+                ["subjects/pOrtrait"], catalog)).Message,
+            Does.Contain("ambiguous"));
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ResolveRawWorkflowLoraNames(
+                ["subjects/missing"], catalog)).Message,
+            Does.Contain("not found"));
+    }
+
 }
