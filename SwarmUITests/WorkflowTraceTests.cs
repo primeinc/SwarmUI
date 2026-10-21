@@ -1,13 +1,18 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SixLabors.ImageSharp.Metadata.Profiles.Exif;
+using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
 using SwarmUI.Media;
@@ -105,8 +110,11 @@ public class WorkflowTraceTests : SwarmUITest
     }
 
     /// <summary>Runs what a ComfyUI generation writes into an image's metadata after the trace finishes, in order: the backend posts the workflow (<see cref="WorkflowTrace.RecordPosted"/>) and adds its debug data with the prompt when the output arrives (ComfyUIAPIAbstractBackend.AwaitJobLive),
-    /// then T2IEngine copies the input, adds the generation times and fires <see cref="T2IEngine.PostGenerateEvent"/>, where <see cref="WorkflowTrace.FitRecordToSave"/> refits a tiered record. Returns the copy the saved image's metadata is generated from.</summary>
-    public static T2IParamInput SaveInput(T2IParamInput input, string workflow)
+    /// then T2IEngine copies the input, adds the generation times and fires <see cref="T2IEngine.PostGenerateEvent"/> with the output file, where <see cref="WorkflowTrace.FitRecordToSave"/> refits a tiered record. Returns the copy the saved file's metadata is generated from.</summary>
+    /// <param name="input">The input the workflow was created for.</param>
+    /// <param name="workflow">The workflow text the backend posts.</param>
+    /// <param name="output">The output file, as the backend returns it; null for <see cref="InitTestImage"/>.</param>
+    public static T2IParamInput SaveInput(T2IParamInput input, string workflow, MediaFile output = null)
     {
         WorkflowTrace.RecordPosted(input, workflow, nameof(ComfyUISelfStartBackend));
         input.ExtraMeta["debug_backend"] = new JObject()
@@ -124,7 +132,7 @@ public class WorkflowTraceTests : SwarmUITest
         T2IParamInput copy = input.Clone();
         copy.ExtraMeta["prep_time"] = "1.23 min";
         copy.ExtraMeta["generation_time"] = "45.67 sec";
-        T2IEngine.PostGenerateEvent?.Invoke(new(null, copy, () => { }, "9"));
+        T2IEngine.PostGenerateEvent?.Invoke(new(output ?? InitTestImage, copy, () => { }, "9"));
         return copy;
     }
 
@@ -419,7 +427,7 @@ public class WorkflowTraceTests : SwarmUITest
         if (checkedOutcomes.Count > 0)
         {
             CaseOutcome largest = checkedOutcomes[^1];
-            TestContext.Out.WriteLine($"Image record size (PNG, tier 0): median {checkedOutcomes[checkedOutcomes.Count / 2].RecordChars} chars, max {largest.RecordChars} chars ({largest.Label}). JPEG/WebP record tier (limit {WorkflowTrace.MaxExifMetadataChars} chars of metadata): {checkedOutcomes.GroupBy(o => o.JpegTier).OrderBy(g => g.Key).Select(g => $"tier {g.Key} x{g.Count()}").JoinString(", ")}.");
+            TestContext.Out.WriteLine($"Image record size (PNG, tier 0): median {checkedOutcomes[checkedOutcomes.Count / 2].RecordChars} chars, max {largest.RecordChars} chars ({largest.Label}). JPEG record tier (limit {MetadataHelper.MaxJpegExifChars} chars of metadata): {checkedOutcomes.GroupBy(o => o.JpegTier).OrderBy(g => g.Key).Select(g => $"tier {g.Key} x{g.Count()}").JoinString(", ")}.");
             List<string> editSteps = [.. checkedOutcomes.SelectMany(o => o.EditSteps)];
             TestContext.Out.WriteLine($"In-place edits recorded: {editSteps.Count} in {checkedOutcomes.Count(o => o.EditSteps.Count > 0)} builds; by step: {editSteps.GroupBy(s => s).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count()}").JoinString(", ")}");
         }
@@ -1102,7 +1110,7 @@ public class WorkflowTraceTests : SwarmUITest
                 T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase, Params = new() { ["imageformat"] = format } });
                 if (notice)
                 {
-                    input.ExtraMeta["trace_test_padding"] = new string('x', WorkflowTrace.MaxExifMetadataChars);
+                    input.ExtraMeta["trace_test_padding"] = new string('x', MetadataHelper.MaxJpegExifChars);
                 }
                 string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
                 JObject stored = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
@@ -1173,7 +1181,7 @@ public class WorkflowTraceTests : SwarmUITest
                 int copies = (savedText.Length - savedText.Replace(filler, "").Length) / filler.Length;
                 table.Add($"prompt {promptChars} chars, saved {copies} times ({string.Join(", ", metadata.Descendants().OfType<JValue>().Where(v => $"{v}".Contains(filler)).Select(v => v.Path))}): {savedOther} chars of other saved metadata; tier {finishedTier} at Finish, {exifWithoutRefit} EXIF bytes if kept; tier {fittedTier} refit, {exif} EXIF bytes");
                 Assert.That(fittedTier, Is.GreaterThanOrEqualTo(finishedTier), $"{promptChars}: the metadata only grows after Finish, so the refit tier is never larger");
-                if (savedOther + WorkflowTrace.RecordMetadataChars(tiers[^1]) <= WorkflowTrace.MaxExifMetadataChars)
+                if (savedOther + WorkflowTrace.RecordMetadataChars(tiers[^1]) <= MetadataHelper.MaxJpegExifChars)
                 {
                     Assert.That(exif, Is.LessThanOrEqualTo(MaxSingleApp1ExifBytes), $"{promptChars}: the saved JPEG metadata fits one APP1 segment");
                 }
@@ -1192,6 +1200,157 @@ public class WorkflowTraceTests : SwarmUITest
         }
         Assert.That(overflowsWithoutRefit, Is.GreaterThan(0), "negative control: some prompt length overflows one APP1 segment when the tier picked at Finish is kept");
         Assert.That(fullOthers, Is.EqualTo(1), "only the longest prompt fills the metadata without the record");
+    }
+
+    /// <summary>Returns a segment-and-LoRA prompt with filler text appended to the given length, so its metadata is larger than one JPEG EXIF segment.</summary>
+    public static string LongSegmentPrompt(int fillerChars)
+    {
+        Lora("test_alien_lora");
+        string filler = string.Concat(Enumerable.Repeat("a wide grassy field under a cloudy sky, ", fillerChars / 40 + 1))[..fillerChars];
+        return $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora> {filler}";
+    }
+
+    /// <summary>A WebP image keeps the full record: ImageSharp writes the whole EXIF profile as one RIFF chunk (BitWriterBase.WriteTrunksAfterData), and ImageSharp and the web UI's ExifReader read the chunk whole.
+    /// A video's metadata is its track comment, which has no size limit, so the video of a request configured for JPEG is refit to tier 0 while that request's JPEG image gets a smaller tier.</summary>
+    [Test]
+    public void TestWebpAndVideoKeepTheFullRecord()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            T2IParamInput webp = BuildInput(new() { Model = model, Prompt = LongSegmentPrompt(6000), Params = new() { ["imageformat"] = "WEBP" } });
+            string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(webp, w => w, null, [.. FullFeatures]);
+            JObject stored = (JObject)webp.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That(stored["omitted"], Is.Null, "a WebP record is the full record");
+            Assert.That(stored.Annotation<WorkflowTrace.RecordTierSet>(), Is.Null, "a WebP record has no tiers to refit");
+            string metadata = SaveInput(webp, workflow).GenRawMetadata();
+            Assert.That(ExifBytes(metadata), Is.GreaterThan(MaxSingleApp1ExifBytes), "the metadata is larger than one JPEG segment");
+            ImageFile image = InitTestImage;
+            Assert.That(image.ConvertTo("WEBP", metadata, 0, 90).GetMetadata(), Is.EqualTo(metadata), "the WebP's EXIF chunk holds all of it");
+            T2IParamInput jpg = BuildInput(new() { Model = model, Prompt = LongSegmentPrompt(6000), Params = new() { ["imageformat"] = "JPG" } });
+            workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(jpg, w => w, null, [.. FullFeatures]);
+            List<JObject> tiers = ((JObject)jpg.ExtraMeta[WorkflowTrace.MetadataKey]).Annotation<WorkflowTrace.RecordTierSet>().Tiers;
+            Assert.That(SaveInput(jpg, workflow, new VideoFile([0], MediaType.VideoMp4)).ExtraMeta[WorkflowTrace.MetadataKey], Is.SameAs(tiers[0]), "a video's track comment has no limit");
+            Assert.That(tiers.IndexOf((JObject)SaveInput(jpg, workflow).ExtraMeta[WorkflowTrace.MetadataKey]), Is.GreaterThan(0), "the same request's JPEG image gets a smaller tier");
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+        }
+    }
+
+    /// <summary>Returns the stealth metadata text EncodeStealthMetadata embedded in an image's alpha channel ("Alpha" mode), or null if the pixels do not hold a whole compressed copy.
+    /// The bits run column by column, most significant bit first: the 15-byte signature, the payload length in bits (32 bits), then the gzip-compressed text.</summary>
+    public static string DecodeStealthAlpha(ImageFile file)
+    {
+        using SixLabors.ImageSharp.Image<Rgba32> image = file.ToIS.CloneAs<Rgba32>();
+        List<byte> bits = new(image.Width * image.Height);
+        for (int x = 0; x < image.Width; x++)
+        {
+            for (int y = 0; y < image.Height; y++)
+            {
+                bits.Add((byte)(image[x, y].A & 1));
+            }
+        }
+        byte[] bytesAt(int bitOffset, int count)
+        {
+            byte[] result = new byte[count];
+            for (int i = 0; i < count * 8; i++)
+            {
+                result[i / 8] = (byte)((result[i / 8] << 1) | bits[bitOffset + i]);
+            }
+            return result;
+        }
+        if (bits.Count < 152 || Encoding.UTF8.GetString(bytesAt(0, 15)) != "stealth_pngcomp")
+        {
+            return null;
+        }
+        long payloadBits = BinaryPrimitives.ReadUInt32BigEndian(bytesAt(120, 4));
+        if (152 + payloadBits > bits.Count)
+        {
+            return null;
+        }
+        try
+        {
+            using GZipStream gzip = new(new MemoryStream(bytesAt(152, (int)(payloadBits / 8))), CompressionMode.Decompress);
+            using StreamReader reader = new(gzip, Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>With stealth metadata on, the metadata ConvertTo writes into a PNG's pixels fits them: a small image gets the first tier whose compressed text fits, and its pixels decode back to the saved metadata, while a large image keeps tier 0.
+    /// The tier before the one picked is the negative control: its stealth data does not fit, and the pixels hold a truncated copy.</summary>
+    [Test]
+    public void TestStealthMetadataFitsTheImage()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
+        Settings.User.FileFormatData fileFormat = Program.ServerSettings.DefaultUser.FileFormat;
+        string priorStealth = fileFormat.StealthMetadata;
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            fileFormat.StealthMetadata = "Alpha";
+            T2IParamInput input = BuildInput(new() { Model = model, Prompt = LongSegmentPrompt(200), Params = new() { ["imageformat"] = "PNG" } });
+            string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
+            JObject finished = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
+            List<JObject> tiers = finished.Annotation<WorkflowTrace.RecordTierSet>()?.Tiers;
+            Assert.That(tiers, Is.Not.Null, "with stealth metadata on, a PNG record carries its tiers");
+            Assert.That(finished, Is.SameAs(tiers[0]), "PNG text chunks have no limit, so Finish keeps tier 0");
+            ImageFile small = TestImage(160, 160);
+            T2IParamInput saved = SaveInput(input, workflow, small);
+            int fitted = tiers.IndexOf((JObject)saved.ExtraMeta[WorkflowTrace.MetadataKey]);
+            string metadata = saved.GenRawMetadata();
+            TestContext.Out.WriteLine($"160x160 alpha holds {MetadataHelper.StealthCapacityBits(160, 160, "Alpha")} bits; tier {fitted} picked, {MetadataHelper.StealthPayloadBits(metadata, "Alpha")} bits");
+            Assert.That(fitted, Is.GreaterThan(0), "a 160x160 image cannot hold tier 0");
+            Assert.That(DecodeStealthAlpha(small.ConvertTo("PNG", metadata, 0, 100, "Alpha")), Is.EqualTo(metadata), "the pixels decode back to the saved metadata");
+            saved.ExtraMeta[WorkflowTrace.MetadataKey] = tiers[fitted - 1];
+            Assert.That(DecodeStealthAlpha(small.ConvertTo("PNG", saved.GenRawMetadata(), 0, 100, "Alpha")), Is.Null, "negative control: the tier before it does not fit, and the pixels hold a truncated copy");
+            Assert.That(SaveInput(input, workflow, TestImage(1024, 1024)).ExtraMeta[WorkflowTrace.MetadataKey], Is.SameAs(tiers[0]), "a 1024x1024 image holds tier 0");
+        }
+        finally
+        {
+            fileFormat.StealthMetadata = priorStealth;
+            Program.ServerSettings.AddDebugData = priorDebug;
+        }
+    }
+
+    /// <summary>JPEG copies of an image's metadata (history thumbnails, model and workflow preview images) keep it in one EXIF segment: over the limit, the trace record is replaced by its notice, which keeps the log key and workflow identity, and every parameter is kept.
+    /// The PNG's own metadata, too large for one segment, is the negative control. Metadata without a trace record passes through as it is.</summary>
+    [Test]
+    public void TestJpegCopiesOfMetadataFitOneExifSegment()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            T2IParamInput input = BuildInput(new() { Model = model, Prompt = LongSegmentPrompt(6000), Params = new() { ["imageformat"] = "PNG" } });
+            string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
+            string metadata = SaveInput(input, workflow).GenRawMetadata();
+            Assert.That(ExifBytes(metadata), Is.GreaterThan(MaxSingleApp1ExifBytes), "negative control: the PNG's metadata as it is would split a JPEG copy's EXIF");
+            ImageFile image = InitTestImage;
+            ImageFile copy = image.ConvertTo("PNG", metadata).ToMetadataJpg();
+            Assert.That(copy.ToIS.Metadata.ExifProfile.ToByteArray().Length, Is.LessThanOrEqualTo(MaxSingleApp1ExifBytes), "the JPEG copy's EXIF fits one segment");
+            JObject original = metadata.ParseToJson(), copied = copy.GetMetadata().ParseToJson();
+            JObject notice = (JObject)copied["sui_extra_data"][WorkflowTrace.MetadataKey];
+            Assert.That($"{notice["log_key"]}", Is.EqualTo($"{original["sui_extra_data"][WorkflowTrace.MetadataKey]["log_key"]}"));
+            Assert.That(JToken.DeepEquals(notice["workflow"], original["sui_extra_data"][WorkflowTrace.MetadataKey]["workflow"]), Is.True, "the notice keeps the workflow identity");
+            Assert.That($"{notice["omitted"]}", Does.Contain("JPEG copy"));
+            Assert.That(JToken.DeepEquals(copied["sui_image_params"], original["sui_image_params"]), Is.True, "every parameter is kept");
+            string untraced = $"{{\"sui_image_params\": {{\"prompt\": \"{new string('a', 40000)}\"}}}}";
+            Assert.That(MetadataHelper.FitTextToJpegExif(untraced), Is.SameAs(untraced), "metadata without a trace record passes through as it is");
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+        }
     }
 
     /// <summary>The segment's redraw is pasted back into the image that reaches the final save, and the trace's downstream path says so.</summary>
@@ -1285,7 +1444,7 @@ public class WorkflowTraceTests : SwarmUITest
 
     /// <summary>The image record: the full trace goes to the log, and the image gets the record tier that fits its format.
     /// Every tier names the samplers with their calls and the workflow identity; tier 0 lists each sampler-chain node with its provenance; lower tiers drop node detail, then the node table, in that order, saying what was omitted and where the full trace is.
-    /// PNG keeps tier 0 at any size; JPEG and WebP keep the first tier that fits the metadata limit. The format comes from the input's Image Format parameter, read without marking it used.</summary>
+    /// PNG and WebP keep tier 0 at any size; JPEG, in any of its format values, keeps the first tier that fits the metadata limit. The format comes from the input's Image Format parameter, read without marking it used.</summary>
     [Test]
     public void TestImageRecordTiers()
     {
@@ -1327,7 +1486,12 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "PNG", 0, 10), Is.SameAs(tiers[0]), "PNG keeps tier 0 over any limit");
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1000, tier0 + 1000), Is.SameAs(tiers[0]), "JPEG keeps tier 0 when it fits with the other metadata");
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1001, tier0 + 1000), Is.SameAs(tiers[1]), "the other metadata counts against the limit");
-        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "WEBP", 0, 10), Is.SameAs(tiers[4]), "the notice when nothing fits");
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG75", 0, 10), Is.SameAs(tiers[4]), "the notice when nothing fits");
+        foreach (string unlimited in new[] { "WEBP", "WEBP_LOSSLESS", "WEBP_90", "mp4", "wav" })
+        {
+            Assert.That(WorkflowTrace.ForImageMetadata(tiers, unlimited, 0, 10), Is.SameAs(tiers[0]), $"{unlimited} keeps tier 0 over any limit: its metadata is not in a JPEG EXIF segment");
+        }
+        Assert.That(JToken.DeepEquals(tiers[4], MetadataHelper.TraceNotice(tiers[0], $"{tiers[4]["omitted"]}")), Is.True, "the notice tier is the notice of tier 0");
         Assert.That(JToken.DeepEquals((JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey], tiers[0]), Is.True, "a PNG generation stores tier 0");
         Assert.That(summary["nodes"], Is.Not.Null, "the full trace keeps every node by stage");
         Assert.That(summary["params_read"], Is.Not.Null, "the full trace keeps every parameter read");

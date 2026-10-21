@@ -32,11 +32,6 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Maximum number of nodes listed per sampler input chain.</summary>
     public const int MaxChainNodes = 48;
 
-    /// <summary>Most characters of image metadata text (parameters, extra data and the trace record together, as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for formats that keep metadata in EXIF (every format but PNG).
-    /// EXIF metadata is a UTF-16 UserComment, two bytes per character; within this limit it fits one 64 KiB JPEG APP1 segment (ImageSharp splits a larger profile across several, which most readers do not join).
-    /// <see cref="FitRecordToSave"/> measures the metadata the image is saved with; the margin covers what changes after it runs: post-generate handlers subscribed after it, and the seed of a later image in a batch.</summary>
-    public const int MaxExifMetadataChars = 30_000;
-
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
 
@@ -803,7 +798,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Returns the "full_trace" text of a record: the label of the log line with the full trace, and where that line is kept.</summary>
     public static string FullTraceNote(string logKey) => $"server log line '{LogLabel(logKey)}' at Debug level, {DebugLogRetention()}";
 
-    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> for PNG, otherwise the tier of <see cref="RecordTiers"/> that <see cref="PickTier"/> picks, which <see cref="FitRecordToSave"/> picks again when the image is saved.</summary>
+    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> when the image's metadata has no size limit,
+    /// otherwise (<see cref="MetadataMayBeLimited"/>) the tier of <see cref="RecordTiers"/> that <see cref="PickTier"/> picks, which <see cref="FitRecordToSave"/> picks again when the image is saved.</summary>
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
@@ -811,8 +807,22 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Summary = Build();
         Logs.Debug($"{LogReference} request {Gen.UserInput.UserRequestId}:\n{Summary.ToString(Formatting.Indented)}\n{LogReference} detail:\n{BuildDetail().ToString(Formatting.Indented)}");
         string format = ImageFormatOf(Gen.UserInput);
-        Record = format == "PNG" ? RecordFull(Summary, LogKey) : PickTier(RecordTiers(Summary, LogKey), Gen.UserInput, format);
+        Record = MetadataMayBeLimited(Gen.UserInput, format) ? PickTier(RecordTiers(Summary, LogKey), Gen.UserInput, format) : RecordFull(Summary, LogKey);
         Gen.UserInput.ExtraMeta[MetadataKey] = Record;
+    }
+
+    /// <summary>Returns true if an image of this input in the given format has a metadata size limit: JPEG keeps metadata in EXIF (<see cref="MetadataHelper.MaxJpegExifChars"/>), and stealth metadata in PNG or WebP pixels holds as much as the image has pixels for (<see cref="MetadataHelper.StealthCapacityBits"/>).
+    /// PNG text chunks and WebP's EXIF chunk have no limit.</summary>
+    public static bool MetadataMayBeLimited(T2IParamInput input, string format)
+    {
+        return ImageFile.IsJpegFormat(format) || ImageFile.StealthApplies(format, StealthModeOf(input));
+    }
+
+    /// <summary>Returns the stealth metadata mode images of this input are saved with, as Session.ApplyMetadata reads it, or "false" when metadata is not saved.</summary>
+    public static string StealthModeOf(T2IParamInput input)
+    {
+        Settings.User.FileFormatData fileFormat = input.SourceSession?.User?.Settings?.FileFormat ?? Program.ServerSettings?.DefaultUser?.FileFormat;
+        return fileFormat is null || !fileFormat.SaveMetadata ? "false" : fileFormat.StealthMetadata ?? "false";
     }
 
     /// <summary>Records that <see cref="Finish"/> threw: logs the error, detaches the parameter tracker, and stores the error as the image record. The generated workflow is unaffected.</summary>
@@ -979,15 +989,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["samplers"] = brief,
             ["omitted"] = $"everything but the samplers' nodes and calls, to fit the image metadata; the full trace is in the {full["full_trace"]}"
         };
-        JObject notice = new()
-        {
-            ["version"] = FormatVersion,
-            ["log_key"] = logKey,
-            ["full_trace"] = full["full_trace"].DeepClone(),
-            ["workflow"] = full["workflow"]?.DeepClone(),
-            ["samplers"] = brief.Count,
-            ["omitted"] = $"the whole trace, to fit the image metadata; the full trace is in the {full["full_trace"]}"
-        };
+        JObject notice = MetadataHelper.TraceNotice(full, $"the whole trace, to fit the image metadata; the full trace is in the {full["full_trace"]}");
         return [full, reduced, counted, minimal, notice];
     }
 
@@ -1010,18 +1012,19 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return T2IParamInput.MetadataToString(new JObject() { ["sui_extra_data"] = new JObject() { [MetadataKey] = record } }).Length;
     }
 
-    /// <summary>Returns the record tier to store in an image's metadata: the first for PNG, whose text chunks have no size limit; for formats that keep metadata in EXIF, the first tier that fits <see cref="MaxExifMetadataChars"/> together with the rest of the metadata, else the last tier.</summary>
+    /// <summary>Returns the record tier to store in a file's metadata: for JPEG, whose metadata is in one EXIF segment, the first tier that fits <see cref="MetadataHelper.MaxJpegExifChars"/> together with the rest of the metadata, else the last tier;
+    /// for every other format (PNG text chunks, WebP's EXIF chunk, video and audio comments), the first.</summary>
     /// <param name="tiers">Record tiers, most complete first (<see cref="RecordTiers"/>).</param>
-    /// <param name="format">Image format, as <see cref="T2IParamTypes.ImageFormat"/> values ("PNG", "JPG", "WEBP", ...).</param>
-    /// <param name="otherChars">Length of the rest of the image metadata text (<see cref="OtherMetadataChars"/>).</param>
-    /// <param name="maxChars">Limit for EXIF formats, or -1 for <see cref="MaxExifMetadataChars"/>.</param>
+    /// <param name="format">Image format, as <see cref="T2IParamTypes.ImageFormat"/> values ("PNG", "JPG", "WEBP", ...), or a video or audio file extension.</param>
+    /// <param name="otherChars">Length of the rest of the metadata text (<see cref="OtherMetadataChars"/> or <see cref="SavedMetadataChars"/>).</param>
+    /// <param name="maxChars">Limit for JPEG, or -1 for <see cref="MetadataHelper.MaxJpegExifChars"/>.</param>
     public static JObject ForImageMetadata(List<JObject> tiers, string format, int otherChars, int maxChars = -1)
     {
         if (maxChars < 0)
         {
-            maxChars = MaxExifMetadataChars;
+            maxChars = MetadataHelper.MaxJpegExifChars;
         }
-        if (format == "PNG")
+        if (!ImageFile.IsJpegFormat(format))
         {
             return tiers[0];
         }
@@ -1043,7 +1046,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
         public List<JObject> Tiers = tiers;
     }
 
-    /// <summary>1 once <see cref="FitRecordToSave"/> is subscribed to <see cref="T2IEngine.PostGenerateEvent"/>. The first tiered record subscribes it, so a server that never traces a JPEG or WebP image runs no handler, and it runs after the handlers subscribed at startup, whose metadata it then measures.</summary>
+    /// <summary>1 once <see cref="FitRecordToSave"/> is subscribed to <see cref="T2IEngine.PostGenerateEvent"/>. The first tiered record subscribes it, so a server that never stores one (no JPEG or stealth-metadata saves while tracing) runs no handler, and it runs after the handlers subscribed at startup, whose metadata it then measures.
+    /// The JPEG limit leaves a margin for what changes after it runs: post-generate handlers subscribed after it, and the seed of a later image in a batch.</summary>
     public static int FitSubscribed;
 
     /// <summary>Returns the tier of a record for an image of the given format with the metadata the input has now (<see cref="ForImageMetadata"/>), after annotating every tier with the tier list (<see cref="RecordTierSet"/>) for <see cref="FitRecordToSave"/>, and subscribing that.</summary>
@@ -1070,8 +1074,11 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return ForImageMetadata(tiers, format, OtherMetadataChars(input));
     }
 
-    /// <summary>Post-generate handler (<see cref="T2IEngine.PostGenerateEvent"/>): picks the record tier again for the metadata the image is saved with (<see cref="SavedMetadataChars"/>), which by now includes everything written after the trace finished: the posted workflow, the backend's debug data with the prompt, the generation times, the unused parameter list and the model hashes.
-    /// Does nothing for an input without a tiered record. An error is logged, never thrown: the image is saved with the record it had.</summary>
+    /// <summary>Post-generate handler (<see cref="T2IEngine.PostGenerateEvent"/>): picks the record tier again for the file being saved and the metadata it is saved with (<see cref="T2IParamInput.GenFullMetadataObject"/>), which by now includes everything written after the trace finished:
+    /// the posted workflow, the backend's debug data with the prompt, the generation times, the unused parameter list and the model hashes.
+    /// A video or audio file keeps the first tier (its metadata is a track comment). An image is converted to the input's image format: JPEG gets the first tier that fits one EXIF segment (<see cref="ForImageMetadata"/>),
+    /// and with stealth metadata on (PNG or WebP), the first tier from there whose stealth data fits the image's pixels (<see cref="MetadataHelper.StealthCapacityBits"/>).
+    /// Does nothing for an input without a tiered record. An error is logged, never thrown: the file is saved with the record it had.</summary>
     public static void FitRecordToSave(T2IEngine.PostGenerationEventParams args)
     {
         T2IParamInput input = args.UserInput;
@@ -1079,13 +1086,39 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return;
         }
+        JObject extra = null;
         try
         {
-            input.ExtraMeta[MetadataKey] = ForImageMetadata(set.Tiers, ImageFormatOf(input), SavedMetadataChars(input));
+            bool isImage = args.File is null || args.File.Type.MetaType == MediaMetaType.Image;
+            string format = isImage ? ImageFormatOf(input) : args.File.Type.Extension;
+            JObject metadata = input.GenFullMetadataObject();
+            extra = metadata["sui_extra_data"] as JObject;
+            extra?.Remove(MetadataKey);
+            JObject pick = ForImageMetadata(set.Tiers, format, T2IParamInput.MetadataToString(metadata).Length);
+            string stealthMode = StealthModeOf(input);
+            if (isImage && extra is not null && args.File is ImageFile image && ImageFile.StealthApplies(format, stealthMode))
+            {
+                SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(image.RawData);
+                long capacity = MetadataHelper.StealthCapacityBits(info.Width, info.Height, stealthMode);
+                for (int i = set.Tiers.IndexOf(pick); i < set.Tiers.Count; i++)
+                {
+                    pick = set.Tiers[i];
+                    extra[MetadataKey] = pick;
+                    if (MetadataHelper.StealthPayloadBits(T2IParamInput.MetadataToString(metadata), stealthMode) <= capacity)
+                    {
+                        break;
+                    }
+                }
+            }
+            input.ExtraMeta[MetadataKey] = pick;
         }
         catch (Exception ex)
         {
-            Logs.Error($"{LogLabel($"{stored["log_key"]}")}: the image record could not be fitted to the saved metadata; the image keeps the record it had: {ex.ReadableString()}");
+            Logs.Error($"{LogLabel($"{stored["log_key"]}")}: the record could not be fitted to the saved metadata; the file keeps the record it had: {ex.ReadableString()}");
+        }
+        finally
+        {
+            extra?.Remove(MetadataKey);
         }
     }
 
@@ -1205,7 +1238,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the image format cannot hold it (<see cref="PickTier"/>, then <see cref="FitRecordToSave"/>).
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the file's metadata cannot hold it (<see cref="PickTier"/>, then <see cref="FitRecordToSave"/>).
     /// An error is logged and stored as the record, never thrown: the generation is unaffected.</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
@@ -1216,7 +1249,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             summary["log_key"] = logKey;
             Logs.Debug($"{LogLabel(logKey)} request {input.UserRequestId} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
             string format = ImageFormatOf(input);
-            if (format == "PNG")
+            if (!MetadataMayBeLimited(input, format))
             {
                 input.ExtraMeta[MetadataKey] = summary;
                 return;

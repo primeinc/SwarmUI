@@ -1,5 +1,8 @@
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SwarmUI.Text2Image;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -10,6 +13,90 @@ namespace SwarmUI.Utils;
 public static class MetadataHelper
 {
     // The stealth info implementation of reforge was used as a reference for this file.
+
+    /// <summary>Most characters of metadata text (as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for a JPEG image, whose metadata is a UTF-16 EXIF UserComment, two bytes per character.
+    /// Within this limit the EXIF profile fits one JPEG APP1 segment; ImageSharp splits a larger one across several, and the ExifReader the web UI reads metadata with takes only the last Exif segment's data.</summary>
+    public const int MaxJpegExifChars = 30_000;
+
+    /// <summary>Returns the notice form of a workflow trace record (the ExtraMeta value under <see cref="T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey"/>): its version, log key, full trace pointer, workflow identity and sampler count, with what was omitted and why.</summary>
+    /// <param name="record">A trace record, of any tier.</param>
+    /// <param name="omitted">What the notice omits and why.</param>
+    public static JObject TraceNotice(JObject record, string omitted)
+    {
+        JObject notice = [];
+        foreach (string key in new[] { "version", "log_key", "full_trace", "workflow" })
+        {
+            if (record[key] is JToken value)
+            {
+                notice[key] = value.DeepClone();
+            }
+        }
+        if (record["samplers"] is JArray samplers)
+        {
+            notice["samplers"] = samplers.Count;
+        }
+        else if (record["samplers"] is JToken samplerCount)
+        {
+            notice["samplers"] = samplerCount.DeepClone();
+        }
+        notice["omitted"] = omitted;
+        return notice;
+    }
+
+    /// <summary>Returns metadata text for a JPEG copy of an image's metadata (<see cref="Media.ImageFile.ToMetadataJpg"/>: history thumbnails, model and workflow preview images): text within <see cref="MaxJpegExifChars"/> as it is,
+    /// otherwise with a workflow trace record (sui_extra_data.debug_trace) replaced by its notice (<see cref="TraceNotice"/>). Text without a record, or that is not JSON, is returned as it is.</summary>
+    public static string FitTextToJpegExif(string metadataText)
+    {
+        string key = T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey;
+        if (metadataText is null || metadataText.Length <= MaxJpegExifChars || !metadataText.Contains($"\"{key}\""))
+        {
+            return metadataText;
+        }
+        JObject metadata;
+        try
+        {
+            using JsonTextReader reader = new(new StringReader(metadataText)) { DateParseHandling = DateParseHandling.None };
+            metadata = JObject.Load(reader);
+        }
+        catch (JsonException)
+        {
+            return metadataText;
+        }
+        if (metadata["sui_extra_data"]?[key] is not JObject record)
+        {
+            return metadataText;
+        }
+        metadata["sui_extra_data"][key] = TraceNotice(record, $"the trace record of the image this JPEG copy was made from, to fit one EXIF segment; the full trace is in the {record["full_trace"]}");
+        return T2IParamInput.MetadataToString(metadata);
+    }
+
+    /// <summary>Returns the number of bits <see cref="EncodeStealthMetadata"/> embeds for a metadata text: the signature, the 32-bit length and the gzip-compressed text.</summary>
+    /// <param name="metadata">The metadata text.</param>
+    /// <param name="mode">The encoding mode: "Alpha" or "RGB".</param>
+    public static long StealthPayloadBits(string metadata, string mode)
+    {
+        return Encoding.UTF8.GetByteCount(StealthSignature(mode.ToLowerInvariant(), true)) * 8L + 32 + Compress(Encoding.UTF8.GetBytes(metadata)).Length * 8L;
+    }
+
+    /// <summary>Returns the number of bits <see cref="EncodeStealthMetadata"/> can embed in an image of the given size: one per pixel in "Alpha" mode, three in "RGB" mode. Bits past this are not embedded.</summary>
+    public static long StealthCapacityBits(int width, int height, string mode)
+    {
+        return (long)width * height * (mode.ToLowerInvariant() == "rgb" ? 3 : 1);
+    }
+
+    /// <summary>Returns the signature that starts stealth metadata in the given mode ("alpha" or "rgb", lowercase).</summary>
+    private static string StealthSignature(string mode, bool compressed) => $"stealth_{(mode == "alpha" ? "png" : "rgb")}{(compressed ? "comp" : "info")}";
+
+    /// <summary>Returns the gzip-compressed form of the given bytes, as stealth metadata stores them.</summary>
+    private static byte[] Compress(byte[] data)
+    {
+        using MemoryStream ms = new();
+        using (GZipStream gzip = new(ms, CompressionLevel.Optimal, true))
+        {
+            gzip.Write(data, 0, data.Length);
+        }
+        return ms.ToArray();
+    }
 
     /// <summary>Encodes the given metadata string into the LSBs of the image's pixels.</summary>
     /// <param name="image">The image to modify. Must be in Rgba32 format.</param>
@@ -52,18 +139,13 @@ public static class MetadataHelper
 
     private static string PrepareData(string metadata, string mode, bool compressed)
     {
-        string signature = $"stealth_{(mode == "alpha" ? "png" : "rgb")}{(compressed ? "comp" : "info")}";
+        string signature = StealthSignature(mode, compressed);
         byte[] signatureBytes = Encoding.UTF8.GetBytes(signature);
         string binarySignature = BytesToBinaryString(signatureBytes);
         byte[] paramBytes = Encoding.UTF8.GetBytes(metadata);
         if (compressed)
         {
-            using MemoryStream ms = new();
-            using (GZipStream gzip = new(ms, CompressionLevel.Optimal, true))
-            {
-                gzip.Write(paramBytes, 0, paramBytes.Length);
-            }
-            paramBytes = ms.ToArray();
+            paramBytes = Compress(paramBytes);
         }
         string binaryParam = BytesToBinaryString(paramBytes);
         string binaryParamLen = Convert.ToString(binaryParam.Length, 2).PadLeft(32, '0');
