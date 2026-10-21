@@ -44,6 +44,13 @@ class EmptyQwenImage21LatentTests(unittest.TestCase):
         self.assertEqual(tuple(result["samples"].shape), (2, 64, 48, 64))
         self.assertEqual(torch.count_nonzero(result["samples"]).item(), 0)
 
+    def test_unaligned_api_dimensions_are_not_silently_truncated(self):
+        for width, height in ((1000, 1024), (1025, 1024),
+                              (1024, 1000), (16, 1024)):
+            with self.subTest(width=width, height=height):
+                with self.assertRaisesRegex(ValueError, "multiple of 32"):
+                    self.node.generate(width=width, height=height, batch_size=1)
+
     def test_schema_is_real_comfy_required_socket_contract(self):
         required = self.node.INPUT_TYPES()["required"]
         self.assertEqual(set(required), {"width", "height", "batch_size"})
