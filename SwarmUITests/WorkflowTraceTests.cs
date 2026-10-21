@@ -232,6 +232,10 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: raw prompt text appears in the full trace");
         }
+        if (trace.BuildDetail().ToString(Formatting.None).Contains("zqx"))
+        {
+            failures.Add($"{label}: raw prompt text appears in the log detail");
+        }
         if (summary["untracked_nodes"] is not null)
         {
             failures.Add($"{label}: summary lists untracked nodes {summary["untracked_nodes"].ToString(Formatting.None)}");
@@ -757,6 +761,11 @@ public class WorkflowTraceTests : SwarmUITest
             {
                 ((JArray)((JObject)b.Input.ExtraMeta[WorkflowTrace.MetadataKey])["steps"]).RemoveAt(0);
                 return $"{b.Trace.StepRecords.Count} steps ran but the image record lists {b.Trace.StepRecords.Count - 1}";
+            },
+            ["prompt text in the log detail"] = b =>
+            {
+                b.Input.InternalSet.ValuesInput["trace_test_text"] = "zqxleak a road";
+                return "raw prompt text appears in the log detail";
             }
         };
         foreach ((string name, Func<Build, string> breakIt) in breaks)
@@ -938,6 +947,8 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That($"{((JObject)input.ExtraMeta[WorkflowTrace.MetadataKey])["trace_error"]}", Does.StartWith("JsonSerializationException").And.Contain(nameof(UnserializableValue)));
         ((JObject)input.ExtraMeta[WorkflowTrace.MetadataKey])["workflow"] = new JObject() { ["sent_sha256"] = "x" };
         Assert.DoesNotThrow(() => WorkflowTrace.RecordPosted(input, null, "TestBackend"), "a null posted workflow is logged, not thrown");
+        WorkflowTrace trace = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true).Trace;
+        Assert.DoesNotThrow(() => trace.RecordSent(null, "{}"), "a null sent workflow is logged, not thrown");
     }
 
     /// <summary>Without ComfyUI object_info, the record says that link types, declared inputs and node classes were not checked, instead of listing no problems.</summary>

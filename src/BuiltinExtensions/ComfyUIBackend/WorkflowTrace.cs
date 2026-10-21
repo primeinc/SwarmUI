@@ -2033,7 +2033,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return result;
     }
 
-    /// <summary>Builds the log-only trace detail: per-step tracker state and the raw input values.</summary>
+    /// <summary>Builds the log-only trace detail: per-step tracker state and every input value, formatted by <see cref="FormatParamValue"/> (prompts, long text and media as hashes).</summary>
     public JObject BuildDetail()
     {
         JObject states = [];
