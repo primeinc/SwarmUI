@@ -112,6 +112,10 @@ class RealWeightedQwenTokenizationCPU(unittest.TestCase):
             def tokenize_with_weights(self, text, disable_weights=False,
                                       skip_template=False, **kwargs):
                 calls.append((text, skip_template, kwargs))
+                # Mirror upstream Qwen3VLTokenizer.prevent_empty_text. A
+                # nonempty weighted prompt must not acquire this blank token.
+                if text == "" and kwargs.get("prevent_empty_text", False):
+                    text = " "
                 user = [(ord(ch) + 1000, 1.0) for ch in text]
                 if skip_template:
                     return [user]
