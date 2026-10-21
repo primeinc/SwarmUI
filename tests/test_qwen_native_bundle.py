@@ -202,7 +202,12 @@ class NativeQwenBundleTest(unittest.TestCase):
         encoder = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmText.py").read_text()
         segment_body = helper.split("CreateQwen21SegmentConditioning(", 1)[1]
         self.assertIn("referenceImages.Count == 1", segment_body)
-        self.assertIn('GetPromptImage(false, false, i)', segment_body)
+        self.assertIn('GetNativeQwen21PromptReference(i)', segment_body)
+        # Verify the new native helper still loads the requested user source
+        # through the production PromptImages lookup, not generated base output.
+        source_helper = helper.split('public JArray GetNativeQwen21PromptReference(int index)', 1)[1]
+        source_helper = source_helper.split('public (JArray Positive,', 1)[0]
+        self.assertIn('GetPromptImage(false, false, index)', source_helper)
         self.assertIn('textInputs[$"image_{i + 1}"] = referenceImages[i]', segment_body)
         self.assertNotIn('CreateNode("ImageBatch"', segment_body)
         self.assertIn('for i in range(1, 17)', encoder)
