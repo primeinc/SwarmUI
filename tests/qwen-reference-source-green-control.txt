@@ -1,0 +1,1 @@
+Pinned green comparison against PR#16 source commit f2a0b85a8e792ec85031ec054eec45221cc6e9b9. FirstQwen21AdditionalReferenceIndex must not re-add PromptImages[0] as vision reference when it is already the original image source and the original-reference option is disabled. Synthetic method and real production conditioner graph NUnit cases. No Comfy model-backed acceptance claim.
