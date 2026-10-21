@@ -26,7 +26,7 @@ import pytest
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
-from qwen_segment_lora_confinement import region_rms, assert_same_detector_mask, normalized_lora_path
+from qwen_segment_lora_confinement import region_rms, assert_same_detector_mask, normalized_lora_path, same_lora_path
 
 
 pytestmark = pytest.mark.inference
@@ -281,8 +281,8 @@ def graph_variant(original, case, stage, strength):
     # in another folder, falsely passing a rendered ON/OFF comparison.
     actual = normalized_lora_path(node["inputs"].get("lora_name", ""))
     expected = normalized_lora_path(case["lora_name"])
-    if actual != expected:
-        raise AssertionError(f"{stage}: requested adapter {expected} but graph uses {actual}")
+    if not same_lora_path(actual, expected):
+        raise AssertionError(f"{stage}: requested adapter {expected!r} but graph uses {actual!r}")
     if node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
         raise AssertionError(f"{stage}: LoRA {node_id} is not on the REAL SAMPLER'S model path")
     node["inputs"]["strength_model"] = strength
