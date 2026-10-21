@@ -438,9 +438,28 @@ public class ComfyLiveTests : SwarmUITest
         ]
     };
 
-    /// <summary>Swarm's paste-back nodes for a segment (ImageScale back to the crop bounds, ThresholdMask of the cropped mask, SwarmImageCompositeMaskedColorCorrecting at the bounds) run on real ComfyUI with a synthetic crop:
-    /// the segment's decoded redraw is replaced by a solid-color image of another size and the composite's destination by the init image, so the final save must hold that color exactly where the segment mask passes the crop threshold, and the init image everywhere else.
-    /// The trace records that the posted graph is not the generated one.</summary>
+    /// <summary>The known segment mask of <see cref="TestSegmentPasteBackOfASyntheticCrop"/>: off-centre and not square, so a swapped axis, a centred paste or a paste at the mask's own corner instead of the crop bounds' corner each land the color elsewhere.</summary>
+    public static readonly (int X, int Y, int Width, int Height) KnownSegmentRect = (160, 40, 72, 40);
+
+    /// <summary>Returns true if a pixel is inside <see cref="KnownSegmentRect"/>.</summary>
+    public static bool InKnownSegment(int x, int y) => x >= KnownSegmentRect.X && x < KnownSegmentRect.X + KnownSegmentRect.Width && y >= KnownSegmentRect.Y && y < KnownSegmentRect.Y + KnownSegmentRect.Height;
+
+    /// <summary>Returns the crop bounds SwarmMaskBounds.get_bounds (ExtraNodes/SwarmComfyCommon/SwarmMasks.py) gives for <see cref="KnownSegmentRect"/> in a <see cref="Size"/> square with no aspect: the first and last non-empty column and row, moved out by grow and clamped to the image.</summary>
+    public static (int X, int Y, int Width, int Height) KnownSegmentBounds(int grow)
+    {
+        int getval(int first, int length) => Math.Max(0, Math.Min(first - grow, length - 1));
+        int xStart = getval(KnownSegmentRect.X, Size), xEnd = Size - getval(Size - KnownSegmentRect.X - KnownSegmentRect.Width, Size);
+        int yStart = getval(KnownSegmentRect.Y, Size), yEnd = Size - getval(Size - KnownSegmentRect.Y - KnownSegmentRect.Height, Size);
+        return (xStart, yStart, xEnd - xStart, yEnd - yStart);
+    }
+
+    /// <summary>Returns the largest channel difference between two pixels.</summary>
+    public static int PixelError(Rgba32 a, Rgba32 b) => Math.Max(Math.Abs(a.R - b.R), Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
+
+    /// <summary>Swarm's segment crop and paste-back nodes (SwarmMaskThreshold, SwarmMaskBounds, CropMask, ImageScale back to the bounds, ThresholdMask, SwarmImageCompositeMaskedColorCorrecting at the bounds) run on real ComfyUI with a known mask and a synthetic crop:
+    /// the CLIPSeg output is replaced by <see cref="KnownSegmentRect"/> (SwarmLoadImageB64, ImageToMask), the segment's decoded redraw by a solid-color image of another size, and the composite's destination by the init image.
+    /// The oracle is the known rectangle, not a mask the graph wrote: the composite's mask input, saved as a second output, is that rectangle cropped at <see cref="KnownSegmentBounds"/>, the saved segment mask is the rectangle,
+    /// and the final save holds the color exactly inside the rectangle and the init image everywhere else. The trace records that the posted graph is not the generated one.</summary>
     [Test]
     public async Task TestSegmentPasteBackOfASyntheticCrop()
     {
@@ -459,9 +478,28 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(($"{trace["nodes"][decodeId]?["class"]}", $"{trace["nodes"][decodeId]?["stage"]}"), Is.EqualTo(($"{decode["class_type"]}", segmentStage)), $"{decodeId}:{decode["class_type"]} is the segment's decoded redraw, in the image record's node table");
         (string thresholdId, JObject threshold) = WorkflowTraceTests.Source(workflow, composite["inputs"]["mask"]);
         Assert.That($"{threshold["class_type"]}", Is.EqualTo("ThresholdMask"));
+        (string boundsId, JObject bounds) = WorkflowTraceTests.Source(workflow, composite["inputs"]["x"]);
+        Assert.That($"{bounds["class_type"]}", Is.EqualTo("SwarmMaskBounds"), "the paste-back position is the crop bounds");
+        Assert.That((bounds["inputs"]["aspect_x"].Value<int>(), bounds["inputs"]["aspect_y"].Value<int>()), Is.EqualTo((0, 0)), "no target aspect, so the bounds are the mask's own");
+        (int X, int Y, int Width, int Height) expectedBounds = KnownSegmentBounds(bounds["inputs"]["grow"].Value<int>());
+        Assert.That((expectedBounds.X * 2 + expectedBounds.Width != Size, expectedBounds.Width != expectedBounds.Height), Is.EqualTo((true, true)), $"the crop {expectedBounds} is off-centre and not square");
+        string clipSegId = workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "SwarmClipSeg").Name;
+        workflow.Remove(clipSegId);
+        int rewired = 0;
+        foreach (JArray link in workflow.Properties().SelectMany(p => ((JObject)p.Value["inputs"]).Properties()).Select(i => i.Value).OfType<JArray>().Where(l => l.Count == 2 && $"{l[0]}" == clipSegId))
+        {
+            link[0] = "990004";
+            rewired++;
+        }
+        Assert.That(rewired, Is.GreaterThanOrEqualTo(2), "the CLIPSeg mask fed the saved segment mask and the crop chain");
         using SixLabors.ImageSharp.Image<Rgba32> crop = new(37, 53, CropColor);
+        Image knownMask = MakeImage((x, y) => InKnownSegment(x, y) ? new Rgba32(255, 255, 255, 255) : new Rgba32(0, 0, 0, 255));
         workflow["990001"] = new JObject() { ["class_type"] = "SwarmLoadImageB64", ["inputs"] = new JObject() { ["image_base64"] = new Image(crop).AsBase64 } };
         workflow["990002"] = new JObject() { ["class_type"] = "SwarmLoadImageB64", ["inputs"] = new JObject() { ["image_base64"] = InitImage.AsBase64 } };
+        workflow["990003"] = new JObject() { ["class_type"] = "SwarmLoadImageB64", ["inputs"] = new JObject() { ["image_base64"] = knownMask.AsBase64 } };
+        workflow["990004"] = new JObject() { ["class_type"] = "ImageToMask", ["inputs"] = new JObject() { ["image"] = new JArray("990003", 0), ["channel"] = "red" } };
+        workflow["990005"] = new JObject() { ["class_type"] = "MaskToImage", ["inputs"] = new JObject() { ["mask"] = composite["inputs"]["mask"].DeepClone() } };
+        workflow["60002"] = new JObject() { ["class_type"] = "SwarmSaveImageWS", ["inputs"] = new JObject() { ["images"] = new JArray("990005", 0), ["bit_depth"] = "8bit" } };
         scale["inputs"]["image"] = new JArray("990001", 0);
         composite["inputs"]["destination"] = new JArray("990002", 0);
         string posted = workflow.ToString();
@@ -470,45 +508,55 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(errors, Is.Empty, string.Join("\n", errors.Select(e => $"{e["data"]["node_id"]}:{e["data"]["node_type"]}: {e["data"]["exception_type"]}: {e["data"]["exception_message"]}")));
         (HashSet<string> executed, HashSet<string> cached) = NodesRun(job);
         Assert.That(cached, Is.Empty);
-        Assert.That(executed, Is.SupersetOf(new[] { "990001", "990002", scaleId, thresholdId, compositeId, "9" }));
+        Assert.That(executed, Is.SupersetOf(new[] { "990001", "990002", "990003", "990004", "990005", "60002", boundsId, scaleId, thresholdId, compositeId, "9" }));
         Assert.That(trace["workflow"]["posted"]["matches_sent"].Value<bool>(), Is.False, "the trace flags a posted graph that differs from the generated one");
         Assert.That($"{trace["workflow"]["posted"]["sha256"]}", Is.EqualTo(Utilities.HashSHA256(posted.EncodeUTF8())));
         T2IEngine.ImageOutput final = job.Outputs.Single(o => o.IsReal);
         Assert.That(final.BackendInternalHint, Is.EqualTo("9"));
-        T2IEngine.ImageOutput segmentMask = job.Outputs.Single(o => !o.IsReal && int.TryParse(o.BackendInternalHint, out int id) && id >= 50000);
+        T2IEngine.ImageOutput compositeMask = job.Outputs.Single(o => o.BackendInternalHint == "60002");
+        T2IEngine.ImageOutput segmentMask = job.Outputs.Single(o => !o.IsReal && o.BackendInternalHint != "60002" && int.TryParse(o.BackendInternalHint, out int id) && id >= 50000);
         string outDir = TestContext.CurrentContext.WorkDirectory.Replace('\\', '/');
         File.WriteAllBytes($"{outDir}/comfylive-synthetic-final.png", final.File.RawData);
         File.WriteAllBytes($"{outDir}/comfylive-synthetic-segment-mask.png", segmentMask.File.RawData);
+        File.WriteAllBytes($"{outDir}/comfylive-synthetic-composite-mask.png", compositeMask.File.RawData);
         File.WriteAllText($"{outDir}/comfylive-synthetic-workflow.json", posted);
         using SixLabors.ImageSharp.Image<Rgba32> image = SixLabors.ImageSharp.Image.Load<Rgba32>(final.File.RawData);
         using SixLabors.ImageSharp.Image<Rgba32> mask = SixLabors.ImageSharp.Image.Load<Rgba32>(segmentMask.File.RawData);
+        using SixLabors.ImageSharp.Image<Rgba32> cropMask = SixLabors.ImageSharp.Image.Load<Rgba32>(compositeMask.File.RawData);
         Assert.That((image.Width, image.Height, mask.Width, mask.Height), Is.EqualTo((Size, Size, Size, Size)));
-        // SwarmMaskThreshold(0.01, 1) then ThresholdMask(0.001) keep segment mask values above ~0.011; the saved 8-bit mask is ambiguous at 2/255 and 3/255.
-        int pasted = 0, untouched = 0, ambiguous = 0;
+        Assert.That((cropMask.Width, cropMask.Height), Is.EqualTo((expectedBounds.Width, expectedBounds.Height)), "the composite's mask is the crop bounds' size");
         List<string> wrong = [];
+        for (int y = 0; y < expectedBounds.Height; y++)
+        {
+            for (int x = 0; x < expectedBounds.Width; x++)
+            {
+                Rgba32 expected = InKnownSegment(x + expectedBounds.X, y + expectedBounds.Y) ? new Rgba32(255, 255, 255, 255) : new Rgba32(0, 0, 0, 255);
+                if (PixelError(cropMask[x, y], expected) > 0)
+                {
+                    wrong.Add($"composite mask ({x},{y}) {cropMask[x, y]} expected {expected}");
+                }
+            }
+        }
+        int pasted = 0, untouched = 0;
         for (int y = 0; y < Size; y++)
         {
             for (int x = 0; x < Size; x++)
             {
-                byte m = mask[x, y].R;
-                if (m is 2 or 3)
+                bool inside = InKnownSegment(x, y);
+                if (mask[x, y].R != (inside ? 255 : 0))
                 {
-                    ambiguous++;
-                    continue;
+                    wrong.Add($"segment mask ({x},{y}) {mask[x, y]}, {(inside ? "inside" : "outside")} the known mask");
                 }
-                Rgba32 expected = m >= 4 ? CropColor : InitPixel(x, y);
-                Rgba32 actual = image[x, y];
-                if (Math.Max(Math.Abs(actual.R - expected.R), Math.Max(Math.Abs(actual.G - expected.G), Math.Abs(actual.B - expected.B))) > 1)
+                Rgba32 expected = inside ? CropColor : InitPixel(x, y);
+                if (PixelError(image[x, y], expected) > 1)
                 {
-                    wrong.Add($"({x},{y}) {actual} expected {expected}, segment mask {m}");
+                    wrong.Add($"final ({x},{y}) {image[x, y]} expected {expected}");
                 }
-                pasted += m >= 4 ? 1 : 0;
-                untouched += m >= 4 ? 0 : 1;
+                pasted += inside ? 1 : 0;
+                untouched += inside ? 0 : 1;
             }
         }
-        TestContext.Out.WriteLine($"{pasted} pixels under the segment mask, {untouched} outside, {ambiguous} on the 8-bit threshold edge; {wrong.Count} wrong; saved comfylive-synthetic-*.png and the posted workflow to {outDir}");
-        Assert.That(pasted, Is.GreaterThan(1000), "the random CLIPSeg mask covers enough pixels");
-        Assert.That(untouched, Is.GreaterThan(1000), "the random CLIPSeg mask leaves enough pixels");
+        TestContext.Out.WriteLine($"crop bounds {expectedBounds}; {pasted} pixels inside the known mask, {untouched} outside; {wrong.Count} wrong; saved comfylive-synthetic-*.png and the posted workflow to {outDir}");
         Assert.That(wrong, Is.Empty, $"{wrong.Count} pixels wrong, first: {string.Join("; ", wrong.Take(20))}");
     }
 }
