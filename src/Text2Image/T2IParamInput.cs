@@ -182,7 +182,7 @@ public class T2IParamInput
     /// <summary>If true, no parameters are ever "unused". Useful for special meta-handlers, eg Grid Image.</summary>
     public bool NoUnusedParams = false;
 
-    /// <summary>If non-null, called on every parameter read with (param, section ID, value returned, source of the value: "section", "base", or "default").</summary>
+    /// <summary>If non-null, called on every parameter read with (param, section ID, value returned, source of the value: "section", "base", or "default"). <see cref="Clone"/> does not copy it, so a clone never records into another generation's trace.</summary>
     public Action<T2IParamType, int, object, string> ParamReadTracker = null;
 
     /// <summary>Gets the parameter overrides for a given section. Returns the main <see cref="InternalSet"/> if not in a sub-section currently.</summary>
@@ -271,6 +271,7 @@ public class T2IParamInput
     public T2IParamInput Clone()
     {
         T2IParamInput toret = MemberwiseClone() as T2IParamInput;
+        toret.ParamReadTracker = null;
         toret.InternalSet = InternalSet.Clone();
         toret.ExtraMeta = new Dictionary<string, object>(ExtraMeta);
         toret.DynamicLoraIndices = [.. DynamicLoraIndices];
