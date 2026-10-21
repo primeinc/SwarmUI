@@ -547,6 +547,46 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     }
 
     [Test]
+    public static void QwenIndexedVisionSocketsAboveNativeLimitFailBeforeUpload()
+    {
+        // The real SwarmText.py advertises and reads image_1..image_16 only.
+        // A raw Qwen graph with image_17 must not be silently treated as a
+        // non-Qwen workflow or accepted on an older /object_info schema.
+        JObject graph = new()
+        {
+            ["vision"] = Node("SwarmTextEncodeAdvanced")
+        };
+        JObject visionInputs = (JObject)graph["vision"]["inputs"];
+        visionInputs["image_17"] = new JArray("source", 0);
+        JObject backendInfo = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["image_16"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        HashSet<string> available = ["SwarmTextEncodeAdvanced"];
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backendInfo))
+            .Message, Does.Contain("image_17"));
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                graph.ToString(), available, backendInfo))
+            .Message, Does.Contain("image_17"));
+
+        visionInputs.Property("image_17").Remove();
+        visionInputs["image_16"] = new JArray("source", 0);
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backendInfo));
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                graph.ToString(), available, backendInfo));
+    }
+
+    [Test]
     public static void Qwen21TextToImageMustRejectMissing64ChannelLatentNode()
     {
         // Qwen 2.1 plain text-to-image has no InpaintCropImproved node,
