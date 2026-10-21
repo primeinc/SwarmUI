@@ -4,6 +4,7 @@ using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Text2Image;
+using SwarmUI.Utils;
 
 namespace SwarmUITests;
 
