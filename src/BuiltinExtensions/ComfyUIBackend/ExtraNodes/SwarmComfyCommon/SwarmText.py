@@ -438,12 +438,18 @@ def wrap_in_shell(empty_batches, probe_batches, content):
     return [empty[:idx] + content + empty[idx:]]
 
 
-def combine_leaves(clip, leaves, tokenize_fn, per_leaf=False):
+def combine_leaves(clip, leaves, tokenize_fn, per_leaf=False, blank_tokenize_fn=None):
     want_weight = any(leaf.weight != 1.0 for leaf in leaves)
     has_embed = any(leaf.embed is not None for leaf in leaves)
     if not has_embed and not per_leaf:
         return tokenize_fn(join_text(leaves, False)), False
-    empty = tokenize_fn("")
+    # Native Qwen 2.1 replaces truly empty negative text with a space.
+    # A NONEMPTY weighted prompt, however, needs a structural shell with
+    # zero text tokens; inserting its leaves into a synthetic-space shell
+    # would silently append that space to the authored instruction.
+    has_content = any(leaf.embed is not None or bool(leaf.text) for leaf in leaves)
+    empty = (blank_tokenize_fn("") if blank_tokenize_fn is not None and has_content
+             else tokenize_fn(""))
     probe = tokenize_fn("x")
     keys = probe if isinstance(probe, dict) else {None: probe}
     empty_map = empty if isinstance(empty, dict) else {None: empty}
@@ -565,7 +571,12 @@ class SwarmTextEncodeAdvanced:
             all_hooks = base_hooks.clone_and_combine(lora_hooks) if base_hooks is not None else lora_hooks
             clip.patcher.register_all_hook_patches(all_hooks, comfy.hooks.create_target_dict(comfy.hooks.EnumWeightTarget.Clip))
 
-        def tokenize(text: str, include_image_references=True):
+        def tokenize(text: str, include_image_references=True, blank_shell=False):
+            # Use the native empty-negative substitution on real empty prompts,
+            # but not when tokenizing an internal empty structural template.
+            current_kwargs = ({key: val for key, val in tokenize_kwargs.items()
+                               if key != "prevent_empty_text"}
+                              if blank_shell else tokenize_kwargs)
             # Qwen reference latents are attached once to the conditioning.
             # After <break>, do not re-tokenize the same vision images into
             # subsequent text chunks: their image_slots metadata is not
@@ -575,7 +586,7 @@ class SwarmTextEncodeAdvanced:
             if minimax_refs is not None:
                 extra["minimax_ref_items"] = minimax_refs["ref_items"]
             if clip_vision_output is not None:
-                return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra, **tokenize_kwargs)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra, **current_kwargs)
             elif current_images is not None:
                 if append_images:
                     image_prompt = ""
@@ -588,9 +599,9 @@ class SwarmTextEncodeAdvanced:
                         text = image_prompt + text
                     else:
                         text = text + image_prompt
-                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=current_images, **extra, **tokenize_kwargs)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=current_images, **extra, **current_kwargs)
             else:
-                return clip.tokenize(text, **extra, **tokenize_kwargs)
+                return clip.tokenize(text, **extra, **current_kwargs)
 
         use_attn_token_weights = not token_batches_have_weights(clip.tokenize("(x:2)", **tokenize_kwargs))
 
@@ -600,7 +611,10 @@ class SwarmTextEncodeAdvanced:
             per_leaf = True
             tokens, weights_applied = combine_leaves(
                 clip, leaves, lambda text: tokenize(text, include_image_references),
-                per_leaf=per_leaf)
+                per_leaf=per_leaf,
+                blank_tokenize_fn=(
+                    (lambda text: tokenize(text, include_image_references, blank_shell=True))
+                    if qwen21_prevent_empty_text else None))
             if not use_attn_token_weights and not weights_applied and w is not None and w != 1.0:
                 tokens = stamp_token_weight(tokens, w)
                 weights_applied = True
