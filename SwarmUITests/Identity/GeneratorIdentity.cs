@@ -19,7 +19,7 @@ using SwarmUI.Utils;
 namespace SwarmUITests.Identity;
 
 /// <summary>Builds every main model class x option variant with only APIs the upstream commit and the trace branch share, and writes one line per case:
-/// label, sha256 of the generated workflow's text and of the exact text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (only the random SaveImage prefix replaced), sha256 of the image parameter metadata after unused parameters are removed together with the unused-parameter list (swarm_version left out), ExtraMeta keys other than debug_trace, or the error.
+/// label, sha256 of the generated workflow's text and of the exact text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (only the random SaveImage prefix replaced), and, for the input CreateWorkflow sent, sha256 of the image parameter metadata after unused parameters are removed together with the unused-parameter list (swarm_version left out) and its ExtraMeta keys other than debug_trace; or the error.
 /// Fails if any error is not a generator rejection or fewer than 80% of the cases build. IDENTITY_OUT names the output file; IDENTITY_DEBUG=1 turns AddDebugData on. Skipped without IDENTITY_OUT; SwarmUITests/Identity/justfile runs it in this tree and in the upstream tree and compares the dumps.</summary>
 [Category("Identity")]
 public class GeneratorIdentity : SwarmUITest
@@ -121,6 +121,10 @@ public class GeneratorIdentity : SwarmUITest
         {
             Assert.Ignore("Set IDENTITY_OUT, or run 'just run' in SwarmUITests/Identity.");
         }
+        if (WorkflowGenerator.Steps.Count > 0)
+        {
+            Assert.Ignore("Another fixture already registered the generator steps, and registering them again would run each step twice; run 'just run' in SwarmUITests/Identity, which runs this test alone.");
+        }
         Setup();
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = false;
         Program.ServerSettings.AddDebugData = Environment.GetEnvironmentVariable("IDENTITY_DEBUG") == "1";
@@ -221,15 +225,16 @@ public class GeneratorIdentity : SwarmUITest
                 input = cases[i].Make();
                 WorkflowGenerator generator = new() { UserInput = input, Features = [.. features] };
                 JObject workflow = generator.Generate();
-                if (input.ExtraMeta.ContainsKey("debug_trace"))
+                T2IParamInput sendInput = cases[i].Make();
+                string sent = ComfyUIAPIAbstractBackend.CreateWorkflow(sendInput, w => w, null, [.. features]);
+                if (sendInput.ExtraMeta.ContainsKey("debug_trace"))
                 {
                     Interlocked.Increment(ref traced);
                 }
-                JObject metadata = input.GenFullMetadataObject();
+                JObject metadata = sendInput.GenFullMetadataObject();
                 ((JObject)metadata["sui_image_params"]).Remove("swarm_version");
                 string meta = Utilities.HashSHA256($"{metadata["sui_image_params"]}\n{metadata["sui_extra_data"]?["unused_parameters"]}".EncodeUTF8());
-                string extra = input.ExtraMeta.Keys.Where(k => k != "debug_trace").Order().JoinString(",");
-                string sent = ComfyUIAPIAbstractBackend.CreateWorkflow(cases[i].Make(), w => w, null, [.. features]);
+                string extra = sendInput.ExtraMeta.Keys.Where(k => k != "debug_trace").Order().JoinString(",");
                 lines[i] = $"{cases[i].Label}\t{Utilities.HashSHA256(MaskedText(workflow.ToString()).EncodeUTF8())}\t{Utilities.HashSHA256(MaskedText(sent).EncodeUTF8())}\t{meta}\t{extra}";
             }
             catch (Exception ex)

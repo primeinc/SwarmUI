@@ -819,6 +819,13 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
+    /// <summary>Returns the ComfyUI workflow JSON text for an input: its custom or raw workflow with the "${...}" tags filled, or a workflow built by <see cref="WorkflowGenerator"/>.
+    /// With <see cref="Settings.AddDebugData"/> enabled, the input's ExtraMeta gets the <see cref="WorkflowTrace"/> record of how the workflow was built and what is sent.</summary>
+    /// <param name="user_input">The input to generate for.</param>
+    /// <param name="initImageFixer">Applied to the workflow text before it is returned, eg to upload images a backend cannot take inline.</param>
+    /// <param name="ModelFolderFormat">Folder separator format for model names, or null for the system default.</param>
+    /// <param name="features">Backend feature flags for the generator.</param>
+    /// <param name="objectInfo">Optional ComfyUI object_info, used by the trace to check link types and declared inputs.</param>
     public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null, JObject objectInfo = null)
     {
         // note: gently break any standard embed with a space, *require* swarm format embeds, as comfy's raw syntax has unwanted behaviors

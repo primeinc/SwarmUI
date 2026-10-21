@@ -1326,6 +1326,25 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(input.ParamReadTracker, Is.Null);
     }
 
+    /// <summary>A generator run outside <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/>, as the model preload runs it, is untraced even with AddDebugData on.</summary>
+    [Test]
+    public void TestGenerateAloneIsUntraced()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            WorkflowGenerator generator = new() { UserInput = BuildInput(new() { Model = model, Prompt = PromptMarkerBase }), Features = [.. FullFeatures] };
+            generator.Generate();
+            Assert.That((generator.Trace, generator.UserInput.ExtraMeta.ContainsKey(WorkflowTrace.MetadataKey)), Is.EqualTo(((WorkflowTrace)null, false)));
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+        }
+    }
+
     /// <summary>The backend send path records what it sends, and a custom workflow is described without the generator.</summary>
     [Test]
     public void TestCreateWorkflowRecordsSentWorkflow()
