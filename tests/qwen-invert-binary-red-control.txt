@@ -1,0 +1,1 @@
+Negative control against inverted fractional CLIPSeg detection: graph must ThresholdMask(0) before InvertMask, not after. Source d2c541595af7822d722215f894d5c390ea13c403; one test intentionally red.
