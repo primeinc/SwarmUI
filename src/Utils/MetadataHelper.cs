@@ -251,8 +251,8 @@ public static class MetadataHelper
     /// otherwise with a workflow trace record (sui_extra_data.debug_trace) replaced by its notice (<see cref="TraceNotice"/>). Text without a record, or that is not JSON, is returned as it is.</summary>
     public static string FitTextToJpegExif(string metadataText)
     {
-        string key = WorkflowTraceKey;
-        if (metadataText is null || metadataText.Length <= MaxJpegExifChars || !metadataText.Contains($"\"{key}\""))
+        const string key = WorkflowTraceKey, quotedKey = "\"" + WorkflowTraceKey + "\"";
+        if (metadataText is null || metadataText.Length <= MaxJpegExifChars || !metadataText.Contains(quotedKey))
         {
             return metadataText;
         }
