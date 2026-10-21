@@ -21,6 +21,19 @@ class SelectedLora {
 /** Helper class for managing LoRA selections in the UI. */
 class LoraHelper {
 
+    // Prompt focus is transient. Clicking a LoRA confinement dropdown removes
+    // focus from the editor without changing which prompt is being edited.
+    lastConfinementPromptId = 'input_prompt';
+
+    constructor() {
+        document.addEventListener('focusin', event => {
+            const id = event.target?.id;
+            if (id === 'input_prompt' || id === 'alt_prompt_textbox') {
+                this.lastConfinementPromptId = id;
+            }
+        });
+    }
+
     /** List of currently selected LoRAs. */
     selected = [];
 
@@ -67,12 +80,19 @@ class LoraHelper {
             if (!['segment', 'object', 'region', 'extend'].includes(kind)) {
                 continue;
             }
+            const data = tag[0].slice(1, -1).split('//')[0];
+            const detail = data.includes(':') ? data.slice(data.indexOf(':') + 1).split(',')[0].trim() : '';
+            // PromptRegion sends these two region directives into the main
+            // and background prompt text, not into a sampled Part with a
+            // unique section ID. Do not offer an unreal LoRA confinement ID
+            // or shift the IDs of subsequent real segments.
+            if (kind === 'region' && (detail === 'background' || detail === 'end')) {
+                continue;
+            }
             sectionId = Math.max(sectionId, 10) + 1;
             if (kind === 'segment') {
                 segmentIndex++;
             }
-            const data = tag[0].slice(1, -1).split('//')[0];
-            const detail = data.includes(':') ? data.slice(data.indexOf(':') + 1).split(',')[0].trim() : '';
             const title = kind[0].toUpperCase() + kind.slice(1);
             const label = title + (kind === 'segment' ? ` ${segmentIndex}` : '') + (detail ? `: ${detail}` : '');
             if (!options.some(opt => opt.value === String(sectionId))) {
@@ -90,9 +110,15 @@ class LoraHelper {
     getActiveConfinementPrompt() {
         const primary = document.getElementById('input_prompt');
         const alternative = document.getElementById('alt_prompt_textbox');
-        return document.activeElement === alternative && alternative
-            ? alternative.value
-            : (primary?.value ?? alternative?.value ?? '');
+        const currentId = document.activeElement?.id;
+        if (currentId === 'input_prompt' || currentId === 'alt_prompt_textbox') {
+            this.lastConfinementPromptId = currentId;
+        }
+        const lastEdited = this.lastConfinementPromptId === 'alt_prompt_textbox'
+            ? alternative : primary;
+        // The selected editor survives focus moving to the LoRA dropdown.
+        // If that editor no longer exists, fall back to the visible primary.
+        return lastEdited?.value ?? primary?.value ?? alternative?.value ?? '';
     }
 
     populateConfinementSelect(select, confinement, promptText = this.getActiveConfinementPrompt()) {
