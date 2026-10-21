@@ -623,6 +623,39 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     }
 
     [Test]
+    public static void RawMacroDefaultingToQwenMustBePreflightedBeforeImageUpload()
+    {
+        // Previously the unresolved class_type was converted to a sentinel,
+        // leaving no other visible Qwen node. This bypassed pre-upload checks
+        // even though CreateWorkflow resolves the parameter to Qwen.
+        const string raw = """
+            {
+                "source":{"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "edit":{"class_type":"${node_kind:TextEncodeQwenImage21}",
+                        "inputs":{"prompt":"replace subject","negative_prompt":""}}
+            }
+            """;
+        T2IParamInput input = new(null);
+        HashSet<string> onlyOldBackend = ["LoadImage"];
+        SwarmUserErrorException missing = Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                raw, onlyOldBackend, userInput: input));
+        Assert.That(missing.Message, Does.Contain("TextEncodeQwenImage21"));
+        // Static legacy workflow macros must remain supported: the class
+        // resolves to a real non-Qwen node, and no upload is performed here.
+        string ordinary = raw.Replace("TextEncodeQwenImage21", "SaveImage");
+        onlyOldBackend.Add("SaveImage");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                ordinary, onlyOldBackend, userInput: input));
+        // A Qwen-aware backend can accept this same class after resolution.
+        onlyOldBackend.Add("TextEncodeQwenImage21");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                raw, onlyOldBackend, userInput: input));
+    }
+
+    [Test]
     public static void RawQwenPreflightRejectsDynamicClassTypeBeforeUpload()
     {
         const string raw = """
