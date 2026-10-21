@@ -623,6 +623,21 @@ public class T2IPromptHandling
             string matched = MatchPromptLoraName(lora, context.Loras);
             if (matched is null)
             {
+                // An explicit Qwen segment LoRA must not disappear into a
+                // warning. If the parser drops it, the native sampler-chain
+                // verifier sees no selected adapter and can pass a render
+                // where the author's requested segment LoRA was never loaded.
+                bool isQwen21(T2IModel model) => model?.ModelClass?.CompatClass?.ID
+                    == T2IModelClassSorter.CompatQwenImage21.ID;
+                if (context.SectionID >= 10 && context.Input is not null
+                    && (isQwen21(context.Input.Get(T2IParamTypes.Model))
+                        || isQwen21(context.Input.Get(T2IParamTypes.SegmentModel))))
+                {
+                    throw new SwarmUserErrorException(
+                        $"Qwen segment {context.SectionID}: requested LoRA '{lora}' is not installed " +
+                        "or not visible in the selected LoRA model catalog. " +
+                        "Refusing to generate an image without the authored segment LoRA.");
+                }
                 context.TrackWarning($"Lora '{lora}' does not exist and will be ignored (out of {context.Loras.Length} existing loras).");
                 return null;
             }
