@@ -12,22 +12,32 @@ export NODES := replace(justfile_directory() / 'nodes', '\', '/')
 export WORK := replace(env('SWARMUI_COMFY_LIVE_WORK', justfile_directory() / '.work'), '\', '/')
 export COMFY_REPO := env('SWARMUI_COMFY_REPO', 'https://github.com/comfyanonymous/ComfyUI')
 export COMFY_COMMIT := '7ef81780f814dc25b4108163e70b22c011e968be'
+export CLIPSEG_REPO := 'mcmonkey/clipseg-rd64-refined-fp16'
+export CLIPSEG_COMMIT := '5de7a14cdcc31b84fa9ebea216e54fa880322812'
 export PORT := env('SWARMUI_COMFY_LIVE_PORT', '8189')
 export PYTHON := WORK / if os_family() == 'windows' { 'venv/Scripts/python.exe' } else { 'venv/bin/python' }
 
-# Clone the pinned ComfyUI and install CPU torch, ComfyUI's requirements, and the packages ComfyUISelfStartBackend installs (RequiredPythonPackages, RequiredVersionPythonPackages, the opencv pin from its lib fixes).
+# Clone ComfyUI and check out the pinned commit.
 [script]
-setup:
+comfy:
     mkdir -p "$WORK"
     if [ ! -d "$WORK/ComfyUI/.git" ]; then
         git clone --quiet --no-checkout "$COMFY_REPO" "$WORK/ComfyUI"
     fi
     git -C "$WORK/ComfyUI" checkout --quiet --detach "$COMFY_COMMIT"
     git -C "$WORK/ComfyUI" rev-parse HEAD
+
+# Resolve requirements.in and the pinned ComfyUI's requirements.txt into requirements.lock.txt, for Windows x86-64 and Python 3.13 where the live tests run: exact versions with hashes,
+# the PyTorch packages from PyTorch's CPU index and everything else from PyPI (--torch-backend cpu). Versions already in the lock are kept; delete it to resolve from scratch.
+[script]
+lock: comfy
+    uv pip compile requirements.in "$WORK/ComfyUI/requirements.txt" --generate-hashes --no-annotate --python-version 3.13 --python-platform x86_64-pc-windows-msvc --torch-backend cpu --custom-compile-command "just lock" -o requirements.lock.txt
+
+# Create the venv and make it exactly requirements.lock.txt, every file checked against its hash.
+[script]
+setup: comfy
     uv venv --quiet --allow-existing --python 3.13 "$WORK/venv"
-    uv pip install --python "$PYTHON" torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-    uv pip install --python "$PYTHON" -r "$WORK/ComfyUI/requirements.txt"
-    uv pip install --python "$PYTHON" kornia sentencepiece spandrel pydantic pydantic-settings alembic simpleeval blake3 filelock comfy-angle rembg onnxruntime matplotlib "opencv-python-headless==4.11.0.86" imageio-ffmpeg dill omegaconf "diffusers>=0.36.0" "aiohttp>=3.11.8" "yarl>=1.18.0" "av>=18.1.0" "spandrel>=0.4.1" "transformers>=4.57.3" "pyopengl>=3.1.8" "ultralytics==8.3.197"
+    uv pip sync --python "$PYTHON" --require-hashes --torch-backend cpu requirements.lock.txt
 
 # Write the extra_model_paths YAML: the test model folder (with the clipseg folder ComfyUISelfStartBackend forwards), SwarmUI's ExtraNodes and the null-model hook.
 [script]
@@ -50,7 +60,8 @@ paths:
         > "$WORK/extra_model_paths.yaml"
     cat "$WORK/extra_model_paths.yaml"
 
-# Build the CLIPSeg model SwarmClipSeg loads (models/clipseg/clipseg-rd64-refined-fp16-safetensors): transformers' own CLIPSeg at small dimensions with seeded random weights, so masks have a random shape, plus the real tokenizer and preprocessor files from the repo SwarmClipSeg downloads.
+# Build the CLIPSeg model SwarmClipSeg loads (models/clipseg/clipseg-rd64-refined-fp16-safetensors): transformers' own CLIPSeg at small dimensions with seeded random weights, so masks have a random shape,
+# plus the real tokenizer and preprocessor files of the repo SwarmClipSeg downloads, at the pinned commit, each checked against its sha256.
 [script]
 clipseg seed='7': paths
     target="$WORK/models/clipseg/clipseg-rd64-refined-fp16-safetensors"
@@ -66,10 +77,40 @@ clipseg seed='7': paths
         projection_dim=16, reduce_dim=8, extract_layers=[0, 1, 2], decoder_num_attention_heads=1, decoder_intermediate_size=16)
     CLIPSegForImageSegmentation(config).save_pretrained(sys.argv[1], safe_serialization=True)
     EOF
-    for file in merges.txt preprocessor_config.json special_tokens_map.json tokenizer_config.json vocab.json; do
-        curl -sS -f -L -o "$target/$file" "https://huggingface.co/mcmonkey/clipseg-rd64-refined-fp16/resolve/main/$file"
-    done
+    while read -r sha file; do
+        curl -sS -f -L -o "$target/$file" "https://huggingface.co/$CLIPSEG_REPO/resolve/$CLIPSEG_COMMIT/$file"
+        echo "$sha  $target/$file" | sha256sum -c -
+    done <<'EOF'
+    9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a merges.txt
+    4fb09ebcfd7651205ca8299b993c30088e5535ef350a72d46c5c4580eeac0440 preprocessor_config.json
+    c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac special_tokens_map.json
+    4c75d57fd9bd0be8478ad2d6f8b9cebdd4a45338eb108547329c2b6333476ca6 tokenizer_config.json
+    e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349 vocab.json
+    EOF
     ls -la "$target"
+
+# Fetch each header the null-model manifests list from its pinned commit (two HTTP range requests: the 8-byte little-endian length, then the header) and compare it with the committed fixture and the manifest's header_sha256.
+[script]
+headers:
+    "$PYTHON" -I - "$REPO/SwarmUITests/Fixtures/null-models" <<'EOF'
+    import hashlib, json, pathlib, sys, urllib.request
+    def fetch(url, first, last):
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Range": f"bytes={first}-{last}"})) as response:
+            return response.read()
+    failed = 0
+    for manifest_path in sorted(pathlib.Path(sys.argv[1]).glob("*/*manifest.json")):
+        manifest = json.loads(manifest_path.read_text())
+        for file in manifest["files"]:
+            url = f"https://huggingface.co/{manifest['repo']}/resolve/{manifest['revision']}/{file['path']}"
+            length = int.from_bytes(fetch(url, 0, 7), "little")
+            header = fetch(url, 8, 8 + length - 1)
+            fixture = (manifest_path.parent / f"{file['header']}.header.json").read_bytes()
+            fetched, committed = hashlib.sha256(header).hexdigest(), hashlib.sha256(fixture).hexdigest()
+            same = fetched == committed == file["header_sha256"]
+            failed += not same
+            print(f"{'SAME' if same else 'DIFFERENT'} {manifest['repo']}@{manifest['revision']} {file['path']}: fetched {fetched}, fixture {committed}, manifest {file['header_sha256']}")
+    sys.exit(failed)
+    EOF
 
 # Run ComfyUI on CPU in the foreground, with no node cache so every node of every job executes.
 [script]
@@ -77,8 +118,12 @@ start: paths
     cd "$WORK/ComfyUI"
     exec "$PYTHON" main.py --cpu --cache-none --listen 127.0.0.1 --port "$PORT" --disable-auto-launch --extra-model-paths-config "$WORK/extra_model_paths.yaml"
 
-# Run the live tests against the running ComfyUI.
+# Run the live tests against the running ComfyUI, after printing the commit and uncommitted changes under test and the ComfyUI commit and Python packages they run against.
 [script]
 test:
     cd "$REPO"
+    echo "SwarmUI $(git rev-parse HEAD), $(git status --short --untracked-files=no | wc -l) uncommitted tracked files"
+    git status --short --untracked-files=no
+    echo "ComfyUI $(git -C "$WORK/ComfyUI" rev-parse HEAD)"
+    uv pip sync --python "$PYTHON" --require-hashes --torch-backend cpu --check "$REPO/SwarmUITests/ComfyLive/requirements.lock.txt"
     SWARMUI_TEST_COMFY_URL="http://127.0.0.1:$PORT" SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=ComfyLive" --logger "console;verbosity=normal"

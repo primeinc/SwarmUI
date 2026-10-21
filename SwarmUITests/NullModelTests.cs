@@ -49,6 +49,39 @@ public class NullModelTests : SwarmUITest
         return result;
     }
 
+    /// <summary>Every manifest pins its repository to a commit, and every committed header fixture is the header of that commit's file: its bytes hash to the manifest's header_sha256, the hash of the header bytes fetched from the pinned commit
+    /// (SwarmUITests/ComfyLive `just headers` fetches them again and compares). Negative controls: a fixture with one byte changed, and a branch name as revision, are both reported.</summary>
+    [Test]
+    public void TestHeaderFixturesArePinned()
+    {
+        Dictionary<string, JObject> manifests = Manifests(Family);
+        Assert.That(manifests.Keys, Is.EquivalentTo(new[] { "manifest.json", "tiny-random-manifest.json" }));
+        Assert.That(manifests.Values.Sum(m => ((JArray)m["files"]).Count), Is.EqualTo(5), "every committed header fixture is listed");
+        foreach ((string name, JObject manifest) in manifests)
+        {
+            List<string> problems = ManifestProblems(manifest, header => ReadHeaderBytes(Family, header));
+            Assert.That(problems, Is.Empty, $"{name}: {string.Join("\n", problems)}");
+        }
+        JObject manifest21 = manifests["manifest.json"];
+        string changed = $"{manifest21["files"][0]["header"]}";
+        List<string> tampered = ManifestProblems(manifest21, header =>
+        {
+            byte[] bytes = ReadHeaderBytes(Family, header);
+            if (header == changed)
+            {
+                bytes[^1] ^= 1;
+            }
+            return bytes;
+        });
+        Assert.That(tampered, Has.Count.EqualTo(1), "a one-byte change to a fixture is reported");
+        Assert.That(tampered[0], Does.Contain(changed));
+        JObject branch = (JObject)manifest21.DeepClone();
+        branch["revision"] = "main";
+        List<string> branchProblems = ManifestProblems(branch, header => ReadHeaderBytes(Family, header));
+        Assert.That(branchProblems, Has.Count.EqualTo(1), "a branch name as revision is reported");
+        Assert.That(branchProblems[0], Does.Contain("is not a commit"));
+    }
+
     /// <summary>The committed DiT header is the released file's header (its size matches Hugging Face), and the DiT shape rules, at the released dimensions, reproduce every one of its tensor shapes.</summary>
     [Test]
     public void TestQwen21DiTShapeRulesReproduceRealHeader()

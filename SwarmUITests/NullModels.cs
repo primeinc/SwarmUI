@@ -329,4 +329,29 @@ public static class NullModels
         JObject manifest = File.ReadAllText(Path.Combine(FixtureDir(family), $"{manifestName}.json")).ParseToJson();
         return ((JArray)manifest["files"]).Single(f => $"{f["path"]}" == repoPath)["size"].Value<long>();
     }
+
+    /// <summary>Returns a family's manifests (every "*manifest.json" in its fixture folder) by file name.</summary>
+    public static Dictionary<string, JObject> Manifests(string family) => Directory.GetFiles(FixtureDir(family), "*manifest.json").Order().ToDictionary(Path.GetFileName, p => File.ReadAllText(p).ParseToJson());
+
+    /// <summary>Whether a revision names one commit: 40 lowercase hex characters, not a branch or tag that can move.</summary>
+    public static bool IsCommit(string revision) => revision.Length == 40 && revision.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    /// <summary>Returns what is wrong with a manifest: a revision that is not a commit, or a file whose header fixture (read by <paramref name="readHeader"/> from its "header" name) does not hash to its "header_sha256".</summary>
+    public static List<string> ManifestProblems(JObject manifest, Func<string, byte[]> readHeader)
+    {
+        List<string> problems = [];
+        if (!IsCommit($"{manifest["revision"]}"))
+        {
+            problems.Add($"{manifest["repo"]}: revision '{manifest["revision"]}' is not a commit");
+        }
+        foreach (JObject file in ((JArray)manifest["files"]).Cast<JObject>())
+        {
+            string sha = Utilities.HashSHA256(readHeader($"{file["header"]}"));
+            if (sha != $"{file["header_sha256"]}")
+            {
+                problems.Add($"{manifest["repo"]} {file["path"]}: header fixture {file["header"]} hashes to {sha}, the manifest records {file["header_sha256"]}");
+            }
+        }
+        return problems;
+    }
 }

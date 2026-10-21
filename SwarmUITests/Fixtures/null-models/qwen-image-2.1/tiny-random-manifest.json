@@ -1,12 +1,14 @@
 {
   "repo": "optimum-intel-internal-testing/tiny-random-qwen-image-2.1",
-  "revision": "main",
+  "revision": "ad68c53479fa0cf949084b5a70b878b440f89940",
   "fetched": "2026-10-20",
   "files": [
     {
       "path": "transformer/diffusion_pytorch_model.safetensors",
       "size": 189416,
-      "sha256": "8c571d7b4489f1c3f78afc53f50f8f28e248d2ba0e63b29650413795739bf133"
+      "sha256": "8c571d7b4489f1c3f78afc53f50f8f28e248d2ba0e63b29650413795739bf133",
+      "header": "tiny-random-qwen-image-2.1.transformer",
+      "header_sha256": "de60b373e31eeac74fe6b4453819745d6349ef1c018380cb9488091e62d607c7"
     }
   ]
 }
