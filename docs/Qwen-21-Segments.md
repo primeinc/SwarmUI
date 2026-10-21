@@ -133,9 +133,13 @@ Switching modes is explicit.
 
 Comfy-Org's Qwen 2.1 documentation specifies `cfg=1`, `euler`, `simple`
 and 25 steps for the base edit workflow. CFG 5 is explicitly described as
-degrading output badly. Swarm's generic CFG default is 7, so segmented Qwen
-now defaults to **1.0**, independently of generic/SD model defaults.
-Explicit section CFG or Segment CFG overrides remain effective.
+degrading output badly. Swarm's generic CFG default is 7. Ordinary Qwen 2.1 text-to-image
+now defaults to **1.0** at the base sampler when the API has not explicitly
+supplied CFG. On browser model switches the visible automatic CFG value changes
+to **1.0** for Qwen 2.1 and to **7.0** for other families when the prior
+value was automatic; explicitly saved or manually changed CFG is preserved.
+Qwen segmented sampling independently defaults to **1.0**. Explicit global,
+base-section, segment-section, or Segment CFG overrides remain effective.
 The reproduction uses four sampler steps to honor its requested workflow
 and is **not** a blanket recommendation for all subject replacements.
 If the chosen model is a distilled Turbo/Lightning variant, follow that
