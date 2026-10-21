@@ -1,3 +1,4 @@
+using SwarmUI.Core;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
@@ -186,5 +187,38 @@ public class Qwen21EmptyLatentTests : SwarmUITest
             Is.EqualTo(5.0), "Explicit base-only CFG must override the global CFG");
     }
 
+
+    [TestCase(1000, 1024)]
+    [TestCase(1024, 1000)]
+    [TestCase(1025, 1024)]
+    [TestCase(16, 1024)]
+    public void Qwen21CannotSilentlyFloorUnsupportedCanvasToDifferentPixelSize(int width, int height)
+    {
+        T2IModelClass cls = new()
+        {
+            ID = T2IModelClassSorter.CompatQwenImage21.ID,
+            Name = "Qwen Image 2.1",
+            CompatClass = T2IModelClassSorter.CompatQwenImage21,
+            StandardWidth = 1024,
+            StandardHeight = 1024
+        };
+        T2IModel model = new(null, "/models/diffusion_models",
+            "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
+        {
+            ModelClass = cls,
+            StandardWidth = 1024,
+            StandardHeight = 1024
+        };
+        WorkflowGenerator gen = new()
+        {
+            UserInput = new T2IParamInput(null),
+            FinalLoadedModel = model,
+            Workflow = new JObject()
+        };
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            gen.EmptyImage(width, height, 1)).Message,
+            Does.Contain("multiple of 32"),
+            "Qwen 2.1 native empty latent must not truncate API dimensions silently");
+    }
 
 }
