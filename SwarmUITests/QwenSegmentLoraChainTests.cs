@@ -385,6 +385,36 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void ExactLinuxLoRAIdentityDistinguishesExtensionCaseWhenSpecified()
+    {
+        // Linux can host portrait.safetensors and portrait.SAFETENSORS at
+        // the same time. If both filenames carry a suffix, do not strip it
+        // before comparing or an unrelated LoRA can pass the sampler gate.
+        WorkflowGenerator g = Prepare();
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string> {
+            "subjects/portrait.SAFETENSORS"
+        });
+        var inputs = (JObject)g.Workflow["patched"]["inputs"];
+        inputs["lora_name"] = "subjects/portrait.safetensors";
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false)).Message,
+            Does.Contain("NOT on the actual sampler model chain"));
+        inputs["lora_name"] = "subjects/portrait.SAFETENSORS";
+        Assert.DoesNotThrow(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false));
+        g.UserInput.Set(T2IParamTypes.Loras, new List<string> {
+            "subjects/portrait"
+        });
+        inputs["lora_name"] = "subjects/portrait.safetensors";
+        Assert.DoesNotThrow(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false),
+            "The legacy extension-optional input must still resolve.");
+    }
+
+    [Test]
     public static void WhitespaceIsPartOfExactLinuxLoRAPathIdentity()
     {
         // Comfy folder_paths.get_full_path uses os.path.isfile on the
