@@ -110,7 +110,7 @@ public static class NullModels
     /// <summary>Dimensions of a Qwen Image 2.1 DiT, as ComfyUI's comfy/model_detection.py derives them from tensor shapes.</summary>
     /// <param name="Inner">Model width, from img_in.weight shape[0]; heads = Inner / HeadDim.</param>
     /// <param name="HeadDim">Attention head width, from norm_q.weight shape[0]. Fixed at 128 by the rope axes (16, 56, 56) in comfy/ldm/qwen_image21/model.py.</param>
-    /// <param name="Context">Text encoder width, from txt_in.text_norm.weight shape[0]. Must match the Qwen3-VL-8B text encoder (4096).</param>
+    /// <param name="Context">Text encoder width, from txt_in.text_norm.weight shape[0]. Must match the text encoder's hidden size.</param>
     /// <param name="MlpRatio">MLP hidden width over Inner, from img_mlp.gate_up.weight.</param>
     /// <param name="InChannels">Latent channels in, from img_in.weight shape[1].</param>
     /// <param name="OutChannels">Latent channels out, from proj_out.weight shape[0].</param>
@@ -119,8 +119,122 @@ public static class NullModels
         /// <summary>The released model.</summary>
         public static readonly Qwen21Dims Real = new(4096, 128, 4096, 3, 64, 64);
 
-        /// <summary>The smallest model ComfyUI builds and runs: one 128-wide head, real text encoder width, real latent channels.</summary>
-        public static readonly Qwen21Dims Micro = new(128, 128, 4096, 3, 64, 64);
+        /// <summary>The smallest model ComfyUI builds and runs: one 128-wide head, the <see cref="Qwen3VLDims.Null"/> text encoder width, real latent channels.</summary>
+        public static readonly Qwen21Dims Micro = new(128, 128, Qwen3VLDims.Null.Hidden, 3, 64, 64);
+    }
+
+    /// <summary>Dimensions of a Qwen3-VL text encoder: comfy/text_encoders/llama.py Qwen3VL_8BConfig for the language model, comfy/text_encoders/qwen3vl.py QWEN3VL_VISION for the vision tower.</summary>
+    /// <param name="Vocab">Token vocabulary size. The tokenizer emits ids up to the real vocabulary, so it stays real.</param>
+    /// <param name="Hidden">Language model width.</param>
+    /// <param name="Intermediate">MLP width.</param>
+    /// <param name="Heads">Attention heads.</param>
+    /// <param name="KvHeads">Key/value heads.</param>
+    /// <param name="HeadDim">Head width. A class constant (128) in llama.py, not a config field.</param>
+    /// <param name="VisionHidden">Vision tower width. QWEN3VL_VISION_COMMON fixes 16 heads, so it is a multiple of 16.</param>
+    /// <param name="VisionIntermediate">Vision MLP width.</param>
+    public record class Qwen3VLDims(long Vocab, long Hidden, long Intermediate, long Heads, long KvHeads, long HeadDim, long VisionHidden, long VisionIntermediate)
+    {
+        /// <summary>The released Qwen3-VL-8B.</summary>
+        public static readonly Qwen3VLDims Real8B = new(151936, 4096, 12288, 32, 8, 128, 1152, 4304);
+
+        /// <summary>The smallest text encoder that runs: real vocabulary and head width, everything else small.</summary>
+        public static readonly Qwen3VLDims Null = new(151936, 16, 16, 1, 1, 128, 64, 64);
+    }
+
+    /// <summary>Returns the part of a key after "{prefix}{index}.", or null if the key does not start with the prefix.</summary>
+    public static string AfterIndex(string key, string prefix) => key.StartsWith(prefix) ? key[prefix.Length..].After('.') : null;
+
+    /// <summary>Returns true if a key is a quantization side tensor (ComfyUI comfy/ops.py: "comfy_quant" layer config, "weight_scale").</summary>
+    public static bool IsQuantKey(string key) => key.EndsWith(".comfy_quant") || key.EndsWith(".weight_scale");
+
+    /// <summary>Returns the shape of a Qwen3-VL text encoder weight, following the module constructors in ComfyUI comfy/text_encoders/llama.py (Llama2_), qwen3vl.py and qwen35.py (vision tower).</summary>
+    public static long[] Qwen3VLShape(string key, Qwen3VLDims d)
+    {
+        long q = d.Heads * d.HeadDim, kv = d.KvHeads * d.HeadDim, vh = d.VisionHidden, merge = 4 * d.VisionHidden;
+        if (AfterIndex(key, "model.layers.") is string layer)
+        {
+            return layer switch
+            {
+                "input_layernorm.weight" or "post_attention_layernorm.weight" => [d.Hidden],
+                "self_attn.q_proj.weight" => [q, d.Hidden],
+                "self_attn.k_proj.weight" or "self_attn.v_proj.weight" => [kv, d.Hidden],
+                "self_attn.o_proj.weight" => [d.Hidden, q],
+                "self_attn.q_norm.weight" or "self_attn.k_norm.weight" => [d.HeadDim],
+                "mlp.gate_proj.weight" or "mlp.up_proj.weight" => [d.Intermediate, d.Hidden],
+                "mlp.down_proj.weight" => [d.Hidden, d.Intermediate],
+                _ => throw new ArgumentException($"No Qwen3-VL text encoder shape rule for '{key}'")
+            };
+        }
+        if (AfterIndex(key, "model.visual.blocks.") is string block)
+        {
+            return block switch
+            {
+                "norm1.weight" or "norm1.bias" or "norm2.weight" or "norm2.bias" or "attn.proj.bias" or "mlp.linear_fc2.bias" => [vh],
+                "attn.qkv.weight" => [3 * vh, vh],
+                "attn.qkv.bias" => [3 * vh],
+                "attn.proj.weight" => [vh, vh],
+                "mlp.linear_fc1.weight" => [d.VisionIntermediate, vh],
+                "mlp.linear_fc1.bias" => [d.VisionIntermediate],
+                "mlp.linear_fc2.weight" => [vh, d.VisionIntermediate],
+                _ => throw new ArgumentException($"No Qwen3-VL text encoder shape rule for '{key}'")
+            };
+        }
+        string merger = AfterIndex(key, "model.visual.deepstack_merger_list.") ?? (key.StartsWith("model.visual.merger.") ? key["model.visual.merger.".Length..] : null);
+        if (merger is not null)
+        {
+            bool deepstack = key.StartsWith("model.visual.deepstack_merger_list.");
+            return merger switch
+            {
+                "norm.weight" or "norm.bias" => [deepstack ? merge : vh],
+                "linear_fc1.weight" => [merge, merge],
+                "linear_fc1.bias" => [merge],
+                "linear_fc2.weight" => [d.Hidden, merge],
+                "linear_fc2.bias" => [d.Hidden],
+                _ => throw new ArgumentException($"No Qwen3-VL text encoder shape rule for '{key}'")
+            };
+        }
+        return key switch
+        {
+            "model.embed_tokens.weight" or "lm_head.weight" => [d.Vocab, d.Hidden],
+            "model.norm.weight" => [d.Hidden],
+            "model.visual.patch_embed.proj.weight" => [vh, 3, 2, 16, 16],
+            "model.visual.patch_embed.proj.bias" => [vh],
+            "model.visual.pos_embed.weight" => [2304, vh],
+            _ => throw new ArgumentException($"No Qwen3-VL text encoder shape rule for '{key}'")
+        };
+    }
+
+    /// <summary>Writes a zero-weight Qwen3-VL-8B text encoder with every weight key of the released int8 file, unquantized (BF16), at the given dimensions.
+    /// ComfyUI builds this encoder from a fixed config, so it only runs at non-real dimensions with the SwarmUITests/ComfyLive null-model hook.</summary>
+    public static long WriteQwen3VLTextEncoder(string path, Qwen3VLDims d)
+    {
+        JObject header = ReadHeader("qwen-image-2.1", "qwen3vl_8b_int8_convrot");
+        return Write(path, header["__metadata__"] as JObject, [.. Tensors(header).Where(t => !IsQuantKey(t.Key)).Select(t => t with { Dtype = "BF16", Shape = Qwen3VLShape(t.Key, d) })]);
+    }
+
+    /// <summary>Dimensions of a Qwen Image 2.1 VAE, as ComfyUI comfy/sd.py derives them for comfy/ldm/wan/vae2_2.py WanVAE: "dim" from encoder.conv1.weight shape[0], "dec_dim" from decoder.head.0.gamma shape[0].</summary>
+    public record class Qwen21VaeDims(long EncoderDim, long DecoderDim)
+    {
+        /// <summary>The released VAE.</summary>
+        public static readonly Qwen21VaeDims Real = new(96, 144);
+
+        /// <summary>The smallest VAE.</summary>
+        public static readonly Qwen21VaeDims Null = new(4, 4);
+    }
+
+    /// <summary>Returns the shape of a Qwen Image 2.1 VAE weight at the given dimensions. Every channel axis of the encoder is a multiple of "dim" and of the decoder a multiple of "dec_dim" (dim_mult [1, 2, 4, 8, 8], times 2 for time_conv and 3 for to_qkv);
+    /// the other axes are kernel sizes, image channels (4) and latent channels (64, 128 for mean and log-variance), and none of them is a multiple of 96 or 144.</summary>
+    public static long[] Qwen21VaeShape(string key, long[] realShape, Qwen21VaeDims d)
+    {
+        (long unit, long to) = key.StartsWith("encoder.") ? (Qwen21VaeDims.Real.EncoderDim, d.EncoderDim) : key.StartsWith("decoder.") ? (Qwen21VaeDims.Real.DecoderDim, d.DecoderDim) : (1, 1);
+        return [.. realShape.Select(axis => axis % unit == 0 ? axis / unit * to : axis)];
+    }
+
+    /// <summary>Writes a zero-weight Qwen Image 2.1 VAE with every key of the released VAE, at the given dimensions.</summary>
+    public static long WriteQwen21Vae(string path, Qwen21VaeDims d)
+    {
+        JObject header = ReadHeader("qwen-image-2.1", "qwen_image_2.1_vae_bf16");
+        return Write(path, header["__metadata__"] as JObject, [.. Tensors(header).Select(t => t with { Shape = Qwen21VaeShape(t.Key, t.Shape, d) })]);
     }
 
     /// <summary>Returns the shape of a Qwen Image 2.1 DiT weight, following the module constructors in ComfyUI comfy/ldm/qwen_image21/model.py.</summary>
