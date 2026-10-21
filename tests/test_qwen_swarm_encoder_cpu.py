@@ -20,7 +20,8 @@ REQUIRED = (
     "stamp_token_weight", "multiply_cond_by_token_weights",
     "token_weights_from_tokens", "tokenizer_for_key", "flatten_content",
     "pack_batches", "calc_leaf", "wrap_in_shell", "combine_leaves",
-    "uniform_weight", "SwarmTextEncodeAdvanced",
+    "uniform_weight", "is_special_token", "embed_token_items",
+    "SwarmTextEncodeAdvanced",
 )
 
 
@@ -47,7 +48,9 @@ def actual_encoder():
     }
     exec(compile(ast.Module(body=[nodes[name] for name in REQUIRED], type_ignores=[]),
                  str(SOURCE), "exec"), scope)
-    return scope["SwarmTextEncodeAdvanced"]()
+    encoder = scope["SwarmTextEncodeAdvanced"]()
+    encoder._source_cpu_scope = scope
+    return encoder
 
 
 class FakeQwenClip:
@@ -88,6 +91,86 @@ class NativeEmptyTextContractCPU(unittest.TestCase):
         calls = self.run_encoder(False)
         self.assertTrue(calls)
         self.assertFalse(any("prevent_empty_text" in kw for _, kw in calls))
+
+
+class RealWeightedQwenTokenizationCPU(unittest.TestCase):
+    """Probe real Swarm leaf combiner, including chat template and image slots."""
+
+    def test_weighted_prompt_has_exactly_one_chat_template_and_one_image(self):
+        scope = actual_encoder()._source_cpu_scope
+        calls = []
+        image = object()
+
+        class FakeQwenSDTokenizer:
+            start_token = None
+            end_token = None
+            pad_token = -1
+
+            def _try_get_embedding(self, _name):
+                return None, None, None
+
+            def tokenize_with_weights(self, text, disable_weights=False,
+                                      skip_template=False, **kwargs):
+                calls.append((text, skip_template, kwargs))
+                user = [(ord(ch) + 1000, 1.0) for ch in text]
+                if skip_template:
+                    return [user]
+                # Three native chat-turn boundaries and one Qwen image placeholder.
+                shell = [(151644, 1.0), (101, 1.0), (151644, 1.0), (102, 1.0)]
+                vision = [({"type": "image", "data": image}, 1.0)]
+                end = [(151645, 1.0), (151644, 1.0), (103, 1.0)]
+                return [shell + vision + user + end]
+
+        class FakeQwenTokenizer:
+            def __init__(self):
+                self.qwen3vl_8b = FakeQwenSDTokenizer()
+
+        class FakeFullClip:
+            def __init__(self):
+                self.tokenizer = FakeQwenTokenizer()
+
+            def tokenize(self, text, **kwargs):
+                return {
+                    "qwen3vl_8b": self.tokenizer.qwen3vl_8b.tokenize_with_weights(text, **kwargs),
+                    "keep_vision": False,
+                }
+
+        clip = FakeFullClip()
+        ParsedText = scope["ParsedText"]
+        authored = [
+            ParsedText(text="Girl", weight=1.5),
+            ParsedText(text=" and ", weight=1),
+            ParsedText(text="boy", weight=0.5),
+        ]
+        combine = scope["combine_leaves"]
+        tokens, weighted = combine(
+            clip, authored, lambda text: clip.tokenize(text, prevent_empty_text=True),
+            per_leaf=True, qwen21_mode=True,
+            blank_tokenize_fn=lambda text: clip.tokenize(text, prevent_empty_text=False))
+        self.assertTrue(weighted)
+        self.assertFalse(tokens["keep_vision"])
+        batch = tokens["qwen3vl_8b"][0]
+        values = [item[0] for item in batch]
+        self.assertEqual(values.count(151644), 3,
+                         "One native chat template, not a full template for each weighted leaf")
+        self.assertEqual(sum(isinstance(value, dict) for value in values), 1,
+                         "Image reference must occur exactly once")
+        self.assertEqual(
+            "".join(chr(t - 1000) for t in values
+                    if isinstance(t, int) and t >= 1000 and t != 151644
+                    and t != 151645),
+            "Girl and boy",
+            "Neither author text nor a synthetic empty-negative space may be inserted")
+        authored_weights = [w for t, w in batch if isinstance(t, int)
+                            and 1000 <= t < 2000]
+        self.assertIn(1.5, authored_weights)
+        self.assertIn(0.5, authored_weights)
+        self.assertTrue(all(skip for text, skip, kw in calls
+                            if text in ("Girl", " and ", "boy")),
+                        "Fragments must tokenize without duplicating Qwen's template")
+        self.assertTrue(any(text == "" and not kw.get("prevent_empty_text", True)
+                            for text, skip, kw in calls),
+                        "The nonempty prompt's structural shell cannot include the empty-negative space")
 
 
 if __name__ == "__main__":
