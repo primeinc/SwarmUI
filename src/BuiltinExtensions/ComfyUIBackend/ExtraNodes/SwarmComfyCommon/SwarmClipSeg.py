@@ -11,6 +11,24 @@ _CLIPSEG_FILES = (
     "tokenizer_config.json", "vocab.json",
 )
 _CLIPSEG_DOWNLOAD_LOCK = threading.Lock()
+_CLIPSEG_CACHE_LOCK = threading.Lock()
+# One bounded in-process model. A file update changes the signature and
+# replaces the stale detector; local invocations retain their own references.
+_CLIPSEG_MODEL_CACHE = {"signature": None, "loaded": None}
+
+
+def _load_cached_clipseg(path):
+    signature = (os.path.realpath(path), tuple(
+        (filename, os.stat(os.path.join(path, filename)).st_size,
+         os.stat(os.path.join(path, filename)).st_mtime_ns)
+        for filename in _CLIPSEG_FILES))
+    with _CLIPSEG_CACHE_LOCK:
+        if _CLIPSEG_MODEL_CACHE["signature"] != signature:
+            processor = CLIPSegProcessor.from_pretrained(path)
+            model = CLIPSegForImageSegmentation.from_pretrained(path)
+            _CLIPSEG_MODEL_CACHE["loaded"] = (processor, model)
+            _CLIPSEG_MODEL_CACHE["signature"] = signature
+        return _CLIPSEG_MODEL_CACHE["loaded"]
 
 
 def _clipseg_file_valid(path, filename):
@@ -104,8 +122,7 @@ class SwarmClipSeg:
             raise ValueError("SwarmClipSeg expects a nonempty BHWC image batch")
         path = get_path() + "/clipseg-rd64-refined-fp16-safetensors/"
         download_model(path, "https://huggingface.co/mcmonkey/clipseg-rd64-refined-fp16/resolve/main/")
-        processor = CLIPSegProcessor.from_pretrained(path)
-        model = CLIPSegForImageSegmentation.from_pretrained(path)
+        processor, model = _load_cached_clipseg(path)
 
         # The Comfy MASK batch must have the same length and order as IMAGE.
         # The former implementation inspected only images[0] and returned
