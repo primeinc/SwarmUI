@@ -77,6 +77,8 @@ jobs:
           run: python3 -m unittest discover -s tests -p test_qwen_segment_lora_confinement_cpu.py -v
         - name: Verify CLIPSeg cache repairs and interrupted downloads atomically (CPU)
           run: python3 -m unittest discover -s tests -p test_qwen_clipseg_download_cpu.py -v
+        - name: Execute shipped CLIPSeg with two distinct batched images (CPU, no model)
+          run: python3 -m unittest discover -s tests -p test_qwen_clipseg_batch_cpu.py -v
         - name: Run CPU-tensor segment detection guard controls
           run: python3 -m unittest discover -s tests -p test_qwen_segment_mask_guard.py -v
         - name: Test real-tensor replacement without old-subject ghosting
