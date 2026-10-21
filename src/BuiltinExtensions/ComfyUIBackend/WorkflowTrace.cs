@@ -764,19 +764,43 @@ public class WorkflowTrace(WorkflowGenerator gen)
         try
         {
             Checkpoint(InnermostStep);
-            Logs.Debug($"[WorkflowTrace] generation failed, partial trace:\n{Build().ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
+            Logs.Debug($"{LogReference} generation failed, partial trace:\n{Build().ToString(Formatting.Indented)}\n{LogReference} detail:\n{BuildDetail().ToString(Formatting.Indented)}");
         }
         catch (Exception traceEx)
         {
-            Logs.Debug($"[WorkflowTrace] generation failed and the partial trace could not be built: {traceEx.ReadableString()}");
+            Logs.Debug($"{LogReference} generation failed and the partial trace could not be built: {traceEx.ReadableString()}");
         }
     }
 
     /// <summary>The record stored in the image metadata, once finished.</summary>
     public JObject Record;
 
-    /// <summary>Returns how the server debug log labels the trace of an input.</summary>
-    public static string LogReference(T2IParamInput input) => $"[WorkflowTrace] request {input.UserRequestId}";
+    /// <summary>Key on this trace's server log lines, unique per trace; the image record stores it as "log_key".</summary>
+    public readonly string LogKey = NewLogKey();
+
+    /// <summary>Returns a new log key: the first 12 hex digits of a random GUID.</summary>
+    public static string NewLogKey() => Guid.NewGuid().ToString("N")[..12];
+
+    /// <summary>Returns the label server log lines carry for a log key.</summary>
+    public static string LogLabel(string logKey) => string.IsNullOrEmpty(logKey) ? "[WorkflowTrace]" : $"[WorkflowTrace {logKey}]";
+
+    /// <summary>The label this trace's server log lines carry.</summary>
+    public string LogReference => LogLabel(LogKey);
+
+    /// <summary>Returns where a Debug-level log line is kept under the current server log settings (<see cref="Logs.LogWithColor"/>): every one in the in-memory Debug tracker,
+    /// on the console only when the log level is Debug or lower, and in the log file only then and with SaveLogToFile on.</summary>
+    public static string DebugLogRetention()
+    {
+        string memory = $"kept in the server's last {Logs.LogTracker.MaxTracked} Debug messages in memory";
+        if (Logs.MinimumLevel > Logs.LogLevel.Debug)
+        {
+            return $"{memory} only (the server log level is {Logs.MinimumLevel}, so it is not printed or saved)";
+        }
+        return Logs.LogsToSave is null ? $"{memory} and printed to the console, not saved (SaveLogToFile is off)" : $"{memory}, printed to the console and saved to the log file";
+    }
+
+    /// <summary>Returns the "full_trace" text of a record: the label of the log line with the full trace, and where that line is kept.</summary>
+    public static string FullTraceNote(string logKey) => $"server log line '{LogLabel(logKey)}' at Debug level, {DebugLogRetention()}";
 
     /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> for PNG, otherwise the tier of <see cref="RecordTiers"/> that <see cref="ForImageMetadata"/> picks.</summary>
     public void Finish()
@@ -784,10 +808,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Gen.UserInput.ParamReadTracker = null;
         Checkpoint(InnermostStep);
         Summary = Build();
-        string logReference = LogReference(Gen.UserInput);
-        Logs.Debug($"{logReference}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
+        Logs.Debug($"{LogReference} request {Gen.UserInput.UserRequestId}:\n{Summary.ToString(Formatting.Indented)}\n{LogReference} detail:\n{BuildDetail().ToString(Formatting.Indented)}");
         string format = ImageFormatOf(Gen.UserInput);
-        Record = format == "PNG" ? RecordFull(Summary, logReference) : ForImageMetadata(RecordTiers(Summary, logReference), format, OtherMetadataChars(Gen.UserInput));
+        Record = format == "PNG" ? RecordFull(Summary, LogKey) : ForImageMetadata(RecordTiers(Summary, LogKey), format, OtherMetadataChars(Gen.UserInput));
         Gen.UserInput.ExtraMeta[MetadataKey] = Record;
     }
 
@@ -795,10 +818,11 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public void FinishFailed(Exception ex)
     {
         Gen.UserInput.ParamReadTracker = null;
-        Logs.Error($"{LogReference(Gen.UserInput)}: the trace could not be finished; the generation is unaffected: {ex.ReadableString()}");
+        Logs.Error($"{LogReference}: the trace could not be finished; the generation is unaffected: {ex.ReadableString()}");
         Gen.UserInput.ExtraMeta[MetadataKey] = new JObject()
         {
             ["version"] = FormatVersion,
+            ["log_key"] = LogKey,
             ["trace_error"] = $"{ex.GetType().Name}: {ex.Message}"
         };
     }
@@ -821,12 +845,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
 
     /// <summary>Builds the complete image record, which PNG images store and <see cref="RecordTiers"/> starts from: every section of the summary (steps, model loads with their LoRAs and patches, parameter reads, decisions, checks, prompts, media),
     /// with each sampler's input chains given as node IDs into a node table that lists every node of the workflow with its provenance, inputs and output types.</summary>
-    public JObject RecordFull(JObject summary, string logReference)
+    /// <param name="summary">The trace summary (<see cref="Build"/>).</param>
+    /// <param name="logKey">The key of the log line with the full trace (<see cref="LogKey"/>).</param>
+    public JObject RecordFull(JObject summary, string logKey)
     {
         JObject full = new()
         {
             ["version"] = FormatVersion,
-            ["full_trace"] = $"server debug log, '{logReference}'"
+            ["log_key"] = logKey,
+            ["full_trace"] = FullTraceNote(logKey)
         };
         foreach (JProperty property in summary.Properties())
         {
@@ -883,9 +910,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// Tier 1 reduces every node to its class, stage and provenance, and the parameter reads to those made for a section. Tier 2 drops the node table and gives the steps, removals, rewires, edits, cache hits and node reuse as counts.
     /// Tier 3 keeps the workflow identity, the model and the samplers' nodes and calls. Tier 4 keeps the workflow identity and the sampler count, so it fits whenever the rest of the metadata leaves room for a few hundred characters.
     /// Each tier below 0 says what it omitted and where the full trace is in the server log.</summary>
-    public List<JObject> RecordTiers(JObject summary, string logReference)
+    public List<JObject> RecordTiers(JObject summary, string logKey)
     {
-        JObject full = RecordFull(summary, logReference);
+        JObject full = RecordFull(summary, logKey);
         JObject reduced = (JObject)full.DeepClone();
         JObject briefNodes = [];
         foreach (JProperty property in Gen.Workflow.Properties())
@@ -935,6 +962,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         JObject minimal = new()
         {
             ["version"] = FormatVersion,
+            ["log_key"] = logKey,
             ["full_trace"] = full["full_trace"].DeepClone(),
             ["workflow"] = full["workflow"]?.DeepClone(),
             ["model"] = full["model"]?.DeepClone(),
@@ -944,6 +972,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         JObject notice = new()
         {
             ["version"] = FormatVersion,
+            ["log_key"] = logKey,
             ["full_trace"] = full["full_trace"].DeepClone(),
             ["workflow"] = full["workflow"]?.DeepClone(),
             ["samplers"] = brief.Count,
@@ -1063,11 +1092,11 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 }
                 info["posted"] = NotPosted;
             }
-            Logs.Debug($"{LogReference(Gen.UserInput)}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={rewritten}{(rewritten ? $" placeholders_filled=[{filled.JoinString(", ")}]" : "")}");
+            Logs.Debug($"{LogReference}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={rewritten}{(rewritten ? $" placeholders_filled=[{filled.JoinString(", ")}]" : "")}");
         }
         catch (Exception ex)
         {
-            Logs.Error($"{LogReference(Gen.UserInput)}: the sent workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+            Logs.Error($"{LogReference}: the sent workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
         }
     }
 
@@ -1081,6 +1110,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return;
         }
+        string label = LogLabel($"{stored["log_key"]}");
         try
         {
             string sha = HashText(workflow);
@@ -1092,23 +1122,24 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 ["backend"] = backend,
                 ["matches_sent"] = matchesSent
             };
-            Logs.Debug($"{LogReference(input)}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
+            Logs.Debug($"{label}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
         }
         catch (Exception ex)
         {
-            Logs.Error($"{LogReference(input)}: the posted workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+            Logs.Error($"{label}: the posted workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
         }
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it in the input's ExtraMeta, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).
     /// An error is logged and stored as the record, never thrown: the generation is unaffected.</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
+        string logKey = NewLogKey();
         try
         {
             JObject summary = DescribeExternalWorkflow(source, workflow);
-            string logReference = LogReference(input);
-            Logs.Debug($"{logReference} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
+            summary["log_key"] = logKey;
+            Logs.Debug($"{LogLabel(logKey)} request {input.UserRequestId} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
             string format = ImageFormatOf(input);
             if (format == "PNG")
             {
@@ -1117,15 +1148,16 @@ public class WorkflowTrace(WorkflowGenerator gen)
             }
             JObject withoutNodes = (JObject)summary.DeepClone();
             withoutNodes.Remove("nodes");
-            withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the server debug log, '{logReference}'";
+            withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the {FullTraceNote(logKey)}";
             input.ExtraMeta[MetadataKey] = ForImageMetadata([summary, withoutNodes], format, OtherMetadataChars(input));
         }
         catch (Exception ex)
         {
-            Logs.Error($"{LogReference(input)}: the {source} workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+            Logs.Error($"{LogLabel(logKey)}: the {source} workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
             input.ExtraMeta[MetadataKey] = new JObject()
             {
                 ["version"] = FormatVersion,
+                ["log_key"] = logKey,
                 ["trace_error"] = $"{ex.GetType().Name}: {ex.Message}"
             };
         }

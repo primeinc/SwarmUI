@@ -42,12 +42,14 @@ public class T2IMultiStepObjectBuilder
         };
     }
 
-    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity if its backend recorded one, and the result image's size and hash.</summary>
+    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the result image's size and hash.</summary>
     public static void TracePassResult(JObject passTrace, T2IParamInput passInput, MediaFile result)
     {
         passTrace["seed"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Seed.Type.ID) is long seed ? seed : null;
         passTrace["model"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Model.Type.ID) is T2IModel model ? T2IParamTypes.CleanModelName(model.Name) : null;
-        passTrace["workflow"] = (passInput.ExtraMeta.GetValueOrDefault(WorkflowTraceMetadataKey) as JObject)?["workflow"]?.DeepClone();
+        JObject passRecord = passInput.ExtraMeta.GetValueOrDefault(WorkflowTraceMetadataKey) as JObject;
+        passTrace["workflow"] = passRecord?["workflow"]?.DeepClone();
+        passTrace["log_key"] = passRecord?["log_key"]?.DeepClone();
         if (result is ImageFile img)
         {
             try
@@ -95,7 +97,7 @@ public class T2IMultiStepObjectBuilder
             {
                 ["version"] = 1,
                 ["source"] = "multistep-objects",
-                ["note"] = "the base image is generated, then each object's crop is inpainted by its own generation and pasted back by Swarm; each pass's workflow trace is in the server debug log under its sent_sha256",
+                ["note"] = "the base image is generated, then each object's crop is inpainted by its own generation and pasted back by Swarm; each pass's own workflow trace is in the server log under its log_key",
                 ["passes"] = tracePasses
             };
         }

@@ -174,7 +174,7 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: the summary's workflow sha256 is not the hash of the workflow text");
         }
-        List<JObject> tiers = trace.RecordTiers(summary, WorkflowTrace.LogReference(build.Input));
+        List<JObject> tiers = trace.RecordTiers(summary, trace.LogKey);
         if (!JToken.DeepEquals(stored, tiers[0]))
         {
             failures.Add($"{label}: the record stored for a PNG image is not the first record tier");
@@ -1202,8 +1202,8 @@ public class WorkflowTraceTests : SwarmUITest
         Build traced = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>" }, true);
         WorkflowTrace trace = traced.Trace;
         JObject summary = trace.Build();
-        string logReference = WorkflowTrace.LogReference(traced.Input);
-        List<JObject> tiers = trace.RecordTiers(summary, logReference);
+        string logReference = trace.LogReference;
+        List<JObject> tiers = trace.RecordTiers(summary, trace.LogKey);
         Assert.That(tiers, Has.Count.EqualTo(5));
         int samplers = ((JArray)summary["samplers"]).Count;
         string samplerId = $"{((JArray)summary["samplers"])[0]["node"]}".Before(':');
@@ -1211,6 +1211,7 @@ public class WorkflowTraceTests : SwarmUITest
         {
             Assert.That(JToken.DeepEquals(tier["workflow"], summary["workflow"]), Is.True, "every tier keeps the workflow identity");
             Assert.That($"{tier["full_trace"]}", Does.Contain(logReference));
+            Assert.That($"{tier["log_key"]}", Is.EqualTo(trace.LogKey), "every tier keeps the log key");
         }
         foreach (JObject tier in tiers.Take(4))
         {
@@ -1326,6 +1327,42 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(input.ParamReadTracker, Is.Null);
     }
 
+    /// <summary>Each trace logs under its own key, which the image record stores, so one image's log line is found even when the images of a batch share a request ID.
+    /// The record says where that log line is kept under the current server log settings.</summary>
+    [Test]
+    public void TestLogKeyIsUniquePerTraceAndRetentionIsStated()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+        List<WorkflowTrace> traces = [];
+        foreach (T2IParamInput batchImage in new[] { input.Clone(), input.Clone() })
+        {
+            WorkflowGenerator generator = new() { UserInput = batchImage, Features = [.. FullFeatures] };
+            generator.Trace = new(generator);
+            generator.Generate();
+            Assert.That($"{((JObject)batchImage.ExtraMeta[WorkflowTrace.MetadataKey])["log_key"]}", Is.EqualTo(generator.Trace.LogKey));
+            traces.Add(generator.Trace);
+        }
+        Assert.That(traces[0].LogKey, Is.Not.EqualTo(traces[1].LogKey), "two images of one request log under different keys");
+        Logs.LogLevel priorLevel = Logs.MinimumLevel;
+        System.Collections.Concurrent.ConcurrentQueue<string> priorQueue = Logs.LogsToSave;
+        try
+        {
+            Logs.MinimumLevel = Logs.LogLevel.Info;
+            Logs.LogsToSave = null;
+            Assert.That(WorkflowTrace.DebugLogRetention(), Does.Contain("only").And.Contain("Info"));
+            Logs.MinimumLevel = Logs.LogLevel.Debug;
+            Assert.That(WorkflowTrace.DebugLogRetention(), Does.Contain("not saved"));
+            Logs.LogsToSave = new();
+            Assert.That(WorkflowTrace.DebugLogRetention(), Does.EndWith("saved to the log file"));
+        }
+        finally
+        {
+            Logs.MinimumLevel = priorLevel;
+            Logs.LogsToSave = priorQueue;
+        }
+    }
+
     /// <summary>A generator run outside <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/>, as the model preload runs it, is untraced even with AddDebugData on.</summary>
     [Test]
     public void TestGenerateAloneIsUntraced()
@@ -1375,7 +1412,10 @@ public class WorkflowTraceTests : SwarmUITest
             Assert.That(external.ToString(Formatting.None), Does.Not.Contain("zqx"), "custom workflow prompt text is hashed");
             T2IParamInput customInput = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
             WorkflowTrace.RecordExternalWorkflow(customInput, "custom", plain);
-            Assert.That(customInput.ExtraMeta[WorkflowTrace.MetadataKey].ToString(), Is.EqualTo(external.ToString()));
+            JObject stored = (JObject)customInput.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That($"{stored["log_key"]}", Has.Length.EqualTo(12), "the custom workflow record has its own log key");
+            stored.Remove("log_key");
+            Assert.That(stored.ToString(), Is.EqualTo(external.ToString()));
         }
         finally
         {

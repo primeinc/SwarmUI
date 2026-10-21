@@ -183,7 +183,7 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             ["BuildDetail"] = Measure(() => trace.BuildDetail()),
             ["workflow hash"] = Measure(() => WorkflowTrace.HashIndentedJson(last.Workflow)),
             ["log text"] = Measure(() => _ = summary.ToString(Formatting.Indented) + trace.BuildDetail().ToString(Formatting.Indented)),
-            ["RecordTiers"] = Measure(() => trace.RecordTiers(summary, WorkflowTrace.LogReference(input))),
+            ["RecordTiers"] = Measure(() => trace.RecordTiers(summary, trace.LogKey)),
             ["OtherMetadataChars"] = Measure(() => WorkflowTrace.OtherMetadataChars(input)),
             ["Finish"] = Measure(trace.Finish),
             ["Finish, hash cache cleared"] = Measure(() =>
