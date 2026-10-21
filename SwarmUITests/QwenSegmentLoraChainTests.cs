@@ -385,6 +385,34 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void WhitespaceIsPartOfExactLinuxLoRAPathIdentity()
+    {
+        // Comfy folder_paths.get_full_path uses os.path.isfile on the
+        // supplied path without trimming; Linux permits a leading space in
+        // a folder name or a trailing space before .safetensors.
+        WorkflowGenerator g = Prepare();
+        var inputs = (JObject)g.Workflow["patched"]["inputs"];
+        foreach (string differentFile in new[]
+        {
+            " subjects/portrait.safetensors",
+            "subjects/portrait .safetensors"
+        })
+        {
+            inputs["lora_name"] = differentFile;
+            Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+                WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                    g, new JArray("patched", 0), 11, false)).Message,
+                Does.Contain("NOT on the actual sampler model chain"),
+                $"LoRA pathname '{differentFile}' cannot count as the selected file");
+        }
+        inputs["lora_name"] = @"subjects\portrait.safetensors";
+        Assert.DoesNotThrow(() =>
+            WorkflowGeneratorSteps.VerifyQwenSegmentLoraChain(
+                g, new JArray("patched", 0), 11, false),
+            "Only path separator and optional extension normalization is allowed.");
+    }
+
+    [Test]
     public static void BackslashAndForwardSlashRemainEquivalentForSameLoRA()
     {
         WorkflowGenerator g = Prepare();
