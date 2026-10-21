@@ -148,6 +148,12 @@ public class T2IPromptHandling
         static string normalized(string name)
         {
             string path = name.Replace('\\', '/');
+            // Prompt markup may contain doubly escaped Windows separators.
+            // Normalize path separators without changing Linux filename case.
+            while (path.Contains("//", StringComparison.Ordinal))
+            {
+                path = path.Replace("//", "/", StringComparison.Ordinal);
+            }
             const string ext = ".safetensors";
             return path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)
                 ? path[..^ext.Length] : path;
@@ -167,6 +173,10 @@ public class T2IPromptHandling
             throw new SwarmUserErrorException(
                 $"LoRA '{requested}' is ambiguous: multiple installed filenames differ only by case. " +
                 "Specify the exact case-sensitive path shown in the model catalog.");
+        }
+        if (caseConflicts.Length == 1)
+        {
+            return caseConflicts[0];
         }
         return T2IParamTypes.GetBestModelInList(requested, candidates);
     }
