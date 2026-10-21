@@ -34,7 +34,7 @@ class SwarmOffsetEmptyLatentImage:
 
 
 class SwarmEmptyQwenImage21Latent:
-    """Native-format Qwen Image 2.1 latent for unrestricted text-to-image canvas sizes.
+    """Native-format Qwen Image 2.1 latent for 32-pixel-aligned T2I canvases.
 
     ComfyUI TextEncodeQwenImage21 returns 64 channels at a 16x spatial ratio;
     the generic EmptyLatentImage instead produces incompatible 4-channel data.
@@ -53,6 +53,13 @@ class SwarmEmptyQwenImage21Latent:
     DESCRIPTION = "Create a Qwen Image 2.1 empty latent (64 channels at 1/16 image resolution)."
 
     def generate(self, width, height, batch_size=1):
+        # Step=32 on the UI socket does NOT guarantee raw/API clients send
+        # aligned values. Reject, rather than silently floor the output to
+        # 16 * (width//16) and return a different image size.
+        if width < 32 or height < 32 or width % 32 or height % 32:
+            raise ValueError(
+                f"Qwen Image 2.1 width and height must be a multiple of 32; "
+                f"requested {width}x{height}. Refusing latent truncation.")
         latent = torch.zeros(
             [batch_size, 64, height // 16, width // 16],
             device=comfy.model_management.intermediate_device())
