@@ -53,6 +53,9 @@ class HookGroup:
     def get_type(self, kind):
         return [hook for hook in self.hooks if hook.kind == kind]
 
+    def clone(self):
+        return HookGroup(self.hooks)
+
     @staticmethod
     def combine_all_hooks(groups):
         return HookGroup(h for group in groups for h in group.hooks) if groups else None
@@ -64,6 +67,9 @@ class TestWeightHook:
     def __init__(self):
         self.hook_ref = "qwen-model-lora-marker"
         self.received_targets = []
+
+    def clone(self):
+        return self
 
     def add_hook_patches(self, model, options, targets, registered):
         self.received_targets.append(targets)
@@ -144,6 +150,85 @@ class PinnedComfyModelHookTests(unittest.TestCase):
         self.assertNotIn("hooks", metadata)
         self.assertEqual(hook.received_targets, [])
         self.assertEqual(model.hook_patches, {})
+        self.assertNotIn("registered_hooks", options)
+
+    def run_shipped_swarm_encoder_to_real_comfy_model(self, drop_cond_hooks=False):
+        # Unlike the standalone Comfy contract, this exercises the real
+        # shipped SwarmTextEncodeAdvanced implementation and actual Swarm
+        # <lora:...//hook=0> parser before entering pinned Comfy methods.
+        import torch
+        from test_qwen_swarm_encoder_cpu import actual_encoder, FakeQwenClip, SOURCE
+
+        encoder = actual_encoder()
+        scope = encoder._source_cpu_scope
+        scope["comfy"].hooks = NS(
+            HookGroup=HookGroup,
+            create_target_dict=lambda target: {"target": target},
+            EnumWeightTarget=NS(Clip="CLIP", Model="MODEL"),
+        )
+        if drop_cond_hooks:
+            shipped = SOURCE.read_text(encoding="utf-8")
+            target = "            clip.apply_hooks_to_conds = active_hooks\\n"
+            if shipped.count(target) != 1:
+                raise AssertionError("Shipped Swarm encoder hook assignment changed")
+            altered = shipped.replace(target, "            # mutation: remove conditioning hook assignment\\n", 1)
+            klass = next(node for node in ast.parse(altered, filename=str(SOURCE)).body
+                         if isinstance(node, ast.ClassDef)
+                         and node.name == "SwarmTextEncodeAdvanced")
+            exec(compile(ast.Module(body=[klass], type_ignores=[]), str(SOURCE), "exec"), scope)
+            encoder = scope["SwarmTextEncodeAdvanced"]()
+
+        hook = TestWeightHook()
+        add_hooks = self._add_hooks_to_dict
+        class HookAwareClip(FakeQwenClip):
+            def __init__(self):
+                super().__init__()
+                self.clip_registered = []
+                self.patcher = NS(
+                    forced_hooks=None,
+                    register_all_hook_patches=lambda hooks, target:
+                        self.clip_registered.append((hooks, target)),
+                )
+
+            def clone(self, disable_dynamic=False):
+                if not disable_dynamic:
+                    raise AssertionError("Expected native Swarm dynamic hook clone")
+                return self
+
+            def encode_from_tokens_scheduled(self, tokens):
+                metadata = add_hooks(self, {"pooled_output": torch.ones(1, 4)})
+                return [[torch.ones(1, 1, 4), metadata]]
+
+        clip = HookAwareClip()
+        (conds,) = encoder.encode(
+            clip=clip, steps=4,
+            prompt="HannahLynn <lora:Audit/HannahLynn//hook=0>",
+            width=64, height=64, target_width=64, target_height=64,
+            lora_hooks=HookGroup([hook]),
+            qwen21_prevent_empty_text=True,
+        )
+        metadata = conds[0][1]
+        model, options = FakeModel(), {"transformer_options": {}}
+        self._prepare_model_patcher(model, {"positive": [metadata]}, options)
+        return hook, clip, metadata, model, options
+
+    def test_actual_swarm_qwen_tag_hooks_reach_real_comfy_sampler_model(self):
+        hook, clip, metadata, model, options = self.run_shipped_swarm_encoder_to_real_comfy_model()
+        self.assertTrue(clip.clip_registered, "Dynamic LoRA must register on CLIP before encoding")
+        self.assertIs(metadata["hooks"].hooks[0], hook,
+                      "Actual SwarmText conditioning must carry its tagged LoRA hook")
+        self.assertEqual(hook.received_targets, [{"target": "MODEL"}])
+        self.assertEqual(model.hook_patches,
+                         {"qwen-model-lora-marker": {"sample_weight": [0.5]}})
+        self.assertIn("registered_hooks", options)
+
+    def test_mutating_real_swarm_qwen_hook_forwarding_breaks_model_patches(self):
+        hook, clip, metadata, model, options = (
+            self.run_shipped_swarm_encoder_to_real_comfy_model(drop_cond_hooks=True))
+        self.assertNotIn("hooks", metadata,
+                         "Without actual clip-to-condition forwarding, the model must not see the LoRA")
+        self.assertFalse(model.hook_patches)
+        self.assertFalse(hook.received_targets)
         self.assertNotIn("registered_hooks", options)
 
 
