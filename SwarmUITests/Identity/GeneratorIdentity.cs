@@ -19,8 +19,8 @@ using SwarmUI.Utils;
 namespace SwarmUITests.Identity;
 
 /// <summary>Builds every main model class x option variant with only APIs the upstream commit and the trace branch share, and writes one line per case:
-/// label, sha256 of the generated workflow text and of the text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (random SaveImage prefix masked), sha256 of the parameter metadata, ExtraMeta keys other than debug_trace, or the error.
-/// IDENTITY_OUT names the output file; IDENTITY_DEBUG=1 turns AddDebugData on. Skipped without IDENTITY_OUT; SwarmUITests/Identity/justfile runs it in this tree and in the upstream tree and compares the dumps.</summary>
+/// label, sha256 of the generated workflow's text and of the exact text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (only the random SaveImage prefix replaced), sha256 of the image parameter metadata after unused parameters are removed together with the unused-parameter list (swarm_version left out), ExtraMeta keys other than debug_trace, or the error.
+/// Fails if any error is not a generator rejection or fewer than 80% of the cases build. IDENTITY_OUT names the output file; IDENTITY_DEBUG=1 turns AddDebugData on. Skipped without IDENTITY_OUT; SwarmUITests/Identity/justfile runs it in this tree and in the upstream tree and compares the dumps.</summary>
 [Category("Identity")]
 public class GeneratorIdentity : SwarmUITest
 {
@@ -99,18 +99,17 @@ public class GeneratorIdentity : SwarmUITest
         }
     }
 
-    /// <summary>Returns a workflow's indented text with the random SaveImage filename prefix replaced by a fixed one.</summary>
-    public static string Masked(JObject workflow)
+    /// <summary>Returns workflow JSON text with each random SaveImage filename prefix (read from the parsed workflow) replaced by a fixed one, every other byte as it was.</summary>
+    public static string MaskedText(string text)
     {
-        JObject copy = (JObject)workflow.DeepClone();
-        foreach (JProperty property in copy.Properties())
+        foreach (JProperty property in JObject.Parse(text).Properties())
         {
-            if (property.Value["inputs"] is JObject inputs && inputs["filename_prefix"] is JValue prefix && $"{prefix}".StartsWith("SwarmUI_"))
+            if (property.Value["inputs"]?["filename_prefix"] is JValue prefix && $"{prefix}".StartsWith("SwarmUI_"))
             {
-                inputs["filename_prefix"] = "SwarmUI_(random)_";
+                text = text.Replace($"\"{prefix}\"", "\"SwarmUI_(random)_\"");
             }
         }
-        return copy.ToString();
+        return text;
     }
 
     /// <summary>Writes the identity dump to IDENTITY_OUT.</summary>
@@ -212,6 +211,7 @@ public class GeneratorIdentity : SwarmUITest
             }
         }
         string[] lines = new string[cases.Count];
+        List<string> crashes = [];
         int traced = 0;
         Parallel.For(0, cases.Count, i =>
         {
@@ -225,18 +225,29 @@ public class GeneratorIdentity : SwarmUITest
                 {
                     Interlocked.Increment(ref traced);
                 }
-                string meta = Utilities.HashSHA256(input.GenParameterMetadata().ToString().EncodeUTF8());
+                JObject metadata = input.GenFullMetadataObject();
+                ((JObject)metadata["sui_image_params"]).Remove("swarm_version");
+                string meta = Utilities.HashSHA256($"{metadata["sui_image_params"]}\n{metadata["sui_extra_data"]?["unused_parameters"]}".EncodeUTF8());
                 string extra = input.ExtraMeta.Keys.Where(k => k != "debug_trace").Order().JoinString(",");
                 string sent = ComfyUIAPIAbstractBackend.CreateWorkflow(cases[i].Make(), w => w, null, [.. features]);
-                lines[i] = $"{cases[i].Label}\t{Utilities.HashSHA256(Masked(workflow).EncodeUTF8())}\t{Utilities.HashSHA256(Masked(JObject.Parse(sent)).EncodeUTF8())}\t{meta}\t{extra}";
+                lines[i] = $"{cases[i].Label}\t{Utilities.HashSHA256(MaskedText(workflow.ToString()).EncodeUTF8())}\t{Utilities.HashSHA256(MaskedText(sent).EncodeUTF8())}\t{meta}\t{extra}";
             }
             catch (Exception ex)
             {
                 lines[i] = $"{cases[i].Label}\tERROR {ex.GetType().Name}: {ex.Message.Replace('\n', ' ')}";
+                if (ex is not SwarmReadableErrorException)
+                {
+                    lock (crashes)
+                    {
+                        crashes.Add($"{cases[i].Label}: {ex}");
+                    }
+                }
             }
         });
         File.WriteAllLines(outPath, lines);
         List<string[]> built = [.. lines.Where(l => !l.Contains("\tERROR ")).Select(l => l.Split('\t'))];
         TestContext.Out.WriteLine($"IDENTITY {cases.Count} cases, {cases.Count - built.Count} errors, debug={Program.ServerSettings.AddDebugData}, {traced} builds carry debug_trace, {built.Select(l => l[1]).Distinct().Count()} distinct workflow hashes, {built.Select(l => l[2]).Distinct().Count()} distinct sent hashes, {built.Select(l => l[3]).Distinct().Count()} distinct metadata hashes, written to {outPath}");
+        Assert.That(crashes, Is.Empty, $"every error is a generator rejection (SwarmReadableErrorException); first: {crashes.FirstOrDefault()}");
+        Assert.That(built.Count, Is.GreaterThanOrEqualTo(cases.Count * 8 / 10), "at least 80% of the cases build, so identical dumps compare real workflows");
     }
 }
