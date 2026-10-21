@@ -33,7 +33,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public static int MaxChainNodes = 48;
 
     /// <summary>Most characters of image metadata text (parameters, extra data and the trace record together, as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for formats that keep metadata in EXIF (every format but PNG).
-    /// EXIF metadata is a UTF-16 UserComment, two bytes per character, that has to fit one 64 KiB JPEG APP1 segment; the margin covers fields Swarm adds when it saves the image.</summary>
+    /// EXIF metadata is a UTF-16 UserComment, two bytes per character; within this limit it fits one 64 KiB JPEG APP1 segment (ImageSharp splits a larger profile across several, which most readers do not join), and the margin covers fields Swarm adds when it saves the image.</summary>
     public static int MaxExifMetadataChars = 30_000;
 
     /// <summary>The generator being traced.</summary>
@@ -778,7 +778,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Returns how the server debug log labels the trace of an input.</summary>
     public static string LogReference(T2IParamInput input) => $"[WorkflowTrace] request {input.UserRequestId}";
 
-    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record (<see cref="RecordTiers"/>, chosen by <see cref="ForImageMetadata"/>) in the input's ExtraMeta.</summary>
+    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> for PNG, otherwise the tier of <see cref="RecordTiers"/> that <see cref="ForImageMetadata"/> picks.</summary>
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
@@ -786,7 +786,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Summary = Build();
         string logReference = LogReference(Gen.UserInput);
         Logs.Debug($"{logReference}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
-        Record = ForImageMetadata(RecordTiers(Summary, logReference), ImageFormatOf(Gen.UserInput), OtherMetadataChars(Gen.UserInput));
+        string format = ImageFormatOf(Gen.UserInput);
+        Record = format == "PNG" ? RecordFull(Summary, logReference) : ForImageMetadata(RecordTiers(Summary, logReference), format, OtherMetadataChars(Gen.UserInput));
         Gen.UserInput.ExtraMeta[MetadataKey] = Record;
     }
 
@@ -815,53 +816,35 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return T2IParamInput.MetadataToString(metadata).Length;
     }
 
-    /// <summary>Keys of the full summary copied as they are into the image record.</summary>
-    public static readonly string[] RecordKeys = ["error", "events", "model_loads", "loras", "segments", "removed", "rewires", "edits", "untracked_nodes", "dangling_links", "type_errors", "undeclared_inputs", "classes_missing_from_object_info", "prompts", "media"];
-
     /// <summary>Returns the node ID a description line or output path entry starts with ("id:Class..."), or null for a truncation marker.</summary>
     public static string LineNodeId(string line) => line is null || line.StartsWith("...") || !line.Contains(':') ? null : line.Before(':');
 
-    /// <summary>Builds the image record from the full summary, most complete first; <see cref="ForImageMetadata"/> keeps the first that fits the format. Every tier keeps the workflow identity (sent and posted hashes), the model loads and LoRAs, and every sampler with its call arguments and the node IDs of its input chains and output paths.
-    /// Tier 1 adds each of those nodes with its provenance, inputs and output types, the segments with their crops, graph decisions made outside CreateNode, failed checks, prompt and media placeholders, and section parameter reads.
-    /// Tier 2 reduces the nodes to class, stage and provenance. Tier 3 drops the node table and keeps decision counts. Tier 4 keeps only the samplers' nodes and calls. The full summary is in the server log under the log reference.</summary>
-    public List<JObject> RecordTiers(JObject summary, string logReference)
+    /// <summary>Builds the complete image record, which PNG images store and <see cref="RecordTiers"/> starts from: every section of the summary (steps, model loads with their LoRAs and patches, parameter reads, decisions, checks, prompts, media),
+    /// with each sampler's input chains given as node IDs into a node table that lists every node of the workflow with its provenance, inputs and output types.</summary>
+    public JObject RecordFull(JObject summary, string logReference)
     {
         JObject full = new()
         {
             ["version"] = FormatVersion,
-            ["full_trace"] = $"server debug log, '{logReference}'",
-            ["workflow"] = summary["workflow"]?.DeepClone(),
-            ["model"] = summary["model"]?.DeepClone()
+            ["full_trace"] = $"server debug log, '{logReference}'"
         };
-        foreach (string key in RecordKeys)
+        foreach (JProperty property in summary.Properties())
         {
-            if (summary[key] is JToken value)
+            if (property.Name is not ("version" or "samplers" or "nodes"))
             {
-                full[key] = value.DeepClone();
-            }
-        }
-        List<string> referenced = [];
-        void reference(string id)
-        {
-            if (id is not null && !referenced.Contains(id))
-            {
-                referenced.Add(id);
+                full[property.Name] = property.Value.DeepClone();
             }
         }
         JArray samplers = [];
-        JArray brief = [];
         foreach (JObject sampler in (summary["samplers"] as JArray ?? []).OfType<JObject>())
         {
             string node = $"{sampler["node"]}";
             string samplerId = LineNodeId(node);
-            reference(samplerId);
             string classType = samplerId is not null && Gen.Workflow[samplerId] is JObject samplerNode ? $"{samplerNode["class_type"]}" : null;
             JObject entry = new() { ["node"] = classType is null ? node : $"{samplerId}:{classType}" };
-            JObject briefEntry = new() { ["node"] = entry["node"].DeepClone() };
             if (sampler["call"] is JToken call)
             {
                 entry["call"] = call.DeepClone();
-                briefEntry["call"] = call.DeepClone();
             }
             if (sampler["inputs"] is JObject inputs)
             {
@@ -871,45 +854,51 @@ public class WorkflowTrace(WorkflowGenerator gen)
                     JArray chain = [];
                     foreach (JToken line in input.Value as JArray ?? [])
                     {
-                        string id = LineNodeId($"{line}");
-                        reference(id);
-                        chain.Add(id ?? $"{line}");
+                        chain.Add(LineNodeId($"{line}") ?? $"{line}");
                     }
                     ids[input.Name] = chain;
                 }
                 entry["inputs"] = ids;
             }
-            if (sampler["to_outputs"] is JArray paths)
+            if (sampler["to_outputs"] is JToken outputs)
             {
-                foreach (JToken path in paths)
-                {
-                    foreach (string step in $"{path}".Split(" > "))
-                    {
-                        reference(LineNodeId(step));
-                    }
-                }
-                entry["to_outputs"] = paths.DeepClone();
-            }
-            else if (sampler["to_outputs"] is JToken none)
-            {
-                entry["to_outputs"] = none.DeepClone();
+                entry["to_outputs"] = outputs.DeepClone();
             }
             samplers.Add(entry);
-            brief.Add(briefEntry);
         }
         full["samplers"] = samplers;
-        JObject nodes = [], briefNodes = [];
-        foreach (string id in referenced)
+        JObject nodes = [];
+        foreach (JProperty property in Gen.Workflow.Properties())
         {
-            if (Gen.Workflow[id] is not JObject node)
+            if (property.Value is JObject node)
+            {
+                nodes[property.Name] = NodeLines.GetValueOrDefault(property.Name) ?? DescribeNode(property.Name, node, null);
+            }
+        }
+        full["nodes"] = nodes;
+        return full;
+    }
+
+    /// <summary>Builds the image record tiers, most complete first; <see cref="ForImageMetadata"/> keeps the first that fits the format. Tier 0 is <see cref="RecordFull"/>.
+    /// Tier 1 reduces every node to its class, stage and provenance, and the parameter reads to those made for a section. Tier 2 drops the node table and gives the steps, removals, rewires, edits, cache hits and node reuse as counts.
+    /// Tier 3 keeps the workflow identity, the model and the samplers' nodes and calls. Tier 4 keeps the workflow identity and the sampler count, so it fits whenever the rest of the metadata leaves room for a few hundred characters.
+    /// Each tier below 0 says what it omitted and where the full trace is in the server log.</summary>
+    public List<JObject> RecordTiers(JObject summary, string logReference)
+    {
+        JObject full = RecordFull(summary, logReference);
+        JObject reduced = (JObject)full.DeepClone();
+        JObject briefNodes = [];
+        foreach (JProperty property in Gen.Workflow.Properties())
+        {
+            if (property.Value is not JObject node)
             {
                 continue;
             }
-            nodes[id] = NodeLines.GetValueOrDefault(id) ?? DescribeNode(id, node, null);
-            NodeRecord record = Nodes.GetValueOrDefault(id);
-            briefNodes[id] = record is null ? $"{id}:{node["class_type"]} <untracked>" : $"{id}:{node["class_type"]}@{record.Stage} <{Provenance(record)}>";
+            NodeRecord record = Nodes.GetValueOrDefault(property.Name);
+            briefNodes[property.Name] = record is null ? $"{property.Name}:{node["class_type"]} <untracked>" : $"{property.Name}:{node["class_type"]}@{record.Stage} <{Provenance(record)}>";
         }
-        full["nodes"] = nodes;
+        reduced["nodes"] = briefNodes;
+        reduced.Remove("params_read");
         JObject sectionReads = [];
         foreach (JProperty read in (summary["params_read"] as JObject ?? []).Properties().Where(p => p.Name.Contains('@')))
         {
@@ -917,15 +906,13 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (sectionReads.Count > 0)
         {
-            full["params_read_by_section"] = sectionReads;
+            reduced["params_read_by_section"] = sectionReads;
         }
-        JObject reduced = (JObject)full.DeepClone();
-        reduced["nodes"] = briefNodes;
-        reduced["omitted"] = $"node inputs and output types, to fit the image metadata; the full trace is in the {full["full_trace"]}";
+        reduced["omitted"] = $"node inputs and output types, and parameter reads outside sections, to fit the image metadata; the full trace is in the {full["full_trace"]}";
         JObject counted = (JObject)reduced.DeepClone();
         counted.Remove("nodes");
         JObject counts = [];
-        foreach (string key in new[] { "removed", "rewires", "edits" })
+        foreach (string key in new[] { "steps", "removed", "rewires", "edits", "cache_hits", "node_reuse" })
         {
             if (counted[key] is JArray list)
             {
@@ -934,7 +921,17 @@ public class WorkflowTrace(WorkflowGenerator gen)
             }
         }
         counted["decision_counts"] = counts;
-        counted["omitted"] = $"the node table and the lists of removals, rewires and edits, to fit the image metadata; the full trace is in the {full["full_trace"]}";
+        counted["omitted"] = $"the node table, parameter reads outside sections, and the lists of steps, removals, rewires, edits, cache hits and node reuse, to fit the image metadata; the full trace is in the {full["full_trace"]}";
+        JArray brief = [];
+        foreach (JObject sampler in ((JArray)full["samplers"]).OfType<JObject>())
+        {
+            JObject entry = new() { ["node"] = sampler["node"].DeepClone() };
+            if (sampler["call"] is JToken call)
+            {
+                entry["call"] = call.DeepClone();
+            }
+            brief.Add(entry);
+        }
         JObject minimal = new()
         {
             ["version"] = FormatVersion,
@@ -944,7 +941,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["samplers"] = brief,
             ["omitted"] = $"everything but the samplers' nodes and calls, to fit the image metadata; the full trace is in the {full["full_trace"]}"
         };
-        return [full, reduced, counted, minimal];
+        JObject notice = new()
+        {
+            ["version"] = FormatVersion,
+            ["full_trace"] = full["full_trace"].DeepClone(),
+            ["workflow"] = full["workflow"]?.DeepClone(),
+            ["samplers"] = brief.Count,
+            ["omitted"] = $"the whole trace, to fit the image metadata; the full trace is in the {full["full_trace"]}"
+        };
+        return [full, reduced, counted, minimal, notice];
     }
 
     /// <summary>Node description lines of the last <see cref="Build"/>, by node ID.</summary>
@@ -1031,34 +1036,42 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return result;
     }
 
-    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record: its hash and length, whether anything rewrote the generator's text, and which "${...}" placeholders the rewrite filled (such as uploaded image names).</summary>
+    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record: its hash and length, whether anything rewrote the generator's text, and which "${...}" placeholders the rewrite filled (such as uploaded image names).
+    /// An error is logged, never thrown: the send is unaffected.</summary>
     /// <param name="workflow">The final workflow JSON text.</param>
     /// <param name="generated">The workflow text the generator returned.</param>
     public void RecordSent(string workflow, string generated)
     {
-        string sha = HashText(workflow);
-        List<JObject> records = WorkflowRecords(Gen.UserInput, Summary);
-        if (records.Count == 0)
+        try
         {
-            return;
-        }
-        bool rewritten = workflow != generated;
-        List<string> filled = rewritten ? [.. Placeholders(generated).Except(Placeholders(workflow))] : [];
-        foreach (JObject info in records)
-        {
-            info["sent_sha256"] = sha;
-            info["sent_length"] = workflow.Length;
-            info["rewritten_after_generate"] = rewritten;
-            if (rewritten)
+            string sha = HashText(workflow);
+            List<JObject> records = WorkflowRecords(Gen.UserInput, Summary);
+            if (records.Count == 0)
             {
-                info["placeholders_filled"] = new JArray(filled.Select(p => (JToken)p));
+                return;
             }
-            info["posted"] = NotPosted;
+            bool rewritten = workflow != generated;
+            List<string> filled = rewritten ? [.. Placeholders(generated).Except(Placeholders(workflow))] : [];
+            foreach (JObject info in records)
+            {
+                info["sent_sha256"] = sha;
+                info["sent_length"] = workflow.Length;
+                info["rewritten_after_generate"] = rewritten;
+                if (rewritten)
+                {
+                    info["placeholders_filled"] = new JArray(filled.Select(p => (JToken)p));
+                }
+                info["posted"] = NotPosted;
+            }
+            Logs.Debug($"{LogReference(Gen.UserInput)}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={rewritten}{(rewritten ? $" placeholders_filled=[{filled.JoinString(", ")}]" : "")}");
         }
-        Logs.Debug($"{LogReference(Gen.UserInput)}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={rewritten}{(rewritten ? $" placeholders_filled=[{filled.JoinString(", ")}]" : "")}");
+        catch (Exception ex)
+        {
+            Logs.Error($"{LogReference(Gen.UserInput)}: the sent workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+        }
     }
 
-    /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record. Does nothing for an input without one.</summary>
+    /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record. Does nothing for an input without one. An error is logged, never thrown: the post is unaffected.</summary>
     /// <param name="input">The input being generated.</param>
     /// <param name="workflow">The workflow JSON text posted as the "prompt".</param>
     /// <param name="backend">Name of the posting backend type.</param>
@@ -1068,28 +1081,54 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return;
         }
-        string sha = HashText(workflow);
-        bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
-        info["posted"] = new JObject()
+        try
         {
-            ["sha256"] = sha,
-            ["length"] = workflow.Length,
-            ["backend"] = backend,
-            ["matches_sent"] = matchesSent
-        };
-        Logs.Debug($"[WorkflowTrace] request {input.UserRequestId}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
+            string sha = HashText(workflow);
+            bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
+            info["posted"] = new JObject()
+            {
+                ["sha256"] = sha,
+                ["length"] = workflow.Length,
+                ["backend"] = backend,
+                ["matches_sent"] = matchesSent
+            };
+            Logs.Debug($"{LogReference(input)}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"{LogReference(input)}: the posted workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+        }
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it in the input's ExtraMeta, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).</summary>
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it in the input's ExtraMeta, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).
+    /// An error is logged and stored as the record, never thrown: the generation is unaffected.</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
-        JObject summary = DescribeExternalWorkflow(source, workflow);
-        string logReference = LogReference(input);
-        Logs.Debug($"{logReference} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
-        JObject withoutNodes = (JObject)summary.DeepClone();
-        withoutNodes.Remove("nodes");
-        withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the server debug log, '{logReference}'";
-        input.ExtraMeta[MetadataKey] = ForImageMetadata([summary, withoutNodes], ImageFormatOf(input), OtherMetadataChars(input));
+        try
+        {
+            JObject summary = DescribeExternalWorkflow(source, workflow);
+            string logReference = LogReference(input);
+            Logs.Debug($"{logReference} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
+            string format = ImageFormatOf(input);
+            if (format == "PNG")
+            {
+                input.ExtraMeta[MetadataKey] = summary;
+                return;
+            }
+            JObject withoutNodes = (JObject)summary.DeepClone();
+            withoutNodes.Remove("nodes");
+            withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the server debug log, '{logReference}'";
+            input.ExtraMeta[MetadataKey] = ForImageMetadata([summary, withoutNodes], format, OtherMetadataChars(input));
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"{LogReference(input)}: the {source} workflow could not be recorded; the generation is unaffected: {ex.ReadableString()}");
+            input.ExtraMeta[MetadataKey] = new JObject()
+            {
+                ["version"] = FormatVersion,
+                ["trace_error"] = $"{ex.GetType().Name}: {ex.Message}"
+            };
+        }
     }
 
     /// <summary>Builds a trace summary for a workflow that did not come from the generator (custom or raw workflows).</summary>
@@ -1279,7 +1318,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return value is JArray arr && arr.Count == 2 && arr[0].Type == JTokenType.String && arr[1].Type == JTokenType.Integer;
     }
 
-    /// <summary>Formats a string node input with placeholders for prompts, media, and long text.</summary>
+    /// <summary>Formats a string node input with placeholders for prompts, media, and long text. Prompt text that is part of a registered prompt, rather than all of one, is labeled "~part" with the labels of the shortest registered prompt that contains it.</summary>
     public string FormatString(string nodeId, string key, string value)
     {
         if (key.EndsWith("_base64"))
@@ -1300,12 +1339,27 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (PromptInputNames.Contains(key))
         {
+            string container = null;
+            List<string> containerLabels = [];
             foreach ((string text, List<string> textLabels) in PromptLabels)
             {
-                if (value.Length > 0 && text.Contains(value))
+                if (value.Length == 0 || !text.Contains(value))
                 {
-                    return $"{textLabels.Select(l => $"@{l}").JoinString("=")}~part#{Sha8(value)}";
+                    continue;
                 }
+                if (container is null || text.Length < container.Length)
+                {
+                    container = text;
+                    containerLabels = [.. textLabels];
+                }
+                else if (text.Length == container.Length)
+                {
+                    containerLabels.AddRange(textLabels.Where(l => !containerLabels.Contains(l)));
+                }
+            }
+            if (container is not null)
+            {
+                return $"{containerLabels.Select(l => $"@{l}").JoinString("=")}~part#{Sha8(value)}";
             }
             return $"#{Sha8(value)}({value.Length})";
         }
@@ -1419,8 +1473,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Node descriptions by ID and relative stage while <see cref="Build"/> runs (the workflow does not change during it), or null.</summary>
     public Dictionary<string, string> DescribeCache;
 
-    /// <summary>Formats where a node came from: "member@file:line by 'step' p{priority}", plus " load#N" inside a model load and " compat=ID" for the model loaded when it was created.
-    /// The CreateNode call site names the code branch that made the node.</summary>
+    /// <summary>Formats where a node came from: "member@file:line by 'step' p{priority}", plus " load#N" inside a model load, " compat=ID" for the model loaded when it was created,
+    /// and " reused xN" or " overwritten xN" when CreateNode returned it for an identical request or replaced it. The CreateNode call site names the code branch that made the node.</summary>
     public string Provenance(NodeRecord record)
     {
         string text = record.Origin;
@@ -1436,6 +1490,14 @@ public class WorkflowTrace(WorkflowGenerator gen)
         if (record.Compat is not null)
         {
             text += $" compat={record.Compat}";
+        }
+        if (record.ReusedBy.Count > 0)
+        {
+            text += $" reused x{record.ReusedBy.Count}";
+        }
+        if (record.Overwrites > 0)
+        {
+            text += $" overwritten x{record.Overwrites}";
         }
         return text;
     }
@@ -1690,6 +1752,33 @@ public class WorkflowTrace(WorkflowGenerator gen)
             {
                 loadObj["loras"] = new JArray(load.Loras.Select(l => (JToken)l));
             }
+            JArray patches = [];
+            foreach (StepRecord step in StepRecords.Where(s => s.IsModelGen && s.Load == load.Index))
+            {
+                List<string> created = [.. Nodes.Values.Where(n => n.Step == step.Index).Select(n => n.Id)];
+                if (created.Count == 0 && step.Edited.Count == 0 && step.Removed.Count == 0 && step.Inserted.Count == 0)
+                {
+                    continue;
+                }
+                string patch = $"{step.Priority} {step.Name} ({step.Source}) created=[{created.JoinString(",")}]";
+                if (step.Edited.Count > 0)
+                {
+                    patch += $" edited=[{step.Edited.JoinString(",")}]";
+                }
+                if (step.Removed.Count > 0)
+                {
+                    patch += $" removed=[{step.Removed.JoinString(",")}]";
+                }
+                if (step.Inserted.Count > 0)
+                {
+                    patch += $" inserted_without_createnode=[{step.Inserted.JoinString(",")}]";
+                }
+                patches.Add(patch);
+            }
+            if (patches.Count > 0)
+            {
+                loadObj["patches"] = patches;
+            }
             if (!load.Finished)
             {
                 loadObj["finished"] = false;
@@ -1794,6 +1883,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             result["removed"] = removed;
         }
+        JArray reuses = [];
+        foreach (NodeRecord node in Nodes.Values.Where(n => n.ReusedBy.Count > 0 || n.Overwrites > 0))
+        {
+            reuses.Add($"{node.Id}:{node.ClassType} reused by [{node.ReusedBy.JoinString(", ")}] overwrites={node.Overwrites}");
+        }
+        if (reuses.Count > 0)
+        {
+            result["node_reuse"] = reuses;
+        }
         if (Rewires.Count > 0)
         {
             result["rewires"] = new JArray(Rewires.Select(r => (JToken)r));
@@ -1881,6 +1979,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
             result["undeclared_inputs"] = undeclared;
             result["classes_missing_from_object_info"] = unknownClasses;
         }
+        else
+        {
+            result["object_info"] = "not given: link types, declared inputs and node classes were not checked against ComfyUI";
+        }
         JObject prompts = [];
         foreach ((string text, List<string> labels) in PromptLabels)
         {
@@ -1931,18 +2033,13 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return result;
     }
 
-    /// <summary>Builds the log-only trace detail: per-step tracker state, node reuse, and the raw input values.</summary>
+    /// <summary>Builds the log-only trace detail: per-step tracker state and the raw input values.</summary>
     public JObject BuildDetail()
     {
         JObject states = [];
         foreach (StepRecord step in StepRecords.Where(s => s.State is not null))
         {
             states[$"{step.Index} {step.Name}"] = step.State;
-        }
-        JArray reuses = [];
-        foreach (NodeRecord node in Nodes.Values.Where(n => n.ReusedBy.Count > 0 || n.Overwrites > 0))
-        {
-            reuses.Add($"{node.Id}:{node.ClassType} reused by [{node.ReusedBy.JoinString(", ")}] overwrites={node.Overwrites}");
         }
         JObject input = [];
         foreach ((string key, object value) in Gen.UserInput.InternalSet.ValuesInput)
@@ -1953,7 +2050,6 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return new JObject()
         {
             ["step_states"] = states,
-            ["node_reuse"] = reuses,
             ["input"] = input
         };
     }

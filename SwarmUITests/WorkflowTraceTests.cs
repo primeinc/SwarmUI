@@ -212,6 +212,22 @@ public class WorkflowTraceTests : SwarmUITest
                 }
             }
         }
+        foreach (JProperty property in build.Workflow.Properties())
+        {
+            string line = $"{stored["nodes"]?[property.Name]}";
+            if (!line.StartsWith($"{property.Name}:{property.Value["class_type"]}@") || !line.Contains(" <"))
+            {
+                failures.Add($"{label}: node {property.Name}:{property.Value["class_type"]} has no line with its stage and provenance in the image record: '{line}'");
+            }
+        }
+        if ((stored["steps"] as JArray)?.Count != trace.StepRecords.Count)
+        {
+            failures.Add($"{label}: {trace.StepRecords.Count} steps ran but the image record lists {(stored["steps"] as JArray)?.Count ?? 0}");
+        }
+        if ((stored["params_read"] as JObject)?.Count != trace.ParamReads.Count)
+        {
+            failures.Add($"{label}: {trace.ParamReads.Count} parameters were read but the image record lists {(stored["params_read"] as JObject)?.Count ?? 0}");
+        }
         if (summary.ToString(Formatting.None).Contains("zqx"))
         {
             failures.Add($"{label}: raw prompt text appears in the full trace");
@@ -681,7 +697,8 @@ public class WorkflowTraceTests : SwarmUITest
         }
     }
 
-    /// <summary>Negative controls for the fitness check: it passes a clean traced build, and fails a build where a node has no provenance record, a record with no origin, a record of the wrong class, or a node left the workflow with no step recorded as removing it.</summary>
+    /// <summary>Negative controls for the fitness check: it passes a clean traced build, and fails a build where a node has no provenance record, a record with no origin, a record of the wrong class, a node left the workflow with no step recorded as removing it,
+    /// a link dangles, a sampler has no call record, or the image record is missing a node or a step.</summary>
     [Test]
     public void TestFitnessCheckRejectsMissingProvenance()
     {
@@ -729,6 +746,17 @@ public class WorkflowTraceTests : SwarmUITest
                 string id = samplerOf(b);
                 b.Trace.SamplerCalls.Remove(id);
                 return $"sampler {id}:{b.Workflow[id]["class_type"]} has no call record";
+            },
+            ["node missing from the image record"] = b =>
+            {
+                string id = b.Workflow.Properties().First(p => !WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}")).Name;
+                ((JObject)((JObject)b.Input.ExtraMeta[WorkflowTrace.MetadataKey])["nodes"]).Remove(id);
+                return $"node {id}:{b.Workflow[id]["class_type"]} has no line with its stage and provenance in the image record";
+            },
+            ["step missing from the image record"] = b =>
+            {
+                ((JArray)((JObject)b.Input.ExtraMeta[WorkflowTrace.MetadataKey])["steps"]).RemoveAt(0);
+                return $"{b.Trace.StepRecords.Count} steps ran but the image record lists {b.Trace.StepRecords.Count - 1}";
             }
         };
         foreach ((string name, Func<Build, string> breakIt) in breaks)
@@ -803,6 +831,29 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(encodersWithImages, Is.GreaterThan(0), "at least one model gives its text encoder the prompt image");
     }
 
+    /// <summary>A model patch made by a model-generation step is in the image record, though no sampler input chain reaches the patched VAE: Seamless Tiling's model and VAE nodes are listed with the step that made them,
+    /// the model load they patched lists them as a patch, and the decode reads the tiled VAE.</summary>
+    [Test]
+    public void TestModelPatchesAreInTheImageRecord()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        Build traced = Generate(new() { Model = model, Prompt = PromptMarkerBase, Setters = { i => i.Set(T2IParamTypes.SeamlessTileable, "true") } }, true);
+        JObject record = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
+        string vaeId = traced.Workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "SwarmTileableVAE").Name;
+        string tilingId = traced.Workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "SwarmModelTiling").Name;
+        string decodeId = traced.Workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "VAEDecode").Name;
+        Assert.That($"{traced.Workflow[decodeId]["inputs"]["vae"][0]}", Is.EqualTo(vaeId), "the decode reads the tiled VAE");
+        Assert.That($"{record["nodes"][vaeId]}", Does.Contain("by 'Seamless Tiling'"));
+        Assert.That($"{record["nodes"][tilingId]}", Does.Contain("by 'Seamless Tiling'"));
+        List<JObject> patched = [.. ((JArray)record["model_loads"]).OfType<JObject>().Where(l => $"{l["patches"]}".Contains("Seamless Tiling"))];
+        Assert.That(patched, Has.Count.EqualTo(1), record["model_loads"].ToString(Formatting.None));
+        string patch = patched[0]["patches"].Select(p => $"{p}").Single(p => p.Contains("Seamless Tiling"));
+        Assert.That(patch, Does.Contain($"created=[{tilingId},{vaeId}]").Or.Contain($"created=[{vaeId},{tilingId}]"));
+        List<string> failures = [];
+        CheckTrace(traced, "seamless", failures);
+        Assert.That(failures, Is.Empty, string.Join("\n", failures));
+    }
+
     /// <summary>The unsampler, a sampler made outside CreateKSampler, has a call record.</summary>
     [Test]
     public void TestUnsamplerHasCallRecord()
@@ -867,6 +918,68 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(WorkflowTrace.LongHashes.TryGetValue(longText, out string cached) && cached == hash, Is.True, "a long text's hash is cached by reference");
         byte[] bytes = longText.EncodeUTF8();
         Assert.That(WorkflowTrace.HashBytes(bytes), Is.EqualTo(Utilities.HashSHA256(bytes)));
+    }
+
+    /// <summary>An ExtraMeta value that cannot be serialized, which makes the image metadata fail to build.</summary>
+    public class UnserializableValue
+    {
+        /// <summary>Throws when serialized.</summary>
+        public string Value => throw new InvalidOperationException("trace test: unserializable");
+    }
+
+    /// <summary>Recording a custom workflow, the sent graph or the posted graph never fails the send: an error is logged, and the custom workflow's record says what failed.</summary>
+    [Test]
+    public void TestRecordingNeverFailsTheSend()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase, Params = new() { ["imageformat"] = "JPG" } });
+        input.ExtraMeta["trace_test_unserializable"] = new UnserializableValue();
+        Assert.DoesNotThrow(() => WorkflowTrace.RecordExternalWorkflow(input, "custom", """{"1": {"class_type": "KSampler", "inputs": {}}}"""));
+        Assert.That($"{((JObject)input.ExtraMeta[WorkflowTrace.MetadataKey])["trace_error"]}", Does.StartWith("JsonSerializationException").And.Contain(nameof(UnserializableValue)));
+        ((JObject)input.ExtraMeta[WorkflowTrace.MetadataKey])["workflow"] = new JObject() { ["sent_sha256"] = "x" };
+        Assert.DoesNotThrow(() => WorkflowTrace.RecordPosted(input, null, "TestBackend"), "a null posted workflow is logged, not thrown");
+    }
+
+    /// <summary>Without ComfyUI object_info, the record says that link types, declared inputs and node classes were not checked, instead of listing no problems.</summary>
+    [Test]
+    public void TestMissingObjectInfoIsStated()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        JObject record = (JObject)Generate(new() { Model = model, Prompt = PromptMarkerBase }, true).Input.ExtraMeta[WorkflowTrace.MetadataKey];
+        Assert.That($"{record["object_info"]}", Does.StartWith("not given"));
+        Assert.That(record["type_errors"], Is.Null);
+        Assert.That(WorkflowTraceTypingTests.BuildTypedSdxl().Trace.Build()["object_info"], Is.Null, "with object_info, the checks are listed instead");
+    }
+
+    /// <summary>Prompt text that is part of a registered prompt is labeled with the shortest registered prompt containing it, the most specific source, and with every label when several tie.</summary>
+    [Test]
+    public void TestPromptPartsGoToTheMostSpecificPrompt()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        WorkflowTrace trace = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true).Trace;
+        trace.LabelPrompt("zqxpart man|woman", "seg11.mask");
+        trace.LabelPrompt("zqxpart woman|man", "seg12.mask");
+        trace.LabelPrompt("zqxpart a man on a road with a woman", "test.pos");
+        string part = trace.FormatString("1", "match_text", "man");
+        Assert.That(part, Does.StartWith("@seg11.mask=@seg12.mask~part#").Or.StartWith("@seg12.mask=@seg11.mask~part#"), part);
+        Assert.That(trace.FormatString("1", "text", "road with a woman"), Does.StartWith("@test.pos~part#"));
+        Assert.That(trace.FormatString("1", "text", "a road"), Does.Not.StartWith("@test.pos"), "the base prompt is shorter than test.pos and also contains it");
+    }
+
+    /// <summary>A clone of an input does not record parameter reads into the original's trace.</summary>
+    [Test]
+    public void TestCloneDropsTheParameterReadTracker()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+        int reads = 0;
+        input.ParamReadTracker = (_, _, _, _) => reads++;
+        T2IParamInput clone = input.Clone();
+        Assert.That(clone.ParamReadTracker, Is.Null);
+        clone.Get(T2IParamTypes.Steps);
+        Assert.That(reads, Is.EqualTo(0));
+        input.Get(T2IParamTypes.Steps);
+        Assert.That(reads, Is.EqualTo(1));
     }
 
     /// <summary>A parameter read with more than two distinct values lists them all, up to the cap.</summary>
@@ -1025,15 +1138,24 @@ public class WorkflowTraceTests : SwarmUITest
         JObject summary = trace.Build();
         string logReference = WorkflowTrace.LogReference(traced.Input);
         List<JObject> tiers = trace.RecordTiers(summary, logReference);
-        Assert.That(tiers, Has.Count.EqualTo(4));
+        Assert.That(tiers, Has.Count.EqualTo(5));
         int samplers = ((JArray)summary["samplers"]).Count;
         string samplerId = $"{((JArray)summary["samplers"])[0]["node"]}".Before(':');
         foreach (JObject tier in tiers)
         {
-            Assert.That(((JArray)tier["samplers"]).Count, Is.EqualTo(samplers), "every tier names every sampler");
-            Assert.That(tier["samplers"][0]["call"], Is.Not.Null, "every tier keeps the sampler calls");
             Assert.That(JToken.DeepEquals(tier["workflow"], summary["workflow"]), Is.True, "every tier keeps the workflow identity");
             Assert.That($"{tier["full_trace"]}", Does.Contain(logReference));
+        }
+        foreach (JObject tier in tiers.Take(4))
+        {
+            Assert.That(((JArray)tier["samplers"]).Count, Is.EqualTo(samplers), "every tier but the notice names every sampler");
+            Assert.That(tier["samplers"][0]["call"], Is.Not.Null, "every tier but the notice keeps the sampler calls");
+        }
+        Assert.That(tiers[4]["samplers"].Value<int>(), Is.EqualTo(samplers), "the notice counts the samplers");
+        Assert.That(WorkflowTrace.RecordMetadataChars(tiers[4]), Is.LessThan(2000), "the notice fits beside nearly any other metadata");
+        foreach (JProperty property in summary.Properties().Where(p => p.Name is not ("version" or "samplers" or "nodes")))
+        {
+            Assert.That(JToken.DeepEquals(tiers[0][property.Name], property.Value), Is.True, $"tier 0 keeps the summary's '{property.Name}' as it is");
         }
         Assert.That(tiers[0]["omitted"], Is.Null);
         Assert.That($"{tiers[0]["nodes"][samplerId]}", Does.Contain(" by '").And.Contain("@WorkflowGenerator"), "tier 0 node lines carry the creating call site and step");
@@ -1046,7 +1168,7 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "PNG", 0, 10), Is.SameAs(tiers[0]), "PNG keeps tier 0 over any limit");
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1000, tier0 + 1000), Is.SameAs(tiers[0]), "JPEG keeps tier 0 when it fits with the other metadata");
         Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1001, tier0 + 1000), Is.SameAs(tiers[1]), "the other metadata counts against the limit");
-        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "WEBP", 0, 10), Is.SameAs(tiers[3]), "the last tier when nothing fits");
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "WEBP", 0, 10), Is.SameAs(tiers[4]), "the notice when nothing fits");
         Assert.That(JToken.DeepEquals((JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey], tiers[0]), Is.True, "a PNG generation stores tier 0");
         Assert.That(summary["nodes"], Is.Not.Null, "the full trace keeps every node by stage");
         Assert.That(summary["params_read"], Is.Not.Null, "the full trace keeps every parameter read");
