@@ -2357,7 +2357,11 @@ public class WorkflowGeneratorSteps
                             ["preresize_min_height"] = 1024,
                             ["preresize_max_width"] = 16384,
                             ["preresize_max_height"] = 16384,
-                            ["mask_fill_holes"] = true,
+                            // Inverse segments select everything EXCEPT the
+                            // detected subject. Native hole filling would turn
+                            // that intentional black exclusion into an opaque
+                            // white edit region, overwriting the original person.
+                            ["mask_fill_holes"] = part.Strength >= 0,
                             ["mask_expand_pixels"] = growAmt,
                             ["mask_invert"] = false,
                             ["mask_blend_pixels"] = blurAmt,
