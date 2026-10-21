@@ -87,7 +87,7 @@ public partial class WorkflowGenerator
     /// <summary>The output workflow object.</summary>
     public JObject Workflow;
 
-    /// <summary>Debug trace of how this workflow was built, or null when not tracing. <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sets it when <see cref="Settings.AddDebugData"/> is enabled; other callers may set one before <see cref="Generate"/>.</summary>
+    /// <summary>Debug trace of how this workflow was built, or null when not tracing. <see cref="Generate"/> creates one when <see cref="Settings.AddDebugData"/> is enabled and none is set; <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sets one first, with the backend's object_info.</summary>
     public WorkflowTrace Trace;
 
     /// <summary>Current node data trackers for core data that passes throughout the workflow.</summary>
