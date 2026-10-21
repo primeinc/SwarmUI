@@ -177,6 +177,7 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             }
         });
         JObject summary = trace.Build();
+        List<JObject> tiers = trace.RecordTiers(summary, trace.LogKey);
         Dictionary<string, Cost> phases = new()
         {
             ["Build"] = Measure(() => trace.Build()),
@@ -185,6 +186,7 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             ["log text"] = Measure(() => _ = summary.ToString(Formatting.Indented) + trace.BuildDetail().ToString(Formatting.Indented)),
             ["RecordTiers"] = Measure(() => trace.RecordTiers(summary, trace.LogKey)),
             ["OtherMetadataChars"] = Measure(() => WorkflowTrace.OtherMetadataChars(input)),
+            ["JPEG refit at save"] = Measure(() => WorkflowTrace.ForImageMetadata(tiers, "JPG", WorkflowTrace.SavedMetadataChars(input))),
             ["Finish"] = Measure(trace.Finish),
             ["Finish, hash cache cleared"] = Measure(() =>
             {

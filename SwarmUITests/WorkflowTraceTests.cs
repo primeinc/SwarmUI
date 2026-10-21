@@ -10,6 +10,7 @@ using NUnit.Framework;
 using SixLabors.ImageSharp.Metadata.Profiles.Exif;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
+using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 using static SwarmUITests.WorkflowGeneratorHarness;
@@ -103,7 +104,31 @@ public class WorkflowTraceTests : SwarmUITest
         return profile.ToByteArray().Length;
     }
 
-    /// <summary>Checks the trace invariants for one traced build, appending violations to the list: every node has provenance, every removal is attributed, every sampler has a call record, the image record holds every sampler and fits one JPEG EXIF segment, and no raw prompt text, untracked node or dangling link appears.
+    /// <summary>Runs what a ComfyUI generation writes into an image's metadata after the trace finishes, in order: the backend posts the workflow (<see cref="WorkflowTrace.RecordPosted"/>) and adds its debug data with the prompt when the output arrives (ComfyUIAPIAbstractBackend.AwaitJobLive),
+    /// then T2IEngine copies the input, adds the generation times and fires <see cref="T2IEngine.PostGenerateEvent"/>, where <see cref="WorkflowTrace.FitRecordToSave"/> refits a tiered record. Returns the copy the saved image's metadata is generated from.</summary>
+    public static T2IParamInput SaveInput(T2IParamInput input, string workflow)
+    {
+        WorkflowTrace.RecordPosted(input, workflow, nameof(ComfyUISelfStartBackend));
+        input.ExtraMeta["debug_backend"] = new JObject()
+        {
+            ["backend_type"] = nameof(ComfyUISelfStartBackend),
+            ["backend_id"] = 12,
+            ["debug_internal_prompt"] = input.Get(T2IParamTypes.Prompt),
+            ["backend_usages"] = 1234,
+            ["comfy_output_node"] = "9",
+            ["comfy_is_real"] = true,
+            ["comfy_img_type"] = $"{MediaType.ImagePng}",
+            ["comfy_event_id"] = 1,
+            ["comfy_index"] = 0
+        };
+        T2IParamInput copy = input.Clone();
+        copy.ExtraMeta["prep_time"] = "1.23 min";
+        copy.ExtraMeta["generation_time"] = "45.67 sec";
+        T2IEngine.PostGenerateEvent?.Invoke(new(null, copy, () => { }, "9"));
+        return copy;
+    }
+
+    /// <summary>Checks the trace invariants for one traced build, appending violations to the list: every node has provenance, every removal is attributed, every sampler has a call record, the image record holds every sampler, a JPEG save's metadata (<see cref="SaveInput"/>) fits one EXIF segment, and no raw prompt text, untracked node or dangling link appears.
     /// Returns the stored image record's metadata length, and the record tier a JPEG save stores (0 is the most complete).</summary>
     public static (int RecordChars, int JpegTier) CheckTrace(Build build, string label, List<string> failures)
     {
@@ -181,11 +206,13 @@ public class WorkflowTraceTests : SwarmUITest
         }
         int storedLength = WorkflowTrace.RecordMetadataChars(stored);
         int samplerNodes = build.Workflow.Properties().Count(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}"));
-        JObject jpeg = WorkflowTrace.ForImageMetadata(tiers, "JPG", WorkflowTrace.OtherMetadataChars(build.Input));
+        T2IParamInput jpegInput = build.Input.Clone();
+        jpegInput.Set(T2IParamTypes.ImageFormat, "JPG");
+        jpegInput.ExtraMeta[WorkflowTrace.MetadataKey] = WorkflowTrace.PickTier(tiers, jpegInput, "JPG");
+        T2IParamInput saved = SaveInput(jpegInput, build.WorkflowText);
+        JObject jpeg = (JObject)saved.ExtraMeta[WorkflowTrace.MetadataKey];
         int jpegTier = tiers.FindIndex(t => ReferenceEquals(t, jpeg));
-        build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = jpeg;
-        int exifBytes = ExifBytes(build.Input.GenRawMetadata());
-        build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = stored;
+        int exifBytes = ExifBytes(saved.GenRawMetadata());
         if (exifBytes > MaxSingleApp1ExifBytes)
         {
             failures.Add($"{label}: JPEG image metadata EXIF is {exifBytes} bytes, over one APP1 segment ({MaxSingleApp1ExifBytes})");
@@ -1100,6 +1127,71 @@ public class WorkflowTraceTests : SwarmUITest
         {
             Program.ServerSettings.AddDebugData = priorDebug;
         }
+    }
+
+    /// <summary>A JPEG image's saved metadata fits one EXIF segment, with model hashes on and prompts long enough that what is written after the trace finishes (the backend's copy of the prompt, the model hashes, the times, the posted workflow) overflows the tier picked when it finished.
+    /// The record is refit on the save path (<see cref="SaveInput"/>); keeping the tier picked at Finish is the negative control, and must overflow for at least one prompt length.
+    /// When the metadata without the record leaves no room for even the last tier (the prompt is saved three times: prompt, original_prompt and the backend's copy), the last tier is stored and the overflow is the rest of the metadata's.</summary>
+    [Test]
+    public void TestSavedJpegMetadataFitsOneExifSegment()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true, "-hashed");
+        T2IModel lora = Lora("test_hashed_lora");
+        model.Metadata.Hash = $"0x{new string('a', 64)}";
+        lora.Metadata.Hash = $"0x{new string('b', 64)}";
+        bool priorDebug = Program.ServerSettings.AddDebugData, priorHash = Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash;
+        List<string> table = [];
+        int overflowsWithoutRefit = 0, fullOthers = 0;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = true;
+            foreach (int promptChars in new[] { 2000, 4000, 6000, 8000, 10000 })
+            {
+                string filler = string.Concat(Enumerable.Repeat("a wide grassy field under a cloudy sky, ", promptChars / 40 + 1))[..promptChars];
+                T2IParamInput input = BuildInput(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_hashed_lora> {filler}", Params = new() { ["imageformat"] = "JPG" } });
+                string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
+                JObject finished = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
+                List<JObject> tiers = finished.Annotation<WorkflowTrace.RecordTierSet>()?.Tiers;
+                Assert.That(tiers, Is.Not.Null, $"{promptChars}: a JPEG record carries its tiers");
+                T2IParamInput saved = SaveInput(input, workflow);
+                JObject fitted = (JObject)saved.ExtraMeta[WorkflowTrace.MetadataKey];
+                JObject metadata = saved.GenFullMetadataObject();
+                Assert.That(metadata["sui_models"]?.Select(m => $"{m["hash"]}"), Is.SupersetOf(new[] { model.Metadata.Hash, lora.Metadata.Hash }), $"{promptChars}: the saved metadata lists the model hashes");
+                Assert.That($"{metadata["sui_extra_data"]["debug_backend"]["debug_internal_prompt"]}", Does.EndWith(filler), $"{promptChars}: the saved metadata holds the backend's copy of the prompt");
+                Assert.That($"{metadata["sui_extra_data"][WorkflowTrace.MetadataKey]["workflow"]["posted"]["sha256"]}", Is.EqualTo(Utilities.HashSHA256(workflow.EncodeUTF8())), $"{promptChars}: the refit record keeps the posted workflow");
+                int exif = ExifBytes(T2IParamInput.MetadataToString(metadata));
+                int savedOther = WorkflowTrace.SavedMetadataChars(saved);
+                saved.ExtraMeta[WorkflowTrace.MetadataKey] = finished;
+                int exifWithoutRefit = ExifBytes(saved.GenRawMetadata());
+                if (exifWithoutRefit > MaxSingleApp1ExifBytes)
+                {
+                    overflowsWithoutRefit++;
+                }
+                int finishedTier = tiers.FindIndex(t => ReferenceEquals(t, finished)), fittedTier = tiers.FindIndex(t => ReferenceEquals(t, fitted));
+                string savedText = T2IParamInput.MetadataToString(metadata);
+                int copies = (savedText.Length - savedText.Replace(filler, "").Length) / filler.Length;
+                table.Add($"prompt {promptChars} chars, saved {copies} times ({string.Join(", ", metadata.Descendants().OfType<JValue>().Where(v => $"{v}".Contains(filler)).Select(v => v.Path))}): {savedOther} chars of other saved metadata; tier {finishedTier} at Finish, {exifWithoutRefit} EXIF bytes if kept; tier {fittedTier} refit, {exif} EXIF bytes");
+                Assert.That(fittedTier, Is.GreaterThanOrEqualTo(finishedTier), $"{promptChars}: the metadata only grows after Finish, so the refit tier is never larger");
+                if (savedOther + WorkflowTrace.RecordMetadataChars(tiers[^1]) <= WorkflowTrace.MaxExifMetadataChars)
+                {
+                    Assert.That(exif, Is.LessThanOrEqualTo(MaxSingleApp1ExifBytes), $"{promptChars}: the saved JPEG metadata fits one APP1 segment");
+                }
+                else
+                {
+                    fullOthers++;
+                    Assert.That(fittedTier, Is.EqualTo(tiers.Count - 1), $"{promptChars}: the rest of the metadata is over the limit, so the last tier is stored");
+                }
+            }
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+            Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = priorHash;
+            TestContext.Out.WriteLine(string.Join("\n", table));
+        }
+        Assert.That(overflowsWithoutRefit, Is.GreaterThan(0), "negative control: some prompt length overflows one APP1 segment when the tier picked at Finish is kept");
+        Assert.That(fullOthers, Is.EqualTo(1), "only the longest prompt fills the metadata without the record");
     }
 
     /// <summary>The segment's redraw is pasted back into the image that reaches the final save, and the trace's downstream path says so.</summary>

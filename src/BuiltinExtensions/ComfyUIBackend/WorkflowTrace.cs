@@ -33,7 +33,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public const int MaxChainNodes = 48;
 
     /// <summary>Most characters of image metadata text (parameters, extra data and the trace record together, as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for formats that keep metadata in EXIF (every format but PNG).
-    /// EXIF metadata is a UTF-16 UserComment, two bytes per character; within this limit it fits one 64 KiB JPEG APP1 segment (ImageSharp splits a larger profile across several, which most readers do not join), and the margin covers fields Swarm adds when it saves the image.</summary>
+    /// EXIF metadata is a UTF-16 UserComment, two bytes per character; within this limit it fits one 64 KiB JPEG APP1 segment (ImageSharp splits a larger profile across several, which most readers do not join).
+    /// <see cref="FitRecordToSave"/> measures the metadata the image is saved with; the margin covers what changes after it runs: post-generate handlers subscribed after it, and the seed of a later image in a batch.</summary>
     public const int MaxExifMetadataChars = 30_000;
 
     /// <summary>The generator being traced.</summary>
@@ -802,7 +803,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Returns the "full_trace" text of a record: the label of the log line with the full trace, and where that line is kept.</summary>
     public static string FullTraceNote(string logKey) => $"server log line '{LogLabel(logKey)}' at Debug level, {DebugLogRetention()}";
 
-    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> for PNG, otherwise the tier of <see cref="RecordTiers"/> that <see cref="ForImageMetadata"/> picks.</summary>
+    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record in the input's ExtraMeta: <see cref="RecordFull"/> for PNG, otherwise the tier of <see cref="RecordTiers"/> that <see cref="PickTier"/> picks, which <see cref="FitRecordToSave"/> picks again when the image is saved.</summary>
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
@@ -810,7 +811,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Summary = Build();
         Logs.Debug($"{LogReference} request {Gen.UserInput.UserRequestId}:\n{Summary.ToString(Formatting.Indented)}\n{LogReference} detail:\n{BuildDetail().ToString(Formatting.Indented)}");
         string format = ImageFormatOf(Gen.UserInput);
-        Record = format == "PNG" ? RecordFull(Summary, LogKey) : ForImageMetadata(RecordTiers(Summary, LogKey), format, OtherMetadataChars(Gen.UserInput));
+        Record = format == "PNG" ? RecordFull(Summary, LogKey) : PickTier(RecordTiers(Summary, LogKey), Gen.UserInput, format);
         Gen.UserInput.ExtraMeta[MetadataKey] = Record;
     }
 
@@ -827,7 +828,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         };
     }
 
-    /// <summary>Returns the length of an input's image metadata text without the trace record: its parameter metadata and other extra data, built without side effects (no model hashing).</summary>
+    /// <summary>Returns the length of an input's image metadata text without the trace record, as it stands: its parameter metadata and other extra data, built without side effects (no model hashing).</summary>
     public static int OtherMetadataChars(T2IParamInput input)
     {
         JObject extra = input.BuildExtraDataJObject();
@@ -837,6 +838,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["sui_image_params"] = input.GenParameterMetadata() ?? [],
             ["sui_extra_data"] = extra
         };
+        return T2IParamInput.MetadataToString(metadata).Length;
+    }
+
+    /// <summary>Returns the length of the metadata text an image of this input is saved with (<see cref="T2IParamInput.GenFullMetadataObject"/>: parameters, extra data, unused parameter list and model hashes) without the trace record.
+    /// Model hashes are read as the save reads them, so a model the generation did not hash yet is hashed here, ahead of the save.</summary>
+    public static int SavedMetadataChars(T2IParamInput input)
+    {
+        JObject metadata = input.GenFullMetadataObject();
+        (metadata["sui_extra_data"] as JObject)?.Remove(MetadataKey);
         return T2IParamInput.MetadataToString(metadata).Length;
     }
 
@@ -1025,20 +1035,82 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return tiers[^1];
     }
 
+    /// <summary>Annotation on every tier of a stored image record (<see cref="JToken.AddAnnotation"/>; annotations are not serialized): the whole tier list, so the record can be picked again for the metadata the image is saved with.</summary>
+    /// <param name="tiers">The record tiers, most complete first.</param>
+    public class RecordTierSet(List<JObject> tiers)
+    {
+        /// <summary>The record tiers, most complete first.</summary>
+        public List<JObject> Tiers = tiers;
+    }
+
+    /// <summary>1 once <see cref="FitRecordToSave"/> is subscribed to <see cref="T2IEngine.PostGenerateEvent"/>. The first tiered record subscribes it, so a server that never traces a JPEG or WebP image runs no handler, and it runs after the handlers subscribed at startup, whose metadata it then measures.</summary>
+    public static int FitSubscribed;
+
+    /// <summary>Returns the tier of a record for an image of the given format with the metadata the input has now (<see cref="ForImageMetadata"/>), after annotating every tier with the tier list (<see cref="RecordTierSet"/>) for <see cref="FitRecordToSave"/>, and subscribing that.</summary>
+    /// <param name="tiers">Record tiers, most complete first.</param>
+    /// <param name="input">The input the record is stored in.</param>
+    /// <param name="format">The input's image format (<see cref="ImageFormatOf"/>).</param>
+    public static JObject PickTier(List<JObject> tiers, T2IParamInput input, string format)
+    {
+        RecordTierSet set = new(tiers);
+        foreach (JObject tier in tiers)
+        {
+            tier.AddAnnotation(set);
+        }
+        if (Interlocked.Exchange(ref FitSubscribed, 1) == 0)
+        {
+            Action<T2IEngine.PostGenerationEventParams> current, combined;
+            do
+            {
+                current = T2IEngine.PostGenerateEvent;
+                combined = current + FitRecordToSave;
+            }
+            while (Interlocked.CompareExchange(ref T2IEngine.PostGenerateEvent, combined, current) != current);
+        }
+        return ForImageMetadata(tiers, format, OtherMetadataChars(input));
+    }
+
+    /// <summary>Post-generate handler (<see cref="T2IEngine.PostGenerateEvent"/>): picks the record tier again for the metadata the image is saved with (<see cref="SavedMetadataChars"/>), which by now includes everything written after the trace finished: the posted workflow, the backend's debug data with the prompt, the generation times, the unused parameter list and the model hashes.
+    /// Does nothing for an input without a tiered record. An error is logged, never thrown: the image is saved with the record it had.</summary>
+    public static void FitRecordToSave(T2IEngine.PostGenerationEventParams args)
+    {
+        T2IParamInput input = args.UserInput;
+        if (input?.ExtraMeta.GetValueOrDefault(MetadataKey) is not JObject stored || stored.Annotation<RecordTierSet>() is not RecordTierSet set)
+        {
+            return;
+        }
+        try
+        {
+            input.ExtraMeta[MetadataKey] = ForImageMetadata(set.Tiers, ImageFormatOf(input), SavedMetadataChars(input));
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"{LogLabel($"{stored["log_key"]}")}: the image record could not be fitted to the saved metadata; the image keeps the record it had: {ex.ReadableString()}");
+        }
+    }
+
     /// <summary>The "posted" value of a workflow record until a ComfyUI backend posts it through <see cref="ComfyUIAPIAbstractBackend.AwaitJobLive"/>.</summary>
     public const string NotPosted = "not observed: no post through ComfyUIAPIAbstractBackend.AwaitJobLive";
 
-    /// <summary>Returns the "workflow" objects to update for an input: the summary's, and the stored image metadata record's when the image format stores a notice instead of the summary.</summary>
+    /// <summary>Returns the "workflow" objects to update for an input: the summary's, the stored image record's, and that of every tier of the stored record (<see cref="RecordTierSet"/>), each once.</summary>
     public static List<JObject> WorkflowRecords(T2IParamInput input, JObject summary)
     {
         List<JObject> records = [];
-        if (summary?["workflow"] is JObject info)
+        void add(JObject record)
         {
-            records.Add(info);
+            if (record?["workflow"] is JObject info && !records.Any(r => ReferenceEquals(r, info)))
+            {
+                records.Add(info);
+            }
         }
-        if (input?.ExtraMeta.GetValueOrDefault(MetadataKey) is JObject stored && stored != summary && stored["workflow"] is JObject storedInfo)
+        add(summary);
+        if (input?.ExtraMeta.GetValueOrDefault(MetadataKey) is JObject stored)
         {
-            records.Add(storedInfo);
+            add(stored);
+            foreach (JObject tier in stored.Annotation<RecordTierSet>()?.Tiers ?? [])
+            {
+                add(tier);
+            }
         }
         return records;
     }
@@ -1100,7 +1172,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record. Does nothing for an input without one. An error is logged, never thrown: the post is unaffected.</summary>
+    /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record and every tier of it. Does nothing for an input without one. An error is logged, never thrown: the post is unaffected.</summary>
     /// <param name="input">The input being generated.</param>
     /// <param name="workflow">The workflow JSON text posted as the "prompt".</param>
     /// <param name="backend">Name of the posting backend type.</param>
@@ -1115,13 +1187,16 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             string sha = HashText(workflow);
             bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
-            info["posted"] = new JObject()
+            foreach (JObject record in WorkflowRecords(input, null))
             {
-                ["sha256"] = sha,
-                ["length"] = workflow.Length,
-                ["backend"] = backend,
-                ["matches_sent"] = matchesSent
-            };
+                record["posted"] = new JObject()
+                {
+                    ["sha256"] = sha,
+                    ["length"] = workflow.Length,
+                    ["backend"] = backend,
+                    ["matches_sent"] = matchesSent
+                };
+            }
             Logs.Debug($"{label}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
         }
         catch (Exception ex)
@@ -1130,7 +1205,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description under a new log key, and stores it in the input's ExtraMeta with that key, without the node list when the image format cannot hold it (<see cref="PickTier"/>, then <see cref="FitRecordToSave"/>).
     /// An error is logged and stored as the record, never thrown: the generation is unaffected.</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
@@ -1149,7 +1224,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             JObject withoutNodes = (JObject)summary.DeepClone();
             withoutNodes.Remove("nodes");
             withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the {FullTraceNote(logKey)}";
-            input.ExtraMeta[MetadataKey] = ForImageMetadata([summary, withoutNodes], format, OtherMetadataChars(input));
+            input.ExtraMeta[MetadataKey] = PickTier([summary, withoutNodes], input, format);
         }
         catch (Exception ex)
         {
