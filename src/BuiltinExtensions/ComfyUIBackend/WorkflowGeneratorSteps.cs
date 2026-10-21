@@ -71,10 +71,11 @@ public class WorkflowGeneratorSteps
             {
                 result = result[..^".safetensors".Length];
             }
-            // Comfy resolves filenames on the selected backend's filesystem.
-            // Lowercasing can make two different Linux LoRA paths compare equal.
-            // Preserve exact path case; only normalize separators and suffix.
-            return result.Trim();
+            // Comfy folder_paths.get_full_path passes the relative filename
+            // untrimmed to os.path.isfile. Linux model paths can differ by
+            // leading or trailing spaces before the .safetensors extension.
+            // Preserve every character except separator and optional suffix.
+            return result;
         }
         static bool sameName(string first, string second)
         {
