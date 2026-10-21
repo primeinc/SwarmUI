@@ -351,6 +351,21 @@ public class QwenSegmentOriginalSourceTests
             && x.Node["inputs"]?["prompt"]?.ToString() == authoredRegionText).ToArray();
         Assert.That(nodes.Any(x => x.Node["class_type"]?.ToString() == "TextEncodeQwenImage21"), Is.False,
             "The Qwen path delegates Swarm weight/schedule tags to SwarmTextEncodeAdvanced");
+        if (hasInitImage || independentPromptImage)
+        {
+            var reconstructed = nodes.Where(x =>
+                x.Node["class_type"]?.ToString() == "JoinImageWithAlpha").ToArray();
+            Assert.That(reconstructed, Has.Length.EqualTo(1),
+                "Explicit Qwen edit sources must reconstruct the original PNG alpha once");
+            var join = reconstructed.Single();
+            string sourceLoaderId = join.Node["inputs"]?["image"]?[0]?.ToString();
+            Assert.That(sourceLoaderId, Is.Not.Null);
+            Assert.That(join.Node["inputs"]?["alpha"]?.ToString(),
+                Is.EqualTo(new Newtonsoft.Json.Linq.JArray(sourceLoaderId, 1).ToString()),
+                "Use loader MASK output 1, the original inverse alpha, not the inpainting mask");
+            Assert.That(graph[sourceLoaderId]?["class_type"]?.ToString(),
+                Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"));
+        }
         if (referenceEdit)
         {
             var referenceCrop = nodes.Single(x => x.Node["class_type"]?.ToString() == "InpaintCropImproved");
@@ -482,12 +497,20 @@ public class QwenSegmentOriginalSourceTests
         string sourceId = crop.Node["inputs"]?["image"]?[0]?.ToString();
         Assert.That(sourceId, Is.Not.Null);
         Assert.That(graph[sourceId]?["class_type"]?.ToString(),
+            Is.EqualTo("JoinImageWithAlpha"),
+            "Source RGBA must reach the Qwen crop, not just the loader's stripped RGB");
+        string rawSourceId = graph[sourceId]?["inputs"]?["image"]?[0]?.ToString();
+        Assert.That(rawSourceId, Is.Not.Null);
+        Assert.That(graph[sourceId]?["inputs"]?["alpha"]?.ToString(),
+            Is.EqualTo(new Newtonsoft.Json.Linq.JArray(rawSourceId, 1).ToString()),
+            "Comfy loader output 1 is the source inverse alpha, NOT a segment mask");
+        Assert.That(graph[rawSourceId]?["class_type"]?.ToString(),
             Is.EqualTo(useBase64Images ? "SwarmLoadImageB64" : "LoadImage"),
             "The edit canvas must load the original image, not the sampled base frame");
         if (useBase64Images)
         {
             string expectedBytes = (hasInitImage ? image : independentReference).AsBase64;
-            Assert.That(graph[sourceId]?["inputs"]?["image_base64"]?.ToString(), Is.EqualTo(expectedBytes),
+            Assert.That(graph[rawSourceId]?["inputs"]?["image_base64"]?.ToString(), Is.EqualTo(expectedBytes),
                 "The native detector must receive the exact supplied image bytes, without resampling");
         }
         if (nonAlignedCropTarget)
