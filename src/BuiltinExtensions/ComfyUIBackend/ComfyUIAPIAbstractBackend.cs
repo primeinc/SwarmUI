@@ -41,17 +41,12 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// external API-by-URL Comfy instance with no bundled nodes installed.
     /// Ordinary/non-Qwen generation is not affected.
     /// </summary>
-    /// <summary>Recognize a numeric image_N reference even when its index
-    /// exceeds the 16 inputs supported by Qwen's native Swarm encoder.
-    /// Otherwise invalid raw image_17 inputs evade Qwen preflight entirely.</summary>
-    private static bool IsQwen21NumericImageSocket(string name)
+    /// <summary>All image_-prefixed sockets are Qwen reference candidates.
+    /// Reject unknown suffixes, zero, overflow and indices above 16 during
+    /// backend preflight rather than silently ignoring malformed raw inputs.</summary>
+    private static bool IsQwen21ReferenceSocketCandidate(string name)
     {
-        if (!name.StartsWith("image_", StringComparison.Ordinal))
-        {
-            return false;
-        }
-        string suffix = name["image_".Length..];
-        return suffix.Length > 0 && suffix.All(c => c >= '0' && c <= '9');
+        return name.StartsWith("image_", StringComparison.Ordinal);
     }
 
     private static bool HasQwen21AdvancedEncoderInputs(JObject workflow)
@@ -73,7 +68,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return inputs.Properties().Any(input =>
                 input.Value.Type != JTokenType.Null
-                && IsQwen21NumericImageSocket(input.Name));
+                && IsQwen21ReferenceSocketCandidate(input.Name));
         });
     }
 
@@ -193,7 +188,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 {
                     continue;
                 }
-                bool isImageSlot = IsQwen21NumericImageSocket(input.Name);
+                bool isImageSlot = IsQwen21ReferenceSocketCandidate(input.Name);
                 if (isImageSlot
                     && (!int.TryParse(input.Name.AsSpan("image_".Length), out int index)
                         || index < 1 || index > 16))
