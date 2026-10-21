@@ -28,12 +28,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Maximum number of nodes listed per sampler input chain.</summary>
     public static int MaxChainNodes = 48;
 
-    /// <summary>Maximum length of the summary stored in image metadata, as <see cref="T2IParamInput.MetadataToString(JObject)"/> characters.
-    /// JPEG and thumbnail metadata is a UTF-16 EXIF UserComment that must fit one 64 KiB APP1 segment together with the parameter metadata.</summary>
-    public static int MaxSummaryChars = 20_000;
-
-    /// <summary>Summary sections removed, in order, until the summary fits <see cref="MaxSummaryChars"/>. The server log always has the full trace.</summary>
-    public static string[] SummaryTrimOrder = ["nodes", "params_read", "undeclared_inputs", "section_overrides", "media", "prompts", "cache_hits", "rewires", "removed", "loras", "segments", "steps", "model_loads", "samplers"];
+    /// <summary>Longest summary, as <see cref="T2IParamInput.MetadataToString(JObject)"/> characters, stored in images whose format keeps metadata in EXIF (every format but PNG).
+    /// EXIF metadata is a UTF-16 UserComment that has to fit one 64 KiB JPEG APP1 segment together with the parameter metadata; PNG text chunks have no such limit.</summary>
+    public static int MaxExifSummaryChars = 20_000;
 
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
@@ -546,52 +543,57 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the summary, trimmed to <see cref="MaxSummaryChars"/>, into the input's ExtraMeta.</summary>
+    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the summary for the image format (<see cref="ForImageMetadata"/>) into the input's ExtraMeta.</summary>
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
         Summary = Build();
-        Logs.Debug($"[WorkflowTrace] request {Gen.UserInput.UserRequestId}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
-        TrimToBudget(Summary, $"[WorkflowTrace] request {Gen.UserInput.UserRequestId}");
-        Gen.UserInput.ExtraMeta[MetadataKey] = Summary;
+        string logReference = $"[WorkflowTrace] request {Gen.UserInput.UserRequestId}";
+        Logs.Debug($"{logReference}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
+        Gen.UserInput.ExtraMeta[MetadataKey] = ForImageMetadata(Summary, ImageFormatOf(Gen.UserInput), logReference);
     }
 
-    /// <summary>Removes sections from a summary, in <see cref="SummaryTrimOrder"/>, until its metadata form fits the limit. Lists what was removed under "omitted".</summary>
-    /// <param name="summary">The summary to trim in place.</param>
-    /// <param name="logReference">Where the untrimmed summary can be found.</param>
-    /// <param name="maxChars">Limit, as <see cref="T2IParamInput.MetadataToString(JObject)"/> characters, or -1 for <see cref="MaxSummaryChars"/>.</param>
-    public static void TrimToBudget(JObject summary, string logReference, int maxChars = -1)
+    /// <summary>Returns the format images of this input are saved in, as Session.ApplyMetadata picks it, without marking any parameter as used.</summary>
+    public static string ImageFormatOf(T2IParamInput input)
     {
-        if (maxChars < 0)
+        if (input.InternalSet.TryGet(T2IParamTypes.ImageFormat, out string format) && !string.IsNullOrWhiteSpace(format))
         {
-            maxChars = MaxSummaryChars;
+            return format;
+        }
+        return input.SourceSession?.User?.Settings?.FileFormat?.ImageFormat ?? Program.ServerSettings?.DefaultUser?.FileFormat?.ImageFormat ?? "PNG";
+    }
+
+    /// <summary>Returns what to store in the image metadata for a summary: the full summary for PNG, and for EXIF formats when it fits <see cref="MaxExifSummaryChars"/>.
+    /// Otherwise a notice saying to save as PNG for the full trace and where the server log has it, with the workflow and model identity, so the image can still be matched to the log.</summary>
+    /// <param name="summary">The full summary.</param>
+    /// <param name="format">Image format, as <see cref="T2IParamTypes.ImageFormat"/> values ("PNG", "JPG", "WEBP", ...).</param>
+    /// <param name="logReference">How the server debug log labels this trace.</param>
+    /// <param name="maxExifChars">Limit for EXIF formats, or -1 for <see cref="MaxExifSummaryChars"/>.</param>
+    public static JObject ForImageMetadata(JObject summary, string format, string logReference, int maxExifChars = -1)
+    {
+        if (maxExifChars < 0)
+        {
+            maxExifChars = MaxExifSummaryChars;
+        }
+        if (format == "PNG")
+        {
+            return summary;
         }
         int length = T2IParamInput.MetadataToString(summary).Length;
-        if (length <= maxChars)
+        if (length <= maxExifChars)
         {
-            return;
+            return summary;
         }
-        JArray omitted = [];
-        summary["omitted"] = new JObject()
+        return new JObject()
         {
-            ["reason"] = $"summary was {length} chars, image metadata limit is {maxChars}",
-            ["full_trace"] = $"server debug log, '{logReference}'",
-            ["sections"] = omitted
+            ["omitted"] = new JObject()
+            {
+                ["reason"] = $"the trace is {length} characters; {format} images keep metadata in EXIF, which holds {maxExifChars}",
+                ["full_trace"] = $"save as PNG to keep the full trace in the image; the server debug log has it as '{logReference}'"
+            },
+            ["workflow"] = summary["workflow"]?.DeepClone(),
+            ["model"] = summary["model"]?.DeepClone()
         };
-        foreach (string key in SummaryTrimOrder)
-        {
-            if (summary[key] is not JToken section)
-            {
-                continue;
-            }
-            omitted.Add($"{key} ({section.ToString(Formatting.None).Length} chars)");
-            summary.Remove(key);
-            length = T2IParamInput.MetadataToString(summary).Length;
-            if (length <= maxChars)
-            {
-                return;
-            }
-        }
     }
 
     /// <summary>Records the workflow text actually sent to ComfyUI.</summary>
@@ -609,14 +611,13 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Logs.Debug($"[WorkflowTrace] request {Gen.UserInput.UserRequestId}: sent workflow sha256={info["sent_sha256"]} length={workflow.Length} rewritten_after_generate={changedAfterGenerate}");
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it, trimmed to <see cref="MaxSummaryChars"/>, into the input's ExtraMeta.</summary>
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it for the image format (<see cref="ForImageMetadata"/>) into the input's ExtraMeta.</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
         JObject summary = DescribeExternalWorkflow(source, workflow);
         string logReference = $"[WorkflowTrace] request {input.UserRequestId}";
         Logs.Debug($"{logReference} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
-        TrimToBudget(summary, logReference);
-        input.ExtraMeta[MetadataKey] = summary;
+        input.ExtraMeta[MetadataKey] = ForImageMetadata(summary, ImageFormatOf(input), logReference);
     }
 
     /// <summary>Builds a trace summary for a workflow that did not come from the generator (custom or raw workflows).</summary>

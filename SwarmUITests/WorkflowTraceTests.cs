@@ -103,8 +103,8 @@ public class WorkflowTraceTests : SwarmUITest
         return profile.ToByteArray().Length;
     }
 
-    /// <summary>Checks the trace invariants for one traced build, appending violations to the list. Returns the summary's metadata length.</summary>
-    public static int CheckTrace(Build build, string label, List<string> failures)
+    /// <summary>Checks the trace invariants for one traced build, appending violations to the list. Returns the stored summary's metadata length, and whether a JPEG save would store the use-PNG notice instead of the trace.</summary>
+    public static (int SummaryChars, bool JpegNotice) CheckTrace(Build build, string label, List<string> failures)
     {
         WorkflowTrace trace = build.Trace;
         foreach (JProperty property in build.Workflow.Properties())
@@ -153,31 +153,32 @@ public class WorkflowTraceTests : SwarmUITest
         if (build.Input.ExtraMeta.GetValueOrDefault(WorkflowTrace.MetadataKey) is not JObject stored)
         {
             failures.Add($"{label}: no {WorkflowTrace.MetadataKey} in ExtraMeta");
-            return 0;
+            return (0, false);
         }
         int storedLength = T2IParamInput.MetadataToString(stored).Length;
-        if (storedLength > WorkflowTrace.MaxSummaryChars)
+        string format = WorkflowTrace.ImageFormatOf(build.Input);
+        if (format != "PNG")
         {
-            failures.Add($"{label}: stored summary is {storedLength} chars, over the {WorkflowTrace.MaxSummaryChars} limit");
+            failures.Add($"{label}: the harness saves as {format}, the checks below expect the PNG default");
         }
+        if (!JToken.DeepEquals(stored, trace.Build()))
+        {
+            failures.Add($"{label}: the summary stored for a PNG image is not the full trace");
+        }
+        JObject jpeg = WorkflowTrace.ForImageMetadata(stored, "JPG", "[WorkflowTrace] request test");
+        bool jpegNotice = jpeg["omitted"] is not null;
+        build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = jpeg;
         int exifBytes = ExifBytes(build.Input.GenRawMetadata());
+        build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = stored;
         if (exifBytes > MaxSingleApp1ExifBytes)
         {
-            failures.Add($"{label}: image metadata EXIF is {exifBytes} bytes, over one JPEG APP1 segment ({MaxSingleApp1ExifBytes})");
+            failures.Add($"{label}: JPEG image metadata EXIF is {exifBytes} bytes, over one APP1 segment ({MaxSingleApp1ExifBytes})");
         }
         if (stored.ToString(Formatting.None).Contains("zqx"))
         {
             failures.Add($"{label}: raw prompt text appears in the stored trace summary");
         }
         JObject summary = stored;
-        if (stored["omitted"] is not null)
-        {
-            summary = trace.Build();
-            if (summary.ToString(Formatting.None).Contains("zqx"))
-            {
-                failures.Add($"{label}: raw prompt text appears in the untrimmed trace summary");
-            }
-        }
         if (summary["untracked_nodes"] is not null)
         {
             failures.Add($"{label}: summary lists untracked nodes {summary["untracked_nodes"].ToString(Formatting.None)}");
@@ -193,7 +194,7 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: {samplerNodes} sampler nodes but {samplerEntries} sampler records");
         }
-        return storedLength;
+        return (storedLength, jpegNotice);
     }
 
     /// <summary>Outcome of one fitness case.</summary>
@@ -204,12 +205,8 @@ public class WorkflowTraceTests : SwarmUITest
     /// <param name="PlainTicks">Untraced build time.</param>
     /// <param name="TracedTicks">Traced build time.</param>
     /// <param name="SummaryChars">Stored summary metadata length.</param>
-    /// <param name="Omitted">Sections removed from the stored summary to fit the metadata limit.</param>
-    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int SummaryChars = 0, string[] Omitted = null)
-    {
-        /// <summary>True if the stored summary was trimmed.</summary>
-        public bool Trimmed => Omitted is not null && Omitted.Length > 0;
-    }
+    /// <param name="JpegNotice">True if a JPEG save would store the use-PNG notice instead of the trace.</param>
+    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int SummaryChars = 0, bool JpegNotice = false);
 
     /// <summary>For a request the untraced build throws on, checks that tracing changed nothing about the failure: same exception, same partial workflow, same input state, no trace stored in metadata, tracker detached, error recorded, and the partial trace still builds.</summary>
     public static void CheckFailureIsNoOp(Attempt plain, Attempt traced, string label, List<string> failures)
@@ -291,9 +288,8 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: tracing changed the workflow");
         }
-        int summaryChars = CheckTrace(traced, label, failures);
-        string[] omitted = [.. ((traced.Input.ExtraMeta.GetValueOrDefault(WorkflowTrace.MetadataKey) as JObject)?["omitted"]?["sections"] as JArray ?? []).Select(s => $"{s}".Before(" ("))];
-        return new(label, null, null, failures, plainTicks, tracedTicks, summaryChars, omitted);
+        (int summaryChars, bool jpegNotice) = CheckTrace(traced, label, failures);
+        return new(label, null, null, failures, plainTicks, tracedTicks, summaryChars, jpegNotice);
     }
 
     /// <summary>The fitness function: every main model class, in both checkpoint and diffusion_models formats, across every option variant.
@@ -333,11 +329,7 @@ public class WorkflowTraceTests : SwarmUITest
         if (checkedOutcomes.Count > 0)
         {
             CaseOutcome largest = checkedOutcomes[^1];
-            TestContext.Out.WriteLine($"Stored summary size: median {checkedOutcomes[checkedOutcomes.Count / 2].SummaryChars} chars, max {largest.SummaryChars} chars ({largest.Label}); {checkedOutcomes.Count(o => o.Trimmed)} trimmed to the {WorkflowTrace.MaxSummaryChars} char limit.");
-            foreach (IGrouping<string, CaseOutcome> omitted in checkedOutcomes.Where(o => o.Trimmed).GroupBy(o => o.Omitted.JoinString(", ")).OrderByDescending(g => g.Count()))
-            {
-                TestContext.Out.WriteLine($"    TRIMMED x{omitted.Count()}: omitted [{omitted.Key}], eg {omitted.First().Label}");
-            }
+            TestContext.Out.WriteLine($"Stored summary size (PNG, full trace): median {checkedOutcomes[checkedOutcomes.Count / 2].SummaryChars} chars, max {largest.SummaryChars} chars ({largest.Label}); {checkedOutcomes.Count(o => o.JpegNotice)} over the {WorkflowTrace.MaxExifSummaryChars} char EXIF limit, which a JPEG or WebP save replaces with the use-PNG notice.");
         }
         foreach (CaseOutcome crash in upstreamCrashes)
         {
@@ -514,32 +506,30 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(segment.ParamReads["segmentmaskblur"].FirstSource, Is.EqualTo("default"));
     }
 
-    /// <summary>A summary over the metadata limit loses sections in the fixed trim order, says what it dropped and where the full trace is, and is untouched when under the limit.</summary>
+    /// <summary>The image metadata carries the full trace for PNG at any size, and for JPEG and WebP when it fits the EXIF limit; over the limit, a JPEG or WebP save carries a notice to save as PNG, where the server log has the trace, and the workflow and model identity, never part of a trace.
+    /// The format comes from the input's Image Format parameter, read without marking it used.</summary>
     [Test]
-    public void TestOversizedSummaryIsTrimmed()
+    public void TestImageMetadataKeepsTheFullTraceOrSaysUsePng()
     {
         T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
         Lora("test_alien_lora");
         Build traced = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>" }, true);
         JObject summary = traced.Trace.Build();
         int fullLength = T2IParamInput.MetadataToString(summary).Length;
-        JObject withoutNodes = (JObject)summary.DeepClone();
-        withoutNodes.Remove("nodes");
-        int limit = T2IParamInput.MetadataToString(withoutNodes).Length + 400;
-        Assert.That(limit, Is.LessThan(fullLength), "the node listing is larger than the room left for the omitted note");
-        WorkflowTrace.TrimToBudget(summary, "[WorkflowTrace] request test", limit);
-        Assert.That(T2IParamInput.MetadataToString(summary).Length, Is.LessThanOrEqualTo(limit));
-        Assert.That(summary["nodes"], Is.Null);
-        Assert.That(summary["samplers"], Is.Not.Null);
-        Assert.That(summary["params_read"], Is.Not.Null);
-        Assert.That($"{summary["omitted"]["full_trace"]}", Does.Contain("[WorkflowTrace] request test"));
-        JArray sections = (JArray)summary["omitted"]["sections"];
-        Assert.That(sections.Count, Is.EqualTo(1));
-        Assert.That($"{sections[0]}", Does.StartWith("nodes ("));
-        JObject untouched = traced.Trace.Build();
-        WorkflowTrace.TrimToBudget(untouched, "[WorkflowTrace] request test", fullLength);
-        Assert.That(untouched["omitted"], Is.Null);
-        Assert.That(untouched["nodes"], Is.Not.Null);
+        Assert.That(WorkflowTrace.ForImageMetadata(summary, "PNG", "[WorkflowTrace] request test", 10), Is.SameAs(summary), "PNG keeps the full trace over any limit");
+        Assert.That(WorkflowTrace.ForImageMetadata(summary, "JPG", "[WorkflowTrace] request test", fullLength), Is.SameAs(summary), "JPEG keeps the full trace when it fits");
+        foreach (string format in new[] { "JPG", "WEBP" })
+        {
+            JObject notice = WorkflowTrace.ForImageMetadata(summary, format, "[WorkflowTrace] request test", fullLength - 1);
+            Assert.That(notice.Properties().Select(p => p.Name), Is.EquivalentTo(new[] { "omitted", "workflow", "model" }), format);
+            Assert.That($"{notice["omitted"]["full_trace"]}", Does.Contain("save as PNG").And.Contain("[WorkflowTrace] request test"), format);
+            Assert.That($"{notice["omitted"]["reason"]}", Does.Contain($"{fullLength} characters").And.Contain(format), format);
+            Assert.That(JToken.DeepEquals(notice["workflow"], summary["workflow"]) && JToken.DeepEquals(notice["model"], summary["model"]), Is.True, format);
+        }
+        Build jpegBuild = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>", Params = new() { ["imageformat"] = "JPG" } }, true);
+        Assert.That(WorkflowTrace.ImageFormatOf(jpegBuild.Input), Is.EqualTo("JPG"));
+        Assert.That(jpegBuild.Input.ParamsQueried.Contains(T2IParamTypes.ImageFormat.Type.ID), Is.False, "reading the format did not mark Image Format as used");
+        Assert.That(WorkflowTrace.ImageFormatOf(traced.Input), Is.EqualTo("PNG"), "with no Image Format parameter, the default user's format");
     }
 
     /// <summary>Each feature variant reaches the generator step it exists to cover, and the trace attributes it (stage, step, media, prompt labels, loads), so the fitness sweep is not silently skipping features.</summary>
