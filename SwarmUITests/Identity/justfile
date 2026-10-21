@@ -1,0 +1,71 @@
+# Workflow byte-identity against the upstream commit this fork is based on: GeneratorIdentity.cs builds every main model class x option variant in this tree and in an upstream worktree,
+# with debug data off and on, and all four dumps must be identical. `just run` does every step; `just evidence` records HEAD, status and the exit code of every check.
+# The work folder (upstream worktree, dumps, logs) must be outside SwarmUITests, whose project compiles every .cs file under it.
+
+[windows]
+set shell := ['sh', '-cu']
+set script-interpreter := ['sh', '-eu']
+set positional-arguments
+
+export REPO := replace(parent_directory(parent_directory(justfile_directory())), '\', '/')
+export ID := replace(justfile_directory(), '\', '/')
+export WORK := replace(env('SWARMUI_IDENTITY_WORK', env('TMPDIR', env('TEMP', '/tmp')) / 'swarmui-identity-work'), '\', '/')
+export UPSTREAM := WORK / 'upstream'
+export UPSTREAM_COMMIT := '4e01badebca99ba6a2b4df335c8029e938182f37'
+
+# Create a detached worktree of the upstream commit.
+[script]
+worktree:
+    mkdir -p "$WORK"
+    if [ ! -d "$UPSTREAM" ]; then git -C "$REPO" worktree add --detach "$UPSTREAM" "$UPSTREAM_COMMIT"; fi
+    git -C "$UPSTREAM" log --oneline -1
+
+# Dump one tree (upstream or head) with debug data off (0) or on (1). The upstream tree gets a copy of GeneratorIdentity.cs for the run.
+[script]
+dump tree debug:
+    if [ "$1" = upstream ]; then dir="$UPSTREAM"; cp "$ID/GeneratorIdentity.cs" "$dir/SwarmUITests/GeneratorIdentity.cs"; else dir="$REPO"; fi
+    echo "== $1 debug=$2 at $(git -C "$dir" rev-parse HEAD)"
+    status=0
+    IDENTITY_OUT="$WORK/$1-debug$2.tsv" IDENTITY_DEBUG="$2" dotnet test "$dir/SwarmUITests/SwarmUITests.csproj" -c Release --filter "TestCategory=Identity" --logger "console;verbosity=normal" || status=$?
+    if [ "$1" = upstream ]; then rm "$dir/SwarmUITests/GeneratorIdentity.cs"; fi
+    exit "$status"
+
+# Compare every dump with upstream's debug-off dump; any difference fails and is written to diff-<dump>.txt.
+[script]
+compare:
+    status=0
+    for f in upstream-debug1 head-debug0 head-debug1; do
+        if cmp -s "$WORK/upstream-debug0.tsv" "$WORK/$f.tsv"; then
+            echo "IDENTICAL upstream-debug0 vs $f ($(wc -l < "$WORK/$f.tsv") cases)"
+        else
+            echo "DIFFERENT upstream-debug0 vs $f"
+            diff "$WORK/upstream-debug0.tsv" "$WORK/$f.tsv" > "$WORK/diff-$f.txt" || true
+            wc -l "$WORK/diff-$f.txt"
+            status=1
+        fi
+    done
+    sha256sum "$WORK"/*.tsv
+    exit "$status"
+
+# Every identity step: the worktree, the four dumps, the comparison.
+run: worktree (dump 'upstream' '0') (dump 'upstream' '1') (dump 'head' '0') (dump 'head' '1') compare
+
+# Record HEAD, branch and status, then the exit code and log of the build, both format checks, the unit tests and the identity run, in evidence.txt in the work folder.
+[script]
+evidence:
+    mkdir -p "$WORK"
+    out="$WORK/evidence.txt"
+    { echo "HEAD $(git -C "$REPO" rev-parse HEAD)"; echo "branch $(git -C "$REPO" rev-parse --abbrev-ref HEAD)"; echo "status:"; git -C "$REPO" status --short; } > "$out"
+    step() {
+        name="$1"
+        shift
+        status=0
+        "$@" > "$WORK/$name.log" 2>&1 || status=$?
+        echo "$name exit=$status log=$WORK/$name.log" >> "$out"
+    }
+    step build dotnet build "$REPO/src/SwarmUI.csproj"
+    step format-src dotnet format "$REPO/src/SwarmUI.csproj" --verify-no-changes
+    step format-tests dotnet format "$REPO/SwarmUITests/SwarmUITests.csproj" --verify-no-changes
+    step tests dotnet test "$REPO/SwarmUITests/SwarmUITests.csproj"
+    step identity just --justfile "$ID/justfile" run
+    cat "$out"
