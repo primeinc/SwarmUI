@@ -1,0 +1,3 @@
+Positive control: PR source 9106d29c9cd485cc6b009bee9b254f4159c55dfc
+Expected: preflight rejects LanPaint required-field omissions; static Qwen generator and CPU compositor pass.
+Pinned verification only, no production merge.
