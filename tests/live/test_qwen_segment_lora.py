@@ -340,7 +340,7 @@ def validate_dynamic_hook_on_sampler(graph, sampler_id, hook_node_id):
             raise AssertionError(f"{direction} HOOKS chain does not include selected adapter {hook_node_id}")
         index = chain.index(str(hook_node_id))
         markers = [int(n) for n in re.findall(
-            r"//hook=(\\d+)", item["inputs"].get("prompt", ""))]
+            r"//hook=(\d+)", item["inputs"].get("prompt", ""))]
         marker_seen = marker_seen or index in markers
     if not marker_seen:
         raise AssertionError("Selected dynamic LoRA has no matching //hook=N marker on sampler conditioning")
