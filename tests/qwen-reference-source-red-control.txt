@@ -1,0 +1,1 @@
+Pre-fix negative control for PromptImages[0] disabled source-reference reattachment. Source b19db877c89632136b301ea08faac5f88cb96068.
