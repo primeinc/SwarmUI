@@ -1,14 +1,19 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime;
 using System.Threading;
 using System.Threading.Tasks;
 using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
+using SixLabors.ImageSharp.Memory;
 using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Builtin_DynamicThresholding;
@@ -19,11 +24,176 @@ using SwarmUI.Utils;
 namespace SwarmUITests.Identity;
 
 /// <summary>Builds every main model class x option variant with only APIs the upstream commit and the trace branch share, and writes one line per case:
-/// label, sha256 of the generated workflow's text and of the exact text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (only the random SaveImage prefix replaced), and, for the input CreateWorkflow sent, sha256 of the image parameter metadata after unused parameters are removed together with the unused-parameter list (swarm_version left out) and its ExtraMeta keys other than debug_trace; or the error.
+/// label, sha256 of the generated workflow's text and of the exact text <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sends (only the random SaveImage prefix replaced), and, for the input CreateWorkflow sent, sha256 of the image parameter metadata after unused parameters are removed together with the unused-parameter list (swarm_version left out),
+/// its ExtraMeta keys other than debug_trace, and sha256 of the metadata text an image is saved with (<see cref="T2IParamInput.MetadataToString"/>) without swarm_version and the extra data's date and debug_trace; or the error.
+/// With IDENTITY_COST_OUT set, it then measures every <see cref="CostSampleStride"/>th case that built, one at a time on this thread, and writes its allocation and time (<see cref="MeasureCosts"/>).
 /// Fails if any error is not a generator rejection or fewer than 80% of the cases build. IDENTITY_OUT names the output file; IDENTITY_DEBUG=1 turns AddDebugData on. Skipped without IDENTITY_OUT; SwarmUITests/Identity/justfile runs it in this tree and in the upstream tree and compares the dumps.</summary>
 [Category("Identity")]
 public class GeneratorIdentity : SwarmUITest
 {
+    /// <summary>Counts the bytes the shared char and byte array pools allocate on one thread when a rent finds no pooled array.
+    /// Whether a rent finds one depends on the pool's trimming at each gen2 GC, which follows system memory pressure, not on the code measured (.NET 8 SharedArrayPool.Rent and Trim):
+    /// a Qwen Image 2.1 build's interpolated CreateNode keys (DefaultInterpolatedStringHandler rents from ArrayPool&lt;char&gt;.Shared) moved its count by 2 to 6 MiB from run to run.
+    /// ArrayPoolEventSource raises BufferAllocated(bufferId, bufferSize, poolId, bucketId, reason) on the renting thread, and poolId is the pool's GetHashCode.
+    /// Defined here because this file also builds alone in the upstream tree; WorkflowTraceBudgetTests uses it too.</summary>
+    public sealed class PoolRefills : EventListener
+    {
+        /// <summary>Pool IDs ArrayPoolEventSource reports for the shared char and byte pools.</summary>
+        public static readonly int CharPoolId = ArrayPool<char>.Shared.GetHashCode(), BytePoolId = ArrayPool<byte>.Shared.GetHashCode();
+
+        /// <summary>Managed thread whose refills are counted: the one that creates the listener.</summary>
+        public readonly int ThreadId = Environment.CurrentManagedThreadId;
+
+        /// <summary>Bytes of arrays the shared char and byte pools allocated on <see cref="ThreadId"/>.</summary>
+        public long Bytes;
+
+        /// <summary>Informational pool events (an array allocated or dropped by any pool) raised on <see cref="ThreadId"/>; each one also allocates its event arguments there.</summary>
+        public long Events;
+
+        /// <inheritdoc/>
+        protected override void OnEventSourceCreated(EventSource source)
+        {
+            if (source.Name == "System.Buffers.ArrayPoolEventSource")
+            {
+                EnableEvents(source, EventLevel.Informational);
+            }
+        }
+
+        /// <inheritdoc/>
+        protected override void OnEventWritten(EventWrittenEventArgs e)
+        {
+            if (Environment.CurrentManagedThreadId != ThreadId)
+            {
+                return;
+            }
+            Events++;
+            if (e.EventId != 2)
+            {
+                return;
+            }
+            int length = (int)e.Payload[1], pool = (int)e.Payload[2];
+            Bytes += pool == CharPoolId ? length * 2L : pool == BytePoolId ? length : 0;
+        }
+    }
+
+    /// <summary>Every this many cases that built, one has its cost measured (<see cref="MeasureCosts"/>).</summary>
+    public const int CostSampleStride = 32;
+
+    /// <summary>Measured runs per no-GC region (<see cref="MeasureCosts"/>).</summary>
+    public const int CostRepeats = 3;
+
+    /// <summary>Most no-GC regions <see cref="MeasureCosts"/> opens for one case before it gives up finding a run with full-length prefixes (<see cref="FullLengthPrefixes"/>).</summary>
+    public const int CostRegions = 4;
+
+    /// <summary>Bytes a no-GC region of <see cref="MeasureCosts"/> holds beyond its runs, for other threads' allocations.</summary>
+    public const long CostRegionSlack = 16L << 20;
+
+    /// <summary>Length of a SaveImage filename prefix ("SwarmUI_{Random.Shared.Next():X4}_", WGNodeData) whose random number has eight hex digits, as Random.Shared.Next() gives 15 times in 16.</summary>
+    public const int FullPrefixLength = 17;
+
+    /// <summary>Whether every random SaveImage filename prefix in a workflow is <see cref="FullPrefixLength"/> long: a shorter one shortens every text that holds it, and so the run's allocation.</summary>
+    public static bool FullLengthPrefixes(JObject workflow)
+    {
+        foreach (JProperty property in workflow.Properties())
+        {
+            if (property.Value["inputs"]?["filename_prefix"] is JValue prefix && $"{prefix}" is string text && text.StartsWith("SwarmUI_") && text.Length != FullPrefixLength)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Runs each sampled case once, then, inside a no-GC region (<see cref="GC.TryStartNoGCRegion(long)"/>), once to warm the shared array pools and <see cref="CostRepeats"/> times measured, alone on this thread with ImageSharp allocating every buffer (<see cref="SimpleGcMemoryAllocator"/>).
+    /// A measured run counts when every SaveImage prefix it wrote is full length (<see cref="FullLengthPrefixes"/>); a region with none is followed by another, up to <see cref="CostRegions"/>.
+    /// Returns one line per case: label, the bytes a counted run allocated on this thread, and the least milliseconds a measured run took.
+    /// No GC runs in the region, so no gen2 GC trims the pools (.NET 8 SharedArrayPool.Trim runs after each gen2 GC and, under high memory pressure, drops every thread's arrays) and every rent in a measured run finds an array.
+    /// Throws if a GC ran in a region, a pool allocated or dropped an array on this thread in a measured run (<see cref="PoolRefills.Events"/>), or counted runs allocated different byte counts: each is a measurement that does not hold for the code alone.
+    /// Counts repeat only with tiered compilation off (DOTNET_TieredCompilation=0, as the justfile runs it): a method tiering up between runs changes what they allocate.
+    /// A run is the dump's work for the case: build the input, generate, build the input again, create the workflow text to send, and write the saved metadata text.</summary>
+    public static List<string> MeasureCosts(List<(string Label, Func<T2IParamInput> Make)> cases, IEnumerable<int> sample, string[] features)
+    {
+        MemoryAllocator priorAllocator = SixLabors.ImageSharp.Configuration.Default.MemoryAllocator;
+        SixLabors.ImageSharp.Configuration.Default.MemoryAllocator = new SimpleGcMemoryAllocator();
+        List<string> result = [];
+        try
+        {
+            using PoolRefills refills = new();
+            foreach (int i in sample)
+            {
+                (JObject Workflow, string Sent) run()
+                {
+                    T2IParamInput input = cases[i].Make();
+                    JObject workflow = new WorkflowGenerator() { UserInput = input, Features = [.. features] }.Generate();
+                    T2IParamInput sendInput = cases[i].Make();
+                    string sent = ComfyUIAPIAbstractBackend.CreateWorkflow(sendInput, w => w, null, [.. features]);
+                    T2IParamInput.MetadataToString(sendInput.GenFullMetadataObject());
+                    return (workflow, sent);
+                }
+                long first = GC.GetAllocatedBytesForCurrentThread();
+                run();
+                first = GC.GetAllocatedBytesForCurrentThread() - first;
+                long regionBytes = (CostRepeats + 1) * first * 5 / 4 + CostRegionSlack;
+                List<long> bytes = [];
+                long ticks = long.MaxValue;
+                for (int region = 0; bytes.Count == 0; region++)
+                {
+                    if (region == CostRegions)
+                    {
+                        throw new InvalidOperationException($"No measured run of {cases[i].Label} in {CostRegions} no-GC regions wrote only full-length SaveImage prefixes.");
+                    }
+                    if (!GC.TryStartNoGCRegion(regionBytes))
+                    {
+                        throw new InvalidOperationException($"The runtime refused a no-GC region of {regionBytes} bytes to measure {cases[i].Label}.");
+                    }
+                    long events;
+                    int collections;
+                    try
+                    {
+                        collections = GC.CollectionCount(0);
+                        GC.WaitForPendingFinalizers();
+                        run();
+                        events = refills.Events;
+                        for (int repeat = 0; repeat < CostRepeats; repeat++)
+                        {
+                            long allocated = GC.GetAllocatedBytesForCurrentThread();
+                            long start = Stopwatch.GetTimestamp();
+                            (JObject workflow, string sent) = run();
+                            ticks = Math.Min(ticks, Stopwatch.GetTimestamp() - start);
+                            allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+                            if (FullLengthPrefixes(workflow) && FullLengthPrefixes(JObject.Parse(sent)))
+                            {
+                                bytes.Add(allocated);
+                            }
+                        }
+                        events = refills.Events - events;
+                        collections = GC.CollectionCount(0) - collections;
+                    }
+                    finally
+                    {
+                        if (GCSettings.LatencyMode == GCLatencyMode.NoGCRegion)
+                        {
+                            GC.EndNoGCRegion();
+                        }
+                    }
+                    if (collections != 0 || events != 0)
+                    {
+                        throw new InvalidOperationException($"Cost of {cases[i].Label} is not repeatable: {collections} GCs in a {regionBytes}-byte no-GC region, {events} pool allocations or drops in its measured runs.");
+                    }
+                }
+                if (bytes.Distinct().Count() != 1)
+                {
+                    throw new InvalidOperationException($"Cost of {cases[i].Label} is not repeatable: runs with full-length prefixes allocated {bytes.JoinString(", ")} bytes.");
+                }
+                result.Add($"{cases[i].Label}\t{bytes[0]}\t{ticks * 1000.0 / Stopwatch.Frequency:0.000}");
+            }
+        }
+        finally
+        {
+            SixLabors.ImageSharp.Configuration.Default.MemoryAllocator = priorAllocator;
+        }
+        return result;
+    }
     /// <summary>Folder the fake models are registered under.</summary>
     public static string Root;
 
@@ -235,7 +405,13 @@ public class GeneratorIdentity : SwarmUITest
                 ((JObject)metadata["sui_image_params"]).Remove("swarm_version");
                 string meta = Utilities.HashSHA256($"{metadata["sui_image_params"]}\n{metadata["sui_extra_data"]?["unused_parameters"]}".EncodeUTF8());
                 string extra = sendInput.ExtraMeta.Keys.Where(k => k != "debug_trace").Order().JoinString(",");
-                lines[i] = $"{cases[i].Label}\t{Utilities.HashSHA256(MaskedText(workflow.ToString()).EncodeUTF8())}\t{Utilities.HashSHA256(MaskedText(sent).EncodeUTF8())}\t{meta}\t{extra}";
+                if (metadata["sui_extra_data"] is JObject extraData)
+                {
+                    extraData.Remove("date");
+                    extraData.Remove("debug_trace");
+                }
+                string savedText = Utilities.HashSHA256(T2IParamInput.MetadataToString(metadata).EncodeUTF8());
+                lines[i] = $"{cases[i].Label}\t{Utilities.HashSHA256(MaskedText(workflow.ToString()).EncodeUTF8())}\t{Utilities.HashSHA256(MaskedText(sent).EncodeUTF8())}\t{meta}\t{extra}\t{savedText}";
             }
             catch (Exception ex)
             {
@@ -251,7 +427,15 @@ public class GeneratorIdentity : SwarmUITest
         });
         File.WriteAllLines(outPath, lines);
         List<string[]> built = [.. lines.Where(l => !l.Contains("\tERROR ")).Select(l => l.Split('\t'))];
-        TestContext.Out.WriteLine($"IDENTITY {cases.Count} cases, {cases.Count - built.Count} errors, debug={Program.ServerSettings.AddDebugData}, {traced} builds carry debug_trace, {built.Select(l => l[1]).Distinct().Count()} distinct workflow hashes, {built.Select(l => l[2]).Distinct().Count()} distinct sent hashes, {built.Select(l => l[3]).Distinct().Count()} distinct metadata hashes, written to {outPath}");
+        TestContext.Out.WriteLine($"IDENTITY {cases.Count} cases, {cases.Count - built.Count} errors, debug={Program.ServerSettings.AddDebugData}, {traced} builds carry debug_trace, {built.Select(l => l[1]).Distinct().Count()} distinct workflow hashes, {built.Select(l => l[2]).Distinct().Count()} distinct sent hashes, {built.Select(l => l[3]).Distinct().Count()} distinct metadata hashes, {built.Select(l => l[5]).Distinct().Count()} distinct saved metadata texts, written to {outPath}");
+        string costPath = Environment.GetEnvironmentVariable("IDENTITY_COST_OUT");
+        if (!string.IsNullOrWhiteSpace(costPath))
+        {
+            List<int> builtIndexes = [.. Enumerable.Range(0, cases.Count).Where(i => !lines[i].Contains("\tERROR "))];
+            List<string> costs = MeasureCosts(cases, builtIndexes.Where((_, n) => n % CostSampleStride == 0), features);
+            File.WriteAllLines(costPath, costs);
+            TestContext.Out.WriteLine($"COST {costs.Count} cases measured, written to {costPath}");
+        }
         Assert.That(crashes, Is.Empty, $"every error is a generator rejection (SwarmReadableErrorException); first: {crashes.FirstOrDefault()}");
         Assert.That(built.Count, Is.GreaterThanOrEqualTo(cases.Count * 8 / 10), "at least 80% of the cases build, so identical dumps compare real workflows");
     }
