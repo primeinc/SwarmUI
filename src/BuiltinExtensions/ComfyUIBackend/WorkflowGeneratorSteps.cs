@@ -2074,6 +2074,20 @@ public class WorkflowGeneratorSteps
                     {
                         throw new SwarmUserErrorException("Qwen Image 2.1 segment-only editing needs an Init Image or at least one Prompt Image. No source image was supplied.");
                     }
+                    // Comfy LoadImage and SwarmLoadImageB64 BOTH return RGB
+                    // as IMAGE (output 0) and inverse alpha as MASK (output 1).
+                    // Qwen 2.1's native edit path accepts source RGBA. Rejoin
+                    // those exact outputs before CropAndStitch, vision/VAE,
+                    // and LanPaint so a transparent PNG never loses its alpha.
+                    // JoinImageWithAlpha inverts MASK back to real alpha.
+                    JArray sourcePixels = originalSource.Path;
+                    string restoredAlpha = g.CreateNode("JoinImageWithAlpha", new JObject()
+                    {
+                        ["image"] = sourcePixels,
+                        ["alpha"] = NodePath(sourcePixels[0].ToString(), 1)
+                    });
+                    originalSource = originalSource.WithPath(NodePath(restoredAlpha, 0),
+                        mayHaveAlpha: true);
                     // If the caller requested a batch, replicate the original
                     // before the existing per-image segment isolation below.
                     // ImageBatch is a native Comfy node.
