@@ -2,7 +2,9 @@
 
 The live acceptance harness obtains a binary segmentation mask from the
 submitted Comfy graph. These helpers measure ON-vs-OFF differences inside
-the subject and strictly outside the mask's expanded blend margin.
+the subject and outside the explicitly requested expanded blend margin. A default 48px blind zone
+would hide real outside-mask edits on small images; live callers must supply
+the mask's configured grow/feather allowance.
 Source: ComfyUI MaskToImage / upstream InpaintStitchImproved masked blend.
 """
 from PIL import ImageChops, ImageFilter, ImageStat
@@ -20,7 +22,7 @@ def binary_mask(image):
     return image.convert("L").point(lambda n: 255 if n >= 128 else 0)
 
 
-def region_rms(first, second, mask, margin=48):
+def region_rms(first, second, mask, margin=0):
     if first.size != second.size or mask.size != first.size:
         raise AssertionError("Segment image and real detector mask dimensions must agree")
     if margin < 0:
