@@ -33,8 +33,8 @@ public class WorkflowTraceTests : SwarmUITest
     /// <summary>A named request variant.</summary>
     /// <param name="Name">Variant name.</param>
     /// <param name="Make">Builds the request for a given main model.</param>
-    /// <param name="CheckpointOnly">If true, only built with checkpoint-format main models: the variant exercises generator steps downstream of the loader, which the diffusion_models format does not change.</param>
-    public record class Variant(string Name, Func<T2IModel, Request> Make, bool CheckpointOnly = false);
+    /// <param name="Feature">If true, the variant exists to reach one feature's generator step, which <see cref="TestFeatureVariantsReachTheirSteps"/> checks.</param>
+    public record class Variant(string Name, Func<T2IModel, Request> Make, bool Feature = false);
 
     /// <summary>The option variants every model class is built with.</summary>
     public static List<Variant> Variants()
@@ -103,8 +103,9 @@ public class WorkflowTraceTests : SwarmUITest
         return profile.ToByteArray().Length;
     }
 
-    /// <summary>Checks the trace invariants for one traced build, appending violations to the list. Returns the stored summary's metadata length, and whether a JPEG save would store the use-PNG notice instead of the trace.</summary>
-    public static (int SummaryChars, bool JpegNotice) CheckTrace(Build build, string label, List<string> failures)
+    /// <summary>Checks the trace invariants for one traced build, appending violations to the list: every node has provenance, every removal is attributed, every sampler has a call record, the image record holds every sampler and fits one JPEG EXIF segment, and no raw prompt text, untracked node or dangling link appears.
+    /// Returns the stored image record's metadata length, and the record tier a JPEG save stores (0 is the most complete).</summary>
+    public static (int RecordChars, int JpegTier) CheckTrace(Build build, string label, List<string> failures)
     {
         WorkflowTrace trace = build.Trace;
         foreach (JProperty property in build.Workflow.Properties())
@@ -119,7 +120,7 @@ public class WorkflowTraceTests : SwarmUITest
             {
                 failures.Add($"{label}: node {property.Name} recorded as {record.ClassType} but is {classType}");
             }
-            if (record.Step < 0 || string.IsNullOrEmpty(record.Origin) || string.IsNullOrEmpty(record.Stage))
+            if (record.Step < 0 || record.Step >= trace.StepRecords.Count || string.IsNullOrEmpty(trace.StepRecords[record.Step].Name) || string.IsNullOrEmpty(record.Origin) || !record.Origin.Contains('@') || string.IsNullOrEmpty(record.Stage))
             {
                 failures.Add($"{label}: node {property.Name}:{classType} provenance incomplete (step={record.Step}, origin={record.Origin}, stage={record.Stage})");
             }
@@ -157,20 +158,31 @@ public class WorkflowTraceTests : SwarmUITest
         if (build.Input.ExtraMeta.GetValueOrDefault(WorkflowTrace.MetadataKey) is not JObject stored)
         {
             failures.Add($"{label}: no {WorkflowTrace.MetadataKey} in ExtraMeta");
-            return (0, false);
+            return (0, -1);
         }
-        int storedLength = T2IParamInput.MetadataToString(stored).Length;
         string format = WorkflowTrace.ImageFormatOf(build.Input);
         if (format != "PNG")
         {
             failures.Add($"{label}: the harness saves as {format}, the checks below expect the PNG default");
         }
-        if (!JToken.DeepEquals(stored, trace.Build()))
+        JObject summary = trace.Build();
+        if (summary["error"] is not null || stored["trace_error"] is not null)
         {
-            failures.Add($"{label}: the summary stored for a PNG image is not the full trace");
+            failures.Add($"{label}: the trace recorded an error: {summary["error"]}{stored["trace_error"]}");
         }
-        JObject jpeg = WorkflowTrace.ForImageMetadata(stored, "JPG", "[WorkflowTrace] request test");
-        bool jpegNotice = jpeg["omitted"] is not null;
+        if ($"{summary["workflow"]["sha256"]}" != Utilities.HashSHA256(build.WorkflowText.EncodeUTF8()))
+        {
+            failures.Add($"{label}: the summary's workflow sha256 is not the hash of the workflow text");
+        }
+        List<JObject> tiers = trace.RecordTiers(summary, WorkflowTrace.LogReference(build.Input));
+        if (!JToken.DeepEquals(stored, tiers[0]))
+        {
+            failures.Add($"{label}: the record stored for a PNG image is not the first record tier");
+        }
+        int storedLength = WorkflowTrace.RecordMetadataChars(stored);
+        int samplerNodes = build.Workflow.Properties().Count(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}"));
+        JObject jpeg = WorkflowTrace.ForImageMetadata(tiers, "JPG", WorkflowTrace.OtherMetadataChars(build.Input));
+        int jpegTier = tiers.FindIndex(t => ReferenceEquals(t, jpeg));
         build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = jpeg;
         int exifBytes = ExifBytes(build.Input.GenRawMetadata());
         build.Input.ExtraMeta[WorkflowTrace.MetadataKey] = stored;
@@ -178,27 +190,53 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: JPEG image metadata EXIF is {exifBytes} bytes, over one APP1 segment ({MaxSingleApp1ExifBytes})");
         }
-        if (stored.ToString(Formatting.None).Contains("zqx"))
+        foreach ((string name, JObject record) in new[] { ("PNG", stored), ("JPG", jpeg) })
         {
-            failures.Add($"{label}: raw prompt text appears in the stored trace summary");
+            int samplerEntries = (record["samplers"] as JArray)?.Count(s => !$"{s["node"]}".Contains("(removed by")) ?? 0;
+            if (samplerEntries < samplerNodes)
+            {
+                failures.Add($"{label}: {samplerNodes} sampler nodes but the {name} image record has {samplerEntries} sampler records");
+            }
+            if (record.ToString(Formatting.None).Contains("zqx"))
+            {
+                failures.Add($"{label}: raw prompt text appears in the {name} image record");
+            }
         }
-        JObject summary = stored;
+        foreach (JObject sampler in (stored["samplers"] as JArray ?? []).OfType<JObject>())
+        {
+            foreach (string id in (sampler["inputs"] as JObject ?? []).Properties().SelectMany(p => p.Value.Select(v => $"{v}")).Where(v => !v.StartsWith("...")))
+            {
+                if (stored["nodes"]?[id] is null)
+                {
+                    failures.Add($"{label}: sampler {sampler["node"]} chain node {id} has no entry in the image record's node table");
+                }
+            }
+        }
+        if (summary.ToString(Formatting.None).Contains("zqx"))
+        {
+            failures.Add($"{label}: raw prompt text appears in the full trace");
+        }
         if (summary["untracked_nodes"] is not null)
         {
             failures.Add($"{label}: summary lists untracked nodes {summary["untracked_nodes"].ToString(Formatting.None)}");
+        }
+        if (summary["dangling_links"] is not null)
+        {
+            failures.Add($"{label}: summary lists dangling links {summary["dangling_links"].ToString(Formatting.None)}");
         }
         int listed = (summary["nodes"] as JObject)?.Properties().Sum(p => (p.Value as JArray)?.Count ?? 0) ?? 0;
         if (listed != build.Workflow.Count)
         {
             failures.Add($"{label}: summary lists {listed} nodes but the workflow has {build.Workflow.Count}");
         }
-        int samplerNodes = build.Workflow.Properties().Count(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}"));
-        int samplerEntries = (summary["samplers"] as JArray)?.Count(s => !$"{s["node"]}".Contains("(removed by")) ?? 0;
-        if (samplerEntries < samplerNodes)
+        foreach (JProperty property in build.Workflow.Properties().Where(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}")))
         {
-            failures.Add($"{label}: {samplerNodes} sampler nodes but {samplerEntries} sampler records");
+            if (!trace.SamplerCalls.ContainsKey(property.Name))
+            {
+                failures.Add($"{label}: sampler {property.Name}:{property.Value["class_type"]} has no call record");
+            }
         }
-        return (storedLength, jpegNotice);
+        return (storedLength, jpegTier);
     }
 
     /// <summary>Outcome of one fitness case.</summary>
@@ -208,10 +246,10 @@ public class WorkflowTraceTests : SwarmUITest
     /// <param name="Failures">Trace invariant violations.</param>
     /// <param name="PlainTicks">Untraced build time.</param>
     /// <param name="TracedTicks">Traced build time.</param>
-    /// <param name="SummaryChars">Stored summary metadata length.</param>
-    /// <param name="JpegNotice">True if a JPEG save would store the use-PNG notice instead of the trace.</param>
+    /// <param name="RecordChars">Stored image record metadata length.</param>
+    /// <param name="JpegTier">Record tier a JPEG save stores, 0 being the most complete.</param>
     /// <param name="EditSteps">Name of the step behind each in-place edit the trace recorded.</param>
-    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int SummaryChars = 0, bool JpegNotice = false, List<string> EditSteps = null);
+    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int RecordChars = 0, int JpegTier = 0, List<string> EditSteps = null);
 
     /// <summary>For a request the untraced build throws on, checks that tracing changed nothing about the failure: same exception, same partial workflow, same input state, no trace stored in metadata, tracker detached, error recorded, and the partial trace still builds.</summary>
     public static void CheckFailureIsNoOp(Attempt plain, Attempt traced, string label, List<string> failures)
@@ -293,8 +331,8 @@ public class WorkflowTraceTests : SwarmUITest
         {
             failures.Add($"{label}: tracing changed the workflow");
         }
-        (int summaryChars, bool jpegNotice) = CheckTrace(traced, label, failures);
-        return new(label, null, null, failures, plainTicks, tracedTicks, summaryChars, jpegNotice, [.. traced.Trace.Edits.Select(e => traced.Trace.StepName(e.Step))]);
+        (int recordChars, int jpegTier) = CheckTrace(traced, label, failures);
+        return new(label, null, null, failures, plainTicks, tracedTicks, recordChars, jpegTier, [.. traced.Trace.Edits.Select(e => traced.Trace.StepName(e.Step))]);
     }
 
     /// <summary>The fitness function: every main model class, in both checkpoint and diffusion_models formats, across every option variant.
@@ -315,7 +353,7 @@ public class WorkflowTraceTests : SwarmUITest
             {
                 T2IModel model = ModelFor(modelClass, diffusionModels);
                 ModelFor(modelClass, diffusionModels, "-alt");
-                foreach (Variant variant in variants.Where(v => !diffusionModels || !v.CheckpointOnly))
+                foreach (Variant variant in variants)
                 {
                     cases.Add(($"{modelClass.ID} [{(diffusionModels ? "diffusion_models" : "checkpoint")}] {variant.Name}", () => variant.Make(model)));
                 }
@@ -330,11 +368,11 @@ public class WorkflowTraceTests : SwarmUITest
         int built = outcomes.Count(o => o.Rejected is null && o.Crash is null);
         static long ms(long ticks) => ticks * 1000 / Stopwatch.Frequency;
         TestContext.Out.WriteLine($"{cases.Count} cases in {timer.ElapsedMilliseconds} ms wall: {built} traced and checked, {rejected.Count} rejected by the generator ({rejected.Count(o => o.Failures.Count == 0)} confirmed identical with tracing on: same exception, partial workflow, input state), {upstreamCrashes.Count} upstream crashes ({upstreamCrashes.Count(o => o.Failures.Count == 0)} confirmed identical). Summed build time: untraced {ms(outcomes.Sum(o => o.PlainTicks))} ms, traced {ms(outcomes.Sum(o => o.TracedTicks))} ms.");
-        List<CaseOutcome> checkedOutcomes = [.. outcomes.Where(o => o.Rejected is null && o.Crash is null).OrderBy(o => o.SummaryChars)];
+        List<CaseOutcome> checkedOutcomes = [.. outcomes.Where(o => o.Rejected is null && o.Crash is null).OrderBy(o => o.RecordChars)];
         if (checkedOutcomes.Count > 0)
         {
             CaseOutcome largest = checkedOutcomes[^1];
-            TestContext.Out.WriteLine($"Stored summary size (PNG, full trace): median {checkedOutcomes[checkedOutcomes.Count / 2].SummaryChars} chars, max {largest.SummaryChars} chars ({largest.Label}); {checkedOutcomes.Count(o => o.JpegNotice)} over the {WorkflowTrace.MaxExifSummaryChars} char EXIF limit, which a JPEG or WebP save replaces with the use-PNG notice.");
+            TestContext.Out.WriteLine($"Image record size (PNG, tier 0): median {checkedOutcomes[checkedOutcomes.Count / 2].RecordChars} chars, max {largest.RecordChars} chars ({largest.Label}). JPEG/WebP record tier (limit {WorkflowTrace.MaxExifMetadataChars} chars of metadata): {checkedOutcomes.GroupBy(o => o.JpegTier).OrderBy(g => g.Key).Select(g => $"tier {g.Key} x{g.Count()}").JoinString(", ")}.");
             List<string> editSteps = [.. checkedOutcomes.SelectMany(o => o.EditSteps)];
             TestContext.Out.WriteLine($"In-place edits recorded: {editSteps.Count} in {checkedOutcomes.Count(o => o.EditSteps.Count > 0)} builds; by step: {editSteps.GroupBy(s => s).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count()}").JoinString(", ")}");
         }
@@ -346,7 +384,9 @@ public class WorkflowTraceTests : SwarmUITest
         {
             TestContext.Out.WriteLine($"REJECTED x{reason.Count()}: {reason.Key}\n    {reason.Select(o => o.Label).JoinString("\n    ")}");
         }
+        List<string> neverTraced = [.. MainModelClasses().Select(c => c.ID).Where(id => !outcomes.Any(o => o.Rejected is null && o.Crash is null && o.Label.StartsWith($"{id} [")))];
         Assert.That(built, Is.GreaterThan(0));
+        Assert.That(neverTraced, Is.Empty, "every registered main model class builds and is traced in at least one case");
         Assert.That(failures, Is.Empty, string.Join("\n", failures.Take(50)));
     }
 
@@ -366,6 +406,10 @@ public class WorkflowTraceTests : SwarmUITest
             Build traced = Generate(tracedRequest, true);
             Assert.That(ComparableText(traced.Workflow), Is.EqualTo(ComparableText(plain.Workflow)), variant.Name);
             CheckTrace(traced, $"bare {variant.Name}", failures);
+            if (traced.Trace.Build()["media"] is JObject media && media.Properties().Any(p => $"{p.Value}".Contains("#?")))
+            {
+                failures.Add($"bare {variant.Name}: a media record has no hash: {media.ToString(Formatting.None)}");
+            }
         }
         Assert.That(failures, Is.Empty, string.Join("\n", failures));
     }
@@ -388,6 +432,17 @@ public class WorkflowTraceTests : SwarmUITest
             link = node["inputs"]?["model"];
         }
         return chain;
+    }
+
+    /// <summary>Returns an image record sampler's input chain with each node ID replaced by its line in the record's node table: the chain as a reader of the image metadata sees it.</summary>
+    public static JArray RecordChain(JObject record, JObject sampler, string input)
+    {
+        JArray lines = [];
+        foreach (JToken id in sampler["inputs"]?[input] as JArray ?? [])
+        {
+            lines.Add(record["nodes"]?[$"{id}"]?.DeepClone() ?? id.DeepClone());
+        }
+        return lines;
     }
 
     /// <summary>Qwen Image 2.1 with a segment carrying a confined LoRA: the trace must report what the graph actually contains, checked against the graph by an independent walk.</summary>
@@ -431,10 +486,10 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(call["stage"].Value<string>(), Is.EqualTo(stage));
         JObject summary = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
         JObject samplerEntry = (JObject)((JArray)summary["samplers"]).Single(s => $"{s["node"]}".StartsWith($"{samplerId}:"));
-        string modelChainText = samplerEntry["inputs"]["model"].ToString(Formatting.None);
+        string modelChainText = RecordChain(summary, samplerEntry, "model").ToString(Formatting.None);
         Assert.That(modelChainText, Does.Contain($"{loraId}:LoraLoaderModelOnly"));
         Assert.That(modelChainText, Does.Contain("lora_name=test_alien_lora.safetensors"));
-        string positiveChainText = samplerEntry["inputs"]["positive"].ToString(Formatting.None);
+        string positiveChainText = RecordChain(summary, samplerEntry, "positive").ToString(Formatting.None);
         Assert.That(positiveChainText, Does.Contain($"{encId}:SwarmTextEncodeAdvanced"));
         Assert.That(positiveChainText, Does.Contain($"prompt=@{stage}.pos#{WorkflowTrace.Sha8(part.Prompt.Trim())}"));
         JObject segmentEntry = (JObject)((JArray)summary["segments"]).Single();
@@ -532,7 +587,7 @@ public class WorkflowTraceTests : SwarmUITest
                         {
                             failures.Add($"{label}: sampler {samplerId} input '{input.Name}' links to node {input.Value[0]}, which is not in the workflow: {workflow[samplerId].ToString(Formatting.None)}");
                         }
-                        string listed = entry["inputs"]?[input.Name]?.ToString(Formatting.None) ?? "";
+                        string listed = RecordChain(summary, entry, input.Name).ToString(Formatting.None);
                         List<(string, JObject)> walk = StageWalk(workflow, input.Value, trace, stage, false);
                         foreach ((string id, JObject node) in walk.Take(WorkflowTrace.MaxChainNodes))
                         {
@@ -614,7 +669,7 @@ public class WorkflowTraceTests : SwarmUITest
             Assert.That(edits, Does.Contain($"{markerEdit.NodeId}:{markerEdit.ClassType}.trace_test_marker: (absent) -> 1 by {modelGenStep}"));
             Assert.That(edits, Does.Contain($"9:SwarmSaveImageWS replaced outside CreateNode (was SwarmSaveImageWS) by {replaceStep}"));
             Assert.That(summary["untracked_nodes"].ToString(Formatting.None), Does.Contain($"900001:PreviewImage inserted by {insertStep}"));
-            Assert.That(summary["steps"].ToString(Formatting.None), Does.Contain($"{editStep} (WorkflowTraceTests.cs:").And.Contain($"edited=[{samplerId}]").And.Contain("inserted_without_createnode=[900001]"));
+            Assert.That(trace.Summary["steps"].ToString(Formatting.None), Does.Contain($"{editStep} (WorkflowTraceTests.cs:").And.Contain($"edited=[{samplerId}]").And.Contain("inserted_without_createnode=[900001]"));
             List<string> failures = [];
             CheckTrace(traced, "extension steps", failures);
             Assert.That(failures, Does.Contain("extension steps: node 900001:PreviewImage has no provenance record"), string.Join("\n", failures));
@@ -662,6 +717,18 @@ public class WorkflowTraceTests : SwarmUITest
                 string classType = $"{b.Workflow[id]["class_type"]}";
                 b.Workflow.Remove(id);
                 return $"node {id}:{classType} is gone from the workflow but no step is recorded as removing it";
+            },
+            ["dangling link"] = b =>
+            {
+                string id = samplerOf(b);
+                b.Workflow[id]["inputs"]["model"] = new JArray("999999", 0);
+                return "summary lists dangling links";
+            },
+            ["missing sampler call"] = b =>
+            {
+                string id = samplerOf(b);
+                b.Trace.SamplerCalls.Remove(id);
+                return $"sampler {id}:{b.Workflow[id]["class_type"]} has no call record";
             }
         };
         foreach ((string name, Func<Build, string> breakIt) in breaks)
@@ -674,19 +741,161 @@ public class WorkflowTraceTests : SwarmUITest
         }
     }
 
-    /// <summary>The graph sent and the graph a backend posts are recorded in the record the image metadata carries, for a PNG image (the full trace) and for a JPEG image over the EXIF limit (the notice); an input without a trace gets nothing.</summary>
+    /// <summary>A trace that throws while finishing never fails the generation: the workflow equals the untraced one, the parameter tracker is detached, and the image record carries the trace error.</summary>
+    [Test]
+    public void TestTraceFailureNeverFailsGeneration()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        const string poisonStep = "trace test: poison the trace";
+        List<WorkflowGenerator.WorkflowGenStep> steps = [.. WorkflowGenerator.Steps];
+        try
+        {
+            WorkflowGenerator.AddStep(g => g.Trace?.Loads.Add(null), 10.5, poisonStep);
+            Build plain = Generate(new() { Model = model, Prompt = PromptMarkerBase }, false);
+            Build traced = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true);
+            Assert.That(SameWorkflow(traced, plain), Is.True, "the workflow is unaffected");
+            Assert.That(traced.Input.ParamReadTracker, Is.Null);
+            JObject record = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
+            Assert.That($"{record["trace_error"]}", Does.StartWith("NullReferenceException"), record.ToString());
+        }
+        finally
+        {
+            WorkflowGenerator.Steps = steps;
+        }
+    }
+
+    /// <summary>With Prompt Images, each sampler's conditioning record matches the graph: every text encoder on a sampler's positive chain that has an images input is listed with that link, and the prompt image has a media record with its hash and size.
+    /// Qwen Image 2.1 and Qwen Image Edit Plus are built; at least one of them gives an encoder images, so the check is exercised.</summary>
+    [Test]
+    public void TestEncoderImageInputsMatchTheGraph()
+    {
+        int encodersWithImages = 0;
+        foreach (string classId in new[] { "qwen-image-2.1", "qwen-image-edit-plus" })
+        {
+            T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses[classId], true);
+            List<Image> promptImages = [PromptTestImage];
+            Build traced = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment}", Setters = { i => i.Set(T2IParamTypes.PromptImages, promptImages) } }, true);
+            JObject workflow = traced.Workflow;
+            WorkflowTrace trace = traced.Trace;
+            JObject summary = trace.Build();
+            int found = 0;
+            foreach (JObject sampler in ((JArray)summary["samplers"]).OfType<JObject>())
+            {
+                string samplerId = $"{sampler["node"]}".Before(':');
+                if (workflow[samplerId]?["inputs"]?["positive"] is not JArray positive)
+                {
+                    continue;
+                }
+                string chain = sampler["inputs"]["positive"].ToString(Formatting.None);
+                foreach ((string id, JObject node) in StageWalk(workflow, positive, trace, trace.Nodes[samplerId].Stage, false))
+                {
+                    if (node["inputs"]?["images"] is JArray images && WorkflowTrace.IsLink(images))
+                    {
+                        found++;
+                        Assert.That(chain, Does.Contain($"images<{images[0]}:{images[1]}"), $"{classId}: sampler {samplerId} encoder {id} image input");
+                    }
+                }
+            }
+            Assert.That(summary["media"].ToString(Formatting.None), Does.Contain("@promptimages.0#"), $"{classId}: the prompt image is a media record");
+            TestContext.Out.WriteLine($"{classId}: {found} text encoder image inputs on sampler conditioning chains");
+            encodersWithImages += found;
+        }
+        Assert.That(encodersWithImages, Is.GreaterThan(0), "at least one model gives its text encoder the prompt image");
+    }
+
+    /// <summary>The unsampler, a sampler made outside CreateKSampler, has a call record.</summary>
+    [Test]
+    public void TestUnsamplerHasCallRecord()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        Build traced = Generate(new() { Model = model, Prompt = PromptMarkerBase, Setters = { i => i.Set(T2IParamTypes.InitImage, InitTestImage), i => i.Set(T2IParamTypes.InitImageCreativity, 0.6), i => i.Set(T2IParamTypes.UnsamplerPrompt, "zqxunsample a road") } }, true);
+        string unsamplerId = traced.Workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "SwarmUnsampler").Name;
+        JObject call = traced.Trace.SamplerCalls[unsamplerId];
+        Assert.That(($"{call["kind"]}", call["steps"].Value<int>(), call["start_step"].Value<int>()), Is.EqualTo(("unsampler", traced.Workflow[unsamplerId]["inputs"]["steps"].Value<int>(), traced.Workflow[unsamplerId]["inputs"]["start_at_step"].Value<int>())));
+        List<string> failures = [];
+        CheckTrace(traced, "unsampler", failures);
+        Assert.That(failures, Is.Empty, string.Join("\n", failures));
+    }
+
+    /// <summary>A workflow that did not come from the generator has no prompt labels, so its description hashes every string that could be prompt text whatever its input name, and keeps model file names and short identifiers readable.</summary>
+    [Test]
+    public void TestExternalWorkflowHashesFreeText()
+    {
+        JObject workflow = new()
+        {
+            ["1"] = new JObject() { ["class_type"] = "PrimitiveString", ["inputs"] = new JObject() { ["value"] = "zqxfree a cat on a road" } },
+            ["2"] = new JObject() { ["class_type"] = "CheckpointLoaderSimple", ["inputs"] = new JObject() { ["ckpt_name"] = "test models/sdxl base.safetensors" } },
+            ["3"] = new JObject() { ["class_type"] = "KSampler", ["inputs"] = new JObject() { ["sampler_name"] = "euler", ["model"] = new JArray("2", 0), ["positive"] = new JArray("1", 0) } }
+        };
+        string text = WorkflowTrace.DescribeExternalWorkflow("custom", workflow.ToString()).ToString(Formatting.None);
+        Assert.That(text, Does.Not.Contain("zqxfree"));
+        Assert.That(text, Does.Contain($"#{WorkflowTrace.Sha8("zqxfree a cat on a road")}(23)"));
+        Assert.That(text, Does.Contain("test models/sdxl base.safetensors"));
+        Assert.That(text, Does.Contain("sampler_name=euler"));
+    }
+
+    /// <summary>Hashing text without copying it gives the same hash as hashing its UTF-8 bytes, at and around the cache threshold and the writer's buffer size, with surrogate pairs split across buffer boundaries and lone surrogates; long hashes are cached by reference.</summary>
+    [Test]
+    public void TestHashTextMatchesUtf8Hash()
+    {
+        foreach (int length in new[] { 0, 1, WorkflowTrace.CachedHashMinLength - 1, WorkflowTrace.CachedHashMinLength, WorkflowTrace.CachedHashMinLength + 1, 3 * 4096 + 7 })
+        {
+            char[] chars = new char[length];
+            for (int i = 0; i < length; i++)
+            {
+                chars[i] = (char)('a' + i % 26);
+            }
+            foreach (int at in new[] { 4095, 8191, length - 1 })
+            {
+                if (at > 0 && at < length)
+                {
+                    chars[at - 1] = '\uD83D';
+                    chars[at] = '\uDE00';
+                }
+            }
+            if (length > 100)
+            {
+                chars[50] = '\uD800';
+                chars[99] = 'é';
+            }
+            string text = new(chars);
+            Assert.That(WorkflowTrace.HashText(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())), $"length {length}");
+            Assert.That(WorkflowTrace.Sha8(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())[..8]), $"length {length}");
+        }
+        string longText = new('x', WorkflowTrace.CachedHashMinLength * 2);
+        string hash = WorkflowTrace.HashText(longText);
+        Assert.That(WorkflowTrace.LongHashes.TryGetValue(longText, out string cached) && cached == hash, Is.True, "a long text's hash is cached by reference");
+        byte[] bytes = longText.EncodeUTF8();
+        Assert.That(WorkflowTrace.HashBytes(bytes), Is.EqualTo(Utilities.HashSHA256(bytes)));
+    }
+
+    /// <summary>A parameter read with more than two distinct values lists them all, up to the cap.</summary>
+    [Test]
+    public void TestParameterReadsKeepDistinctValues()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        WorkflowTrace trace = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true).Trace;
+        foreach (int value in new[] { 11, 12, 11, 13 })
+        {
+            trace.OnParamRead(T2IParamTypes.Seed.Type, 7, (long)value, "section");
+        }
+        string read = $"{trace.Build()["params_read"][$"{T2IParamTypes.Seed.Type.ID}@7"]}";
+        Assert.That(read, Does.StartWith("11 (section) then 13 (section)").And.Contain("3 distinct values over 4 reads: 11 | 12 | 13"));
+    }
+
+    /// <summary>The graph sent and the graph a backend posts are recorded in the record the image metadata carries, for a PNG image (tier 0) and for a JPEG image over the metadata limit (the last tier), and in the full summary; an input without a trace gets nothing.</summary>
     [Test]
     public void TestSentAndPostedAreRecordedInTheStoredRecord()
     {
         T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
         bool priorDebug = Program.ServerSettings.AddDebugData;
-        int priorLimit = WorkflowTrace.MaxExifSummaryChars;
+        int priorLimit = WorkflowTrace.MaxExifMetadataChars;
         try
         {
             Program.ServerSettings.AddDebugData = true;
             foreach ((string format, int limit, bool notice) in new[] { ("PNG", priorLimit, false), ("JPG", 10, true) })
             {
-                WorkflowTrace.MaxExifSummaryChars = limit;
+                WorkflowTrace.MaxExifMetadataChars = limit;
                 T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase, Params = new() { ["imageformat"] = format } });
                 string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
                 JObject stored = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
@@ -710,7 +919,7 @@ public class WorkflowTraceTests : SwarmUITest
         finally
         {
             Program.ServerSettings.AddDebugData = priorDebug;
-            WorkflowTrace.MaxExifSummaryChars = priorLimit;
+            WorkflowTrace.MaxExifMetadataChars = priorLimit;
         }
     }
 
@@ -735,22 +944,28 @@ public class WorkflowTraceTests : SwarmUITest
                 }
             }
         }
-        string current = samplerId;
-        List<string> path = [current];
-        string compositeId = null;
-        while (current != "9")
+        Dictionary<string, (string From, string Input)> parent = new() { [samplerId] = (null, null) };
+        Queue<string> queue = new([samplerId]);
+        while (queue.Count > 0 && !parent.ContainsKey("9"))
         {
-            (string next, string inputName) = consumers[current].First();
-            if ($"{workflow[next]["class_type"]}".Contains("CompositeMasked"))
+            string current = queue.Dequeue();
+            foreach ((string next, string inputName) in consumers.GetValueOrDefault(current, []))
             {
-                Assert.That(inputName, Is.EqualTo("source"), "the redraw is the composite source");
-                compositeId = next;
+                if (parent.TryAdd(next, (current, inputName)))
+                {
+                    queue.Enqueue(next);
+                }
             }
-            current = next;
-            path.Add(current);
-            Assert.That(path.Count, Is.LessThan(20), string.Join(" > ", path));
         }
-        Assert.That(compositeId, Is.Not.Null, string.Join(" > ", path));
+        Assert.That(parent.ContainsKey("9"), Is.True, "the segment sampler reaches the final save");
+        List<(string Id, string Input)> path = [];
+        for (string at = "9"; at is not null; at = parent[at].From)
+        {
+            path.Insert(0, (at, parent[at].Input));
+        }
+        string pathText = string.Join(" > ", path.Select(p => $"{p.Id}:{workflow[p.Id]["class_type"]}"));
+        (string compositeId, string compositeInput) = path.First(p => $"{workflow[p.Id]["class_type"]}".Contains("CompositeMasked"));
+        Assert.That(compositeInput, Is.EqualTo("source"), $"the redraw is the composite source: {pathText}");
         (string destId, JObject dest) = Source(workflow, workflow[compositeId]["inputs"]["destination"]);
         Assert.That(trace.Nodes[destId].Stage, Is.Not.EqualTo("seg11"), "the redraw is pasted onto the pre-segment image");
         JObject summary = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
@@ -758,6 +973,17 @@ public class WorkflowTraceTests : SwarmUITest
         string downstream = samplerEntry["to_outputs"].ToString(Formatting.None);
         Assert.That(downstream, Does.Contain($"{compositeId}:"));
         Assert.That(downstream, Does.Contain("9:SwarmSaveImageWS"));
+        // The crop is recorded as metadata (no crop image is saved): its nodes, checked against the graph the composite reads.
+        JObject crop = (JObject)((JArray)summary["segments"]).Single()["crop"];
+        JObject compositeInputs = (JObject)workflow[compositeId]["inputs"];
+        Assert.That($"{crop["bounds"]}", Is.EqualTo($"{compositeInputs["x"][0]}"), "the crop's bounds node gives the paste-back position");
+        Assert.That($"{workflow[$"{crop["bounds"]}"]["class_type"]}", Is.EqualTo("SwarmMaskBounds"));
+        Assert.That($"{crop["pasted_by"]}", Does.Contain($"{compositeId}:"));
+        (string thresholdId, JObject threshold) = Source(workflow, workflow[$"{crop["bounds"]}"]["inputs"]["mask"]);
+        Assert.That($"{crop["threshold"]}", Is.EqualTo($"{threshold["inputs"]["min"]}..{threshold["inputs"]["max"]}"));
+        Assert.That(crop["grow"].Value<int>(), Is.EqualTo(workflow[$"{crop["bounds"]}"]["inputs"]["grow"].Value<int>()));
+        Assert.That($"{crop["scaled_to"]}", Is.EqualTo($"{workflow[$"{crop["scaled_image"]}"]["inputs"]["width"]}x{workflow[$"{crop["scaled_image"]}"]["inputs"]["height"]}"));
+        Assert.That($"{workflow[$"{crop["cropped_mask"]}"]["class_type"]}", Is.EqualTo("CropMask"));
     }
 
     /// <summary>Different options must produce visibly different records: stages, loads, and samplers.</summary>
@@ -786,26 +1012,44 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(segment.ParamReads["segmentmaskblur"].FirstSource, Is.EqualTo("default"));
     }
 
-    /// <summary>The image metadata carries the full trace for PNG at any size, and for JPEG and WebP when it fits the EXIF limit; over the limit, a JPEG or WebP save carries a notice to save as PNG, where the server log has the trace, and the workflow and model identity, never part of a trace.
-    /// The format comes from the input's Image Format parameter, read without marking it used.</summary>
+    /// <summary>The image record: the full trace goes to the log, and the image gets the record tier that fits its format.
+    /// Every tier names the samplers with their calls and the workflow identity; tier 0 lists each sampler-chain node with its provenance; lower tiers drop node detail, then the node table, in that order, saying what was omitted and where the full trace is.
+    /// PNG keeps tier 0 at any size; JPEG and WebP keep the first tier that fits the metadata limit. The format comes from the input's Image Format parameter, read without marking it used.</summary>
     [Test]
-    public void TestImageMetadataKeepsTheFullTraceOrSaysUsePng()
+    public void TestImageRecordTiers()
     {
         T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
         Lora("test_alien_lora");
         Build traced = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>" }, true);
-        JObject summary = traced.Trace.Build();
-        int fullLength = T2IParamInput.MetadataToString(summary).Length;
-        Assert.That(WorkflowTrace.ForImageMetadata(summary, "PNG", "[WorkflowTrace] request test", 10), Is.SameAs(summary), "PNG keeps the full trace over any limit");
-        Assert.That(WorkflowTrace.ForImageMetadata(summary, "JPG", "[WorkflowTrace] request test", fullLength), Is.SameAs(summary), "JPEG keeps the full trace when it fits");
-        foreach (string format in new[] { "JPG", "WEBP" })
+        WorkflowTrace trace = traced.Trace;
+        JObject summary = trace.Build();
+        string logReference = WorkflowTrace.LogReference(traced.Input);
+        List<JObject> tiers = trace.RecordTiers(summary, logReference);
+        Assert.That(tiers, Has.Count.EqualTo(4));
+        int samplers = ((JArray)summary["samplers"]).Count;
+        string samplerId = $"{((JArray)summary["samplers"])[0]["node"]}".Before(':');
+        foreach (JObject tier in tiers)
         {
-            JObject notice = WorkflowTrace.ForImageMetadata(summary, format, "[WorkflowTrace] request test", fullLength - 1);
-            Assert.That(notice.Properties().Select(p => p.Name), Is.EquivalentTo(new[] { "omitted", "workflow", "model" }), format);
-            Assert.That($"{notice["omitted"]["full_trace"]}", Does.Contain("save as PNG").And.Contain("[WorkflowTrace] request test"), format);
-            Assert.That($"{notice["omitted"]["reason"]}", Does.Contain($"{fullLength} characters").And.Contain(format), format);
-            Assert.That(JToken.DeepEquals(notice["workflow"], summary["workflow"]) && JToken.DeepEquals(notice["model"], summary["model"]), Is.True, format);
+            Assert.That(((JArray)tier["samplers"]).Count, Is.EqualTo(samplers), "every tier names every sampler");
+            Assert.That(tier["samplers"][0]["call"], Is.Not.Null, "every tier keeps the sampler calls");
+            Assert.That(JToken.DeepEquals(tier["workflow"], summary["workflow"]), Is.True, "every tier keeps the workflow identity");
+            Assert.That($"{tier["full_trace"]}", Does.Contain(logReference));
         }
+        Assert.That(tiers[0]["omitted"], Is.Null);
+        Assert.That($"{tiers[0]["nodes"][samplerId]}", Does.Contain(" by '").And.Contain("@WorkflowGenerator"), "tier 0 node lines carry the creating call site and step");
+        Assert.That($"{tiers[1]["nodes"][samplerId]}", Does.Not.Contain("=>"), "tier 1 nodes keep class, stage and provenance only");
+        Assert.That(tiers[2]["nodes"], Is.Null);
+        Assert.That(tiers[2]["decision_counts"], Is.Not.Null);
+        Assert.That(tiers.Skip(1).All(t => $"{t["omitted"]}".Contains(logReference)), Is.True, "lower tiers say what was omitted and where the full trace is");
+        Assert.That(tiers.Select(WorkflowTrace.RecordMetadataChars), Is.Ordered.Descending, "each tier is smaller than the one before");
+        int tier0 = WorkflowTrace.RecordMetadataChars(tiers[0]);
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "PNG", 0, 10), Is.SameAs(tiers[0]), "PNG keeps tier 0 over any limit");
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1000, tier0 + 1000), Is.SameAs(tiers[0]), "JPEG keeps tier 0 when it fits with the other metadata");
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "JPG", 1001, tier0 + 1000), Is.SameAs(tiers[1]), "the other metadata counts against the limit");
+        Assert.That(WorkflowTrace.ForImageMetadata(tiers, "WEBP", 0, 10), Is.SameAs(tiers[3]), "the last tier when nothing fits");
+        Assert.That(JToken.DeepEquals((JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey], tiers[0]), Is.True, "a PNG generation stores tier 0");
+        Assert.That(summary["nodes"], Is.Not.Null, "the full trace keeps every node by stage");
+        Assert.That(summary["params_read"], Is.Not.Null, "the full trace keeps every parameter read");
         Build jpegBuild = Generate(new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>", Params = new() { ["imageformat"] = "JPG" } }, true);
         Assert.That(WorkflowTrace.ImageFormatOf(jpegBuild.Input), Is.EqualTo("JPG"));
         Assert.That(jpegBuild.Input.ParamsQueried.Contains(T2IParamTypes.ImageFormat.Type.ID), Is.False, "reading the format did not mark Image Format as used");
@@ -831,7 +1075,7 @@ public class WorkflowTraceTests : SwarmUITest
             ["image2video+extend"] = t => t.Nodes.Values.Any(n => n.Stage.StartsWith("extend")) && byStep(t, "Extend Video"),
             ["seedvr"] = t => t.Nodes.Values.Any(n => n.Stage == "seedvr") && t.Loads.Any(l => l.Type == "SeedVR2")
         };
-        List<Variant> features = [.. Variants().Where(v => v.CheckpointOnly)];
+        List<Variant> features = [.. Variants().Where(v => v.Feature)];
         Assert.That(features.Select(v => v.Name), Is.EquivalentTo(reached.Keys), "every feature variant has a reach check");
         List<string> missed = [];
         foreach (Variant variant in features)

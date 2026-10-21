@@ -1,4 +1,8 @@
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
@@ -17,7 +21,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public const int FormatVersion = 1;
 
     /// <summary>ExtraMeta key the trace summary is stored under.</summary>
-    public const string MetadataKey = "debug_trace";
+    public const string MetadataKey = T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey;
 
     /// <summary>Node classes treated as samplers for chain analysis.</summary>
     public static HashSet<string> SamplerClasses = ["KSampler", "KSamplerAdvanced", "SwarmKSampler", "SamplerCustom", "SamplerCustomAdvanced", "SwarmUnsampler"];
@@ -28,15 +32,21 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Maximum number of nodes listed per sampler input chain.</summary>
     public static int MaxChainNodes = 48;
 
-    /// <summary>Longest summary, as <see cref="T2IParamInput.MetadataToString(JObject)"/> characters, stored in images whose format keeps metadata in EXIF (every format but PNG).
-    /// EXIF metadata is a UTF-16 UserComment that has to fit one 64 KiB JPEG APP1 segment together with the parameter metadata; PNG text chunks have no such limit.</summary>
-    public static int MaxExifSummaryChars = 20_000;
+    /// <summary>Most characters of image metadata text (parameters, extra data and the trace record together, as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for formats that keep metadata in EXIF (every format but PNG).
+    /// EXIF metadata is a UTF-16 UserComment, two bytes per character, that has to fit one 64 KiB JPEG APP1 segment; the margin covers fields Swarm adds when it saves the image.</summary>
+    public static int MaxExifMetadataChars = 30_000;
 
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
 
     /// <summary>Optional ComfyUI object_info data, used to add Comfy output types and to check link types.</summary>
     public JObject ObjectInfo;
+
+    /// <summary>If true, string inputs that could be prompt text (any whitespace, or longer than 64 characters) are hashed whatever their input name, except model file names. Set for workflows that did not come from the generator, which has no prompt labels for them.</summary>
+    public bool HashFreeText;
+
+    /// <summary>File extensions of model names, kept readable when <see cref="HashFreeText"/> is set.</summary>
+    public static readonly string[] ModelFileExtensions = [".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx"];
 
     /// <summary>A generator step or model-generation step that ran.</summary>
     public class StepRecord
@@ -178,14 +188,24 @@ public class WorkflowTrace(WorkflowGenerator gen)
 
         /// <summary>Number of reads.</summary>
         public int Count;
+
+        /// <summary>Distinct values returned, in first-read order, up to <see cref="MaxDistinctParamValues"/>.</summary>
+        public List<object> Values = [];
     }
+
+    /// <summary>Most distinct values kept per parameter read record.</summary>
+    public static int MaxDistinctParamValues = 8;
 
     /// <summary>A media input embedded into a node.</summary>
     /// <param name="Param">Source parameter name, eg 'initimage' or 'promptimages.0'.</param>
     /// <param name="Media">The media file.</param>
     /// <param name="Width">Embedded width, if resized.</param>
     /// <param name="Height">Embedded height, if resized.</param>
-    public record class MediaRecord(string Param, MediaFile Media, int? Width, int? Height);
+    public record class MediaRecord(string Param, MediaFile Media, int? Width, int? Height)
+    {
+        /// <summary>The formatted size and type, once <see cref="MediaSize(MediaRecord)"/> has computed it.</summary>
+        public string SizeText;
+    }
 
     /// <summary>A change to a node already in the workflow: an input set, changed or removed, its class changed, or the whole node replaced without CreateNode.</summary>
     /// <param name="Step">Index of the innermost step running when the change was made, or -1.</param>
@@ -289,11 +309,63 @@ public class WorkflowTrace(WorkflowGenerator gen)
         : Gen.IsRefinerStage ? "refiner"
         : "base";
 
+    /// <summary>Strings and byte arrays at least this long are hashed without copying them and have their hash cached in <see cref="LongHashes"/>.</summary>
+    public const int CachedHashMinLength = 4096;
+
+    /// <summary>SHA-256 hex of long strings and byte arrays, by reference, so base64 media, image bytes and workflow texts are hashed once however often the trace names them.
+    /// Keyed by reference: strings are immutable, and Swarm replaces a media file's RawData array rather than writing into it.</summary>
+    public static readonly ConditionalWeakTable<object, string> LongHashes = new();
+
+    /// <summary>Returns the SHA-256 hex of a string's UTF-8 bytes, the same as <c>Utilities.HashSHA256(text.EncodeUTF8())</c>. Long strings are encoded through a small buffer rather than copied, and their hash is cached.</summary>
+    public static string HashText(string text)
+    {
+        text ??= "";
+        if (text.Length < CachedHashMinLength)
+        {
+            return Utilities.HashSHA256(text.EncodeUTF8());
+        }
+        return LongHashes.GetValue(text, static t => HashWritten(writer => writer.Write((string)t)));
+    }
+
+    /// <summary>Returns the SHA-256 hex of some bytes, cached for long arrays.</summary>
+    public static string HashBytes(byte[] data)
+    {
+        data ??= [];
+        if (data.Length < CachedHashMinLength)
+        {
+            return Utilities.HashSHA256(data);
+        }
+        return LongHashes.GetValue(data, static d => Utilities.HashSHA256((byte[])d));
+    }
+
     /// <summary>Returns the first 8 hex chars of the SHA-256 of some text.</summary>
-    public static string Sha8(string text) => Utilities.HashSHA256((text ?? "").EncodeUTF8())[..8];
+    public static string Sha8(string text) => HashText(text)[..8];
 
     /// <summary>Returns the first 8 hex chars of the SHA-256 of some bytes.</summary>
-    public static string Sha8(byte[] data) => Utilities.HashSHA256(data ?? [])[..8];
+    public static string Sha8(byte[] data) => HashBytes(data)[..8];
+
+    /// <summary>Returns the SHA-256 hex of the text a writer callback writes, as UTF-8 without a byte order mark (<see cref="StringConversionHelper.UTF8Encoding"/>, as <c>EncodeUTF8</c> uses), encoding through a small buffer instead of building the text or its bytes.</summary>
+    public static string HashWritten(Action<TextWriter> write)
+    {
+        using SHA256 sha = SHA256.Create();
+        using (CryptoStream crypto = new(Stream.Null, sha, CryptoStreamMode.Write))
+        using (StreamWriter writer = new(crypto, StringConversionHelper.UTF8Encoding, 4096))
+        {
+            write(writer);
+        }
+        return Utilities.BytesToHex(sha.Hash);
+    }
+
+    /// <summary>Returns the SHA-256 of a token's indented JSON text as UTF-8, the same as hashing <c>token.ToString()</c>, without building the text.</summary>
+    public static string HashIndentedJson(JToken token)
+    {
+        return HashWritten(writer =>
+        {
+            JsonTextWriter json = new(writer) { Formatting = Formatting.Indented };
+            token.WriteTo(json);
+            json.Flush();
+        });
+    }
 
     /// <summary>Formats a workflow path (eg ["4", 0]) as "4:0".</summary>
     public static string PathText(JArray path) => path is null ? null : path.Count == 2 ? $"{path[0]}:{path[1]}" : path.ToString(Formatting.None);
@@ -316,6 +388,17 @@ public class WorkflowTrace(WorkflowGenerator gen)
         record.LastValue = value;
         record.LastSource = source;
         record.Count++;
+        if (record.Values.Count < MaxDistinctParamValues)
+        {
+            foreach (object seen in record.Values)
+            {
+                if (Equals(seen, value))
+                {
+                    return;
+                }
+            }
+            record.Values.Add(value);
+        }
     }
 
     /// <summary>Records a <see cref="WGNodeData"/>, read when the trace finishes.</summary>
@@ -378,9 +461,17 @@ public class WorkflowTrace(WorkflowGenerator gen)
     {
         JObject workflow = Gen.Workflow;
         StepRecord record = step >= 0 ? StepRecords[step] : null;
-        foreach (string id in LiveNodes.ToList())
+        List<string> gone = null;
+        foreach (string id in LiveNodes)
         {
             if (!workflow.ContainsKey(id))
+            {
+                (gone ??= []).Add(id);
+            }
+        }
+        if (gone is not null)
+        {
+            foreach (string id in gone)
             {
                 LiveNodes.Remove(id);
                 Snapshots.Remove(id);
@@ -398,7 +489,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 continue;
             }
             string id = property.Name;
-            string classType = $"{node["class_type"]}";
+            string classType = node["class_type"]?.ToString() ?? "";
             JObject inputs = node["inputs"] as JObject;
             bool created = CreatedSinceCheckpoint.Contains(id);
             if (!Snapshots.TryGetValue(id, out NodeSnapshot prior))
@@ -483,7 +574,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             Step = step,
             Stage = CurrentStage,
             Origin = Origin(member, file, line),
-            Compat = Gen.FinalLoadedModel?.ModelClass?.CompatClass?.ID,
+            Compat = LoadStack.Count > 0 ? Loads[LoadStack[^1]].Compat : Gen.FinalLoadedModel?.ModelClass?.CompatClass?.ID,
             Load = LoadStack.Count > 0 ? LoadStack[^1] : -1,
             Overwrites = overwrites
         };
@@ -634,6 +725,23 @@ public class WorkflowTrace(WorkflowGenerator gen)
         });
     }
 
+    /// <summary>Records the crop made for the segment part being processed: its bounds, cropped mask, masked latent and scaled image nodes, and the grow amount. <see cref="Build"/> reads the threshold, aspect, scale size and paste-back nodes from the graph.</summary>
+    public void SegmentCrop(WorkflowGenerator.ImageMaskCropData crop, int grow)
+    {
+        if (crop is null || SegmentParts.Count == 0 || SegmentParts[^1] is not JObject segment)
+        {
+            return;
+        }
+        segment["crop"] = new JObject()
+        {
+            ["bounds"] = crop.BoundsNode,
+            ["cropped_mask"] = crop.CroppedMask,
+            ["masked_latent"] = crop.MaskedLatent,
+            ["scaled_image"] = crop.ScaledImage,
+            ["grow"] = grow
+        };
+    }
+
     /// <summary>Records a connection rewire.</summary>
     public void Rewired(JArray from, JArray to, int count)
     {
@@ -664,16 +772,183 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the summary for the image format (<see cref="ForImageMetadata"/>) into the input's ExtraMeta.</summary>
+    /// <summary>The record stored in the image metadata, once finished.</summary>
+    public JObject Record;
+
+    /// <summary>Returns how the server debug log labels the trace of an input.</summary>
+    public static string LogReference(T2IParamInput input) => $"[WorkflowTrace] request {input.UserRequestId}";
+
+    /// <summary>Finishes the trace after generation: logs the full summary plus detail, and stores the image record (<see cref="RecordTiers"/>, chosen by <see cref="ForImageMetadata"/>) in the input's ExtraMeta.</summary>
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
         Checkpoint(InnermostStep);
         Summary = Build();
-        string logReference = $"[WorkflowTrace] request {Gen.UserInput.UserRequestId}";
+        string logReference = LogReference(Gen.UserInput);
         Logs.Debug($"{logReference}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
-        Gen.UserInput.ExtraMeta[MetadataKey] = ForImageMetadata(Summary, ImageFormatOf(Gen.UserInput), logReference);
+        Record = ForImageMetadata(RecordTiers(Summary, logReference), ImageFormatOf(Gen.UserInput), OtherMetadataChars(Gen.UserInput));
+        Gen.UserInput.ExtraMeta[MetadataKey] = Record;
     }
+
+    /// <summary>Records that <see cref="Finish"/> threw: logs the error, detaches the parameter tracker, and stores the error as the image record. The generated workflow is unaffected.</summary>
+    public void FinishFailed(Exception ex)
+    {
+        Gen.UserInput.ParamReadTracker = null;
+        Logs.Error($"{LogReference(Gen.UserInput)}: the trace could not be finished; the generation is unaffected: {ex.ReadableString()}");
+        Gen.UserInput.ExtraMeta[MetadataKey] = new JObject()
+        {
+            ["version"] = FormatVersion,
+            ["trace_error"] = $"{ex.GetType().Name}: {ex.Message}"
+        };
+    }
+
+    /// <summary>Returns the length of an input's image metadata text without the trace record: its parameter metadata and other extra data, built without side effects (no model hashing).</summary>
+    public static int OtherMetadataChars(T2IParamInput input)
+    {
+        JObject extra = input.BuildExtraDataJObject();
+        extra.Remove(MetadataKey);
+        JObject metadata = new()
+        {
+            ["sui_image_params"] = input.GenParameterMetadata() ?? [],
+            ["sui_extra_data"] = extra
+        };
+        return T2IParamInput.MetadataToString(metadata).Length;
+    }
+
+    /// <summary>Keys of the full summary copied as they are into the image record.</summary>
+    public static readonly string[] RecordKeys = ["error", "events", "model_loads", "loras", "segments", "removed", "rewires", "edits", "untracked_nodes", "dangling_links", "type_errors", "undeclared_inputs", "classes_missing_from_object_info", "prompts", "media"];
+
+    /// <summary>Returns the node ID a description line or output path entry starts with ("id:Class..."), or null for a truncation marker.</summary>
+    public static string LineNodeId(string line) => line is null || line.StartsWith("...") || !line.Contains(':') ? null : line.Before(':');
+
+    /// <summary>Builds the image record from the full summary, most complete first; <see cref="ForImageMetadata"/> keeps the first that fits the format. Every tier keeps the workflow identity (sent and posted hashes), the model loads and LoRAs, and every sampler with its call arguments and the node IDs of its input chains and output paths.
+    /// Tier 1 adds each of those nodes with its provenance, inputs and output types, the segments with their crops, graph decisions made outside CreateNode, failed checks, prompt and media placeholders, and section parameter reads.
+    /// Tier 2 reduces the nodes to class, stage and provenance. Tier 3 drops the node table and keeps decision counts. Tier 4 keeps only the samplers' nodes and calls. The full summary is in the server log under the log reference.</summary>
+    public List<JObject> RecordTiers(JObject summary, string logReference)
+    {
+        JObject full = new()
+        {
+            ["version"] = FormatVersion,
+            ["full_trace"] = $"server debug log, '{logReference}'",
+            ["workflow"] = summary["workflow"]?.DeepClone(),
+            ["model"] = summary["model"]?.DeepClone()
+        };
+        foreach (string key in RecordKeys)
+        {
+            if (summary[key] is JToken value)
+            {
+                full[key] = value.DeepClone();
+            }
+        }
+        List<string> referenced = [];
+        void reference(string id)
+        {
+            if (id is not null && !referenced.Contains(id))
+            {
+                referenced.Add(id);
+            }
+        }
+        JArray samplers = [];
+        JArray brief = [];
+        foreach (JObject sampler in (summary["samplers"] as JArray ?? []).OfType<JObject>())
+        {
+            string node = $"{sampler["node"]}";
+            string samplerId = LineNodeId(node);
+            reference(samplerId);
+            string classType = samplerId is not null && Gen.Workflow[samplerId] is JObject samplerNode ? $"{samplerNode["class_type"]}" : null;
+            JObject entry = new() { ["node"] = classType is null ? node : $"{samplerId}:{classType}" };
+            JObject briefEntry = new() { ["node"] = entry["node"].DeepClone() };
+            if (sampler["call"] is JToken call)
+            {
+                entry["call"] = call.DeepClone();
+                briefEntry["call"] = call.DeepClone();
+            }
+            if (sampler["inputs"] is JObject inputs)
+            {
+                JObject ids = [];
+                foreach (JProperty input in inputs.Properties())
+                {
+                    JArray chain = [];
+                    foreach (JToken line in input.Value as JArray ?? [])
+                    {
+                        string id = LineNodeId($"{line}");
+                        reference(id);
+                        chain.Add(id ?? $"{line}");
+                    }
+                    ids[input.Name] = chain;
+                }
+                entry["inputs"] = ids;
+            }
+            if (sampler["to_outputs"] is JArray paths)
+            {
+                foreach (JToken path in paths)
+                {
+                    foreach (string step in $"{path}".Split(" > "))
+                    {
+                        reference(LineNodeId(step));
+                    }
+                }
+                entry["to_outputs"] = paths.DeepClone();
+            }
+            else if (sampler["to_outputs"] is JToken none)
+            {
+                entry["to_outputs"] = none.DeepClone();
+            }
+            samplers.Add(entry);
+            brief.Add(briefEntry);
+        }
+        full["samplers"] = samplers;
+        JObject nodes = [], briefNodes = [];
+        foreach (string id in referenced)
+        {
+            if (Gen.Workflow[id] is not JObject node)
+            {
+                continue;
+            }
+            nodes[id] = NodeLines.GetValueOrDefault(id) ?? DescribeNode(id, node, null);
+            NodeRecord record = Nodes.GetValueOrDefault(id);
+            briefNodes[id] = record is null ? $"{id}:{node["class_type"]} <untracked>" : $"{id}:{node["class_type"]}@{record.Stage} <{Provenance(record)}>";
+        }
+        full["nodes"] = nodes;
+        JObject sectionReads = [];
+        foreach (JProperty read in (summary["params_read"] as JObject ?? []).Properties().Where(p => p.Name.Contains('@')))
+        {
+            sectionReads[read.Name] = read.Value.DeepClone();
+        }
+        if (sectionReads.Count > 0)
+        {
+            full["params_read_by_section"] = sectionReads;
+        }
+        JObject reduced = (JObject)full.DeepClone();
+        reduced["nodes"] = briefNodes;
+        reduced["omitted"] = $"node inputs and output types, to fit the image metadata; the full trace is in the {full["full_trace"]}";
+        JObject counted = (JObject)reduced.DeepClone();
+        counted.Remove("nodes");
+        JObject counts = [];
+        foreach (string key in new[] { "removed", "rewires", "edits" })
+        {
+            if (counted[key] is JArray list)
+            {
+                counts[key] = list.Count;
+                counted.Remove(key);
+            }
+        }
+        counted["decision_counts"] = counts;
+        counted["omitted"] = $"the node table and the lists of removals, rewires and edits, to fit the image metadata; the full trace is in the {full["full_trace"]}";
+        JObject minimal = new()
+        {
+            ["version"] = FormatVersion,
+            ["full_trace"] = full["full_trace"].DeepClone(),
+            ["workflow"] = full["workflow"]?.DeepClone(),
+            ["model"] = full["model"]?.DeepClone(),
+            ["samplers"] = brief,
+            ["omitted"] = $"everything but the samplers' nodes and calls, to fit the image metadata; the full trace is in the {full["full_trace"]}"
+        };
+        return [full, reduced, counted, minimal];
+    }
+
+    /// <summary>Node description lines of the last <see cref="Build"/>, by node ID.</summary>
+    public Dictionary<string, string> NodeLines = [];
 
     /// <summary>Returns the format images of this input are saved in, as Session.ApplyMetadata picks it, without marking any parameter as used.</summary>
     public static string ImageFormatOf(T2IParamInput input)
@@ -685,37 +960,35 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return input.SourceSession?.User?.Settings?.FileFormat?.ImageFormat ?? Program.ServerSettings?.DefaultUser?.FileFormat?.ImageFormat ?? "PNG";
     }
 
-    /// <summary>Returns what to store in the image metadata for a summary: the full summary for PNG, and for EXIF formats when it fits <see cref="MaxExifSummaryChars"/>.
-    /// Otherwise a notice saying to save as PNG for the full trace and where the server log has it, with the workflow and model identity, so the image can still be matched to the log.</summary>
-    /// <param name="summary">The full summary.</param>
-    /// <param name="format">Image format, as <see cref="T2IParamTypes.ImageFormat"/> values ("PNG", "JPG", "WEBP", ...).</param>
-    /// <param name="logReference">How the server debug log labels this trace.</param>
-    /// <param name="maxExifChars">Limit for EXIF formats, or -1 for <see cref="MaxExifSummaryChars"/>.</param>
-    public static JObject ForImageMetadata(JObject summary, string format, string logReference, int maxExifChars = -1)
+    /// <summary>Returns the length a record adds to image metadata text, nested where Swarm stores it (sui_extra_data.debug_trace).</summary>
+    public static int RecordMetadataChars(JObject record)
     {
-        if (maxExifChars < 0)
+        return T2IParamInput.MetadataToString(new JObject() { ["sui_extra_data"] = new JObject() { [MetadataKey] = record } }).Length;
+    }
+
+    /// <summary>Returns the record tier to store in an image's metadata: the first for PNG, whose text chunks have no size limit; for formats that keep metadata in EXIF, the first tier that fits <see cref="MaxExifMetadataChars"/> together with the rest of the metadata, else the last tier.</summary>
+    /// <param name="tiers">Record tiers, most complete first (<see cref="RecordTiers"/>).</param>
+    /// <param name="format">Image format, as <see cref="T2IParamTypes.ImageFormat"/> values ("PNG", "JPG", "WEBP", ...).</param>
+    /// <param name="otherChars">Length of the rest of the image metadata text (<see cref="OtherMetadataChars"/>).</param>
+    /// <param name="maxChars">Limit for EXIF formats, or -1 for <see cref="MaxExifMetadataChars"/>.</param>
+    public static JObject ForImageMetadata(List<JObject> tiers, string format, int otherChars, int maxChars = -1)
+    {
+        if (maxChars < 0)
         {
-            maxExifChars = MaxExifSummaryChars;
+            maxChars = MaxExifMetadataChars;
         }
         if (format == "PNG")
         {
-            return summary;
+            return tiers[0];
         }
-        int length = T2IParamInput.MetadataToString(summary).Length;
-        if (length <= maxExifChars)
+        foreach (JObject tier in tiers)
         {
-            return summary;
-        }
-        return new JObject()
-        {
-            ["omitted"] = new JObject()
+            if (otherChars + RecordMetadataChars(tier) <= maxChars)
             {
-                ["reason"] = $"the trace is {length} characters; {format} images keep metadata in EXIF, which holds {maxExifChars}",
-                ["full_trace"] = $"save as PNG to keep the full trace in the image; the server debug log has it as '{logReference}'"
-            },
-            ["workflow"] = summary["workflow"]?.DeepClone(),
-            ["model"] = summary["model"]?.DeepClone()
-        };
+                return tier;
+            }
+        }
+        return tiers[^1];
     }
 
     /// <summary>The "posted" value of a workflow record until a ComfyUI backend posts it through <see cref="ComfyUIAPIAbstractBackend.AwaitJobLive"/>.</summary>
@@ -736,25 +1009,53 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return records;
     }
 
-    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record.</summary>
-    /// <param name="workflow">The final workflow JSON text.</param>
-    /// <param name="changedAfterGenerate">True if anything rewrote the workflow text after the generator returned it.</param>
-    public void RecordSent(string workflow, bool changedAfterGenerate)
+    /// <summary>Returns the "${...}" placeholders in a workflow text, in order of first appearance.</summary>
+    public static List<string> Placeholders(string text)
     {
-        string sha = Utilities.HashSHA256(workflow.EncodeUTF8());
+        List<string> result = [];
+        int start = text.IndexOf("${", StringComparison.Ordinal);
+        while (start >= 0)
+        {
+            int end = text.IndexOf('}', start + 2);
+            if (end < 0)
+            {
+                break;
+            }
+            string placeholder = text[start..(end + 1)];
+            if (!result.Contains(placeholder))
+            {
+                result.Add(placeholder);
+            }
+            start = text.IndexOf("${", end + 1, StringComparison.Ordinal);
+        }
+        return result;
+    }
+
+    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record: its hash and length, whether anything rewrote the generator's text, and which "${...}" placeholders the rewrite filled (such as uploaded image names).</summary>
+    /// <param name="workflow">The final workflow JSON text.</param>
+    /// <param name="generated">The workflow text the generator returned.</param>
+    public void RecordSent(string workflow, string generated)
+    {
+        string sha = HashText(workflow);
         List<JObject> records = WorkflowRecords(Gen.UserInput, Summary);
         if (records.Count == 0)
         {
             return;
         }
+        bool rewritten = workflow != generated;
+        List<string> filled = rewritten ? [.. Placeholders(generated).Except(Placeholders(workflow))] : [];
         foreach (JObject info in records)
         {
             info["sent_sha256"] = sha;
             info["sent_length"] = workflow.Length;
-            info["rewritten_after_generate"] = changedAfterGenerate;
+            info["rewritten_after_generate"] = rewritten;
+            if (rewritten)
+            {
+                info["placeholders_filled"] = new JArray(filled.Select(p => (JToken)p));
+            }
             info["posted"] = NotPosted;
         }
-        Logs.Debug($"[WorkflowTrace] request {Gen.UserInput.UserRequestId}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={changedAfterGenerate}");
+        Logs.Debug($"{LogReference(Gen.UserInput)}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={rewritten}{(rewritten ? $" placeholders_filled=[{filled.JoinString(", ")}]" : "")}");
     }
 
     /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record. Does nothing for an input without one.</summary>
@@ -767,7 +1068,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return;
         }
-        string sha = Utilities.HashSHA256(workflow.EncodeUTF8());
+        string sha = HashText(workflow);
         bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
         info["posted"] = new JObject()
         {
@@ -779,13 +1080,16 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Logs.Debug($"[WorkflowTrace] request {input.UserRequestId}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
     }
 
-    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it for the image format (<see cref="ForImageMetadata"/>) into the input's ExtraMeta.</summary>
+    /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it in the input's ExtraMeta, without the node list when the image format cannot hold it (<see cref="ForImageMetadata"/>).</summary>
     public static void RecordExternalWorkflow(T2IParamInput input, string source, string workflow)
     {
         JObject summary = DescribeExternalWorkflow(source, workflow);
-        string logReference = $"[WorkflowTrace] request {input.UserRequestId}";
+        string logReference = LogReference(input);
         Logs.Debug($"{logReference} ({source} workflow):\n{summary.ToString(Formatting.Indented)}");
-        input.ExtraMeta[MetadataKey] = ForImageMetadata(summary, ImageFormatOf(input), logReference);
+        JObject withoutNodes = (JObject)summary.DeepClone();
+        withoutNodes.Remove("nodes");
+        withoutNodes["omitted"] = $"the node list, to fit the image metadata; the full description is in the server debug log, '{logReference}'";
+        input.ExtraMeta[MetadataKey] = ForImageMetadata([summary, withoutNodes], ImageFormatOf(input), OtherMetadataChars(input));
     }
 
     /// <summary>Builds a trace summary for a workflow that did not come from the generator (custom or raw workflows).</summary>
@@ -797,7 +1101,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["workflow"] = new JObject()
             {
                 ["source"] = source,
-                ["sent_sha256"] = Utilities.HashSHA256((workflow ?? "").EncodeUTF8()),
+                ["sent_sha256"] = HashText(workflow),
                 ["sent_length"] = workflow?.Length ?? 0,
                 ["posted"] = NotPosted
             }
@@ -805,7 +1109,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         try
         {
             JObject parsed = workflow.ParseToJson();
-            WorkflowTrace reader = new(null);
+            WorkflowTrace reader = new(null) { HashFreeText = true };
             JArray nodes = [];
             foreach (JProperty property in parsed.Properties())
             {
@@ -990,6 +1294,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return $"{labels.Select(l => $"@{l}").JoinString("=")}#{Sha8(value)}";
         }
+        if (HashFreeText && (value.Length > 64 || value.Any(char.IsWhiteSpace)) && !ModelFileExtensions.Any(e => value.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"#{Sha8(value)}({value.Length})";
+        }
         if (PromptInputNames.Contains(key))
         {
             foreach ((string text, List<string> textLabels) in PromptLabels)
@@ -1008,17 +1316,21 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return value;
     }
 
-    /// <summary>Returns " WxH mime" for a media record, reading the image size if it was not resized.</summary>
+    /// <summary>Returns " WxH mime" for a media record, reading the image size from its header if it was not resized. Computed once per record.</summary>
     public static string MediaSize(MediaRecord media)
     {
+        if (media.SizeText is not null)
+        {
+            return media.SizeText;
+        }
         int? width = media.Width, height = media.Height;
-        if ((width is null || height is null) && media.Media is ImageFile img && img.Type.MetaType == MediaMetaType.Image)
+        if ((width is null || height is null) && media.Media is ImageFile img && img.Type.MetaType == MediaMetaType.Image && img.RawData is not null)
         {
             try
             {
-                (int imgWidth, int imgHeight) = img.GetResolution();
-                width = imgWidth;
-                height = imgHeight;
+                SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(img.RawData);
+                width = info.Width;
+                height = info.Height;
             }
             catch (Exception)
             {
@@ -1027,7 +1339,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
             }
         }
         string size = width is null || height is null ? "" : $" {width}x{height}";
-        return $"{size} {media.Media?.Type?.MimeType ?? "?"}";
+        media.SizeText = $"{size} {media.Media?.Type?.MimeType ?? "?"}";
+        return media.SizeText;
     }
 
     /// <summary>Formats a parameter value with placeholders for prompts, models, and media.</summary>
@@ -1068,7 +1381,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (value.Type == JTokenType.String)
         {
-            return FormatString(nodeId, name, $"{value}");
+            return FormatString(nodeId, name, value.ToString());
         }
         string raw = value.ToString(Formatting.None);
         return raw.Length > 120 ? $"#{Sha8(raw)}({raw.Length})" : raw;
@@ -1090,6 +1403,46 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <param name="relativeStage">If non-null, the stage tag is only shown when the node's stage differs from this, and the origin is omitted.</param>
     public string DescribeNode(string id, JObject node, string relativeStage)
     {
+        if (DescribeCache is null)
+        {
+            return DescribeNodeUncached(id, node, relativeStage);
+        }
+        string key = $"{id}\n{relativeStage}";
+        if (!DescribeCache.TryGetValue(key, out string text))
+        {
+            text = DescribeNodeUncached(id, node, relativeStage);
+            DescribeCache[key] = text;
+        }
+        return text;
+    }
+
+    /// <summary>Node descriptions by ID and relative stage while <see cref="Build"/> runs (the workflow does not change during it), or null.</summary>
+    public Dictionary<string, string> DescribeCache;
+
+    /// <summary>Formats where a node came from: "member@file:line by 'step' p{priority}", plus " load#N" inside a model load and " compat=ID" for the model loaded when it was created.
+    /// The CreateNode call site names the code branch that made the node.</summary>
+    public string Provenance(NodeRecord record)
+    {
+        string text = record.Origin;
+        if (record.Step >= 0 && record.Step < StepRecords.Count)
+        {
+            StepRecord step = StepRecords[record.Step];
+            text += $" by '{step.Name}' p{step.Priority}";
+        }
+        if (record.Load >= 0)
+        {
+            text += $" load#{record.Load}";
+        }
+        if (record.Compat is not null)
+        {
+            text += $" compat={record.Compat}";
+        }
+        return text;
+    }
+
+    /// <summary>Implements <see cref="DescribeNode"/>.</summary>
+    public string DescribeNodeUncached(string id, JObject node, string relativeStage)
+    {
         string classType = $"{node["class_type"]}";
         StringBuilder sb = new();
         sb.Append($"{id}:{classType}");
@@ -1100,7 +1453,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (record is not null && relativeStage is null)
         {
-            sb.Append($" <{record.Origin}>");
+            sb.Append($" <{Provenance(record)}>");
         }
         else if (record is null && Gen is not null)
         {
@@ -1234,6 +1587,20 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Builds the trace summary.</summary>
     public JObject Build()
     {
+        DescribeCache = [];
+        try
+        {
+            return BuildSummary();
+        }
+        finally
+        {
+            DescribeCache = null;
+        }
+    }
+
+    /// <summary>Implements <see cref="Build"/>.</summary>
+    public JObject BuildSummary()
+    {
         JObject workflow = Gen.Workflow ?? [];
         BuildSlotTypes();
         Dictionary<string, List<string>> consumers = [];
@@ -1261,7 +1628,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["workflow"] = new JObject()
             {
                 ["source"] = "generated",
-                ["sha256"] = Utilities.HashSHA256(workflow.ToString().EncodeUTF8()),
+                ["sha256"] = HashIndentedJson(workflow),
                 ["nodes"] = workflow.Count,
                 ["nodes_created"] = Nodes.Count,
                 ["nodes_removed"] = Nodes.Values.Count(n => n.RemovedBy is not null),
@@ -1379,9 +1746,28 @@ public class WorkflowTrace(WorkflowGenerator gen)
         result["samplers"] = samplers;
         if (SegmentParts.Count > 0)
         {
-            result["segments"] = SegmentParts;
+            JArray segments = (JArray)SegmentParts.DeepClone();
+            foreach (JObject segment in segments.OfType<JObject>())
+            {
+                if (segment["crop"] is not JObject crop || workflow[$"{crop["bounds"]}"]?["inputs"] is not JObject bounds)
+                {
+                    continue;
+                }
+                crop["aspect"] = $"{bounds["aspect_x"]}:{bounds["aspect_y"]}";
+                if (IsLink(bounds["mask"]) && workflow[$"{bounds["mask"][0]}"] is JObject threshold && $"{threshold["class_type"]}" == "SwarmMaskThreshold")
+                {
+                    crop["threshold"] = $"{threshold["inputs"]?["min"]}..{threshold["inputs"]?["max"]}";
+                }
+                if (workflow[$"{crop["scaled_image"]}"]?["inputs"] is JObject scaled)
+                {
+                    crop["scaled_to"] = $"{scaled["width"]}x{scaled["height"]}";
+                }
+                crop["pasted_by"] = new JArray(consumers.GetValueOrDefault($"{crop["bounds"]}", []).Where(id => $"{workflow[id]?["class_type"]}".Contains("CompositeMasked")).Select(id => (JToken)$"{id}:{workflow[id]["class_type"]}"));
+            }
+            result["segments"] = segments;
         }
         JObject nodesByStage = [];
+        NodeLines = [];
         foreach (JProperty property in workflow.Properties())
         {
             if (property.Value is not JObject node)
@@ -1394,13 +1780,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 stageNodes = [];
                 nodesByStage[stage] = stageNodes;
             }
-            stageNodes.Add(DescribeNode(property.Name, node, null));
+            string line = DescribeNode(property.Name, node, null);
+            NodeLines[property.Name] = line;
+            stageNodes.Add(line);
         }
         result["nodes"] = nodesByStage;
         JArray removed = [];
         foreach (NodeRecord node in Nodes.Values.Where(n => n.RemovedBy is not null))
         {
-            removed.Add($"{node.Id}:{node.ClassType}@{node.Stage} <{node.Origin}> removed by {node.RemovedBy}");
+            removed.Add($"{node.Id}:{node.ClassType}@{node.Stage} <{Provenance(node)}> removed by {node.RemovedBy}");
         }
         if (removed.Count > 0)
         {
@@ -1429,6 +1817,25 @@ public class WorkflowTrace(WorkflowGenerator gen)
         if (untracked.Count > 0)
         {
             result["untracked_nodes"] = untracked;
+        }
+        JArray dangling = [];
+        foreach (JProperty property in workflow.Properties())
+        {
+            if (property.Value["inputs"] is not JObject inputs)
+            {
+                continue;
+            }
+            foreach (JProperty input in inputs.Properties())
+            {
+                if (IsLink(input.Value) && !workflow.ContainsKey($"{input.Value[0]}"))
+                {
+                    dangling.Add($"{property.Name}:{property.Value["class_type"]}.{input.Name} links to missing node {input.Value[0]}:{input.Value[1]}");
+                }
+            }
+        }
+        if (dangling.Count > 0)
+        {
+            result["dangling_links"] = dangling;
         }
         if (ObjectInfo is not null)
         {
@@ -1486,8 +1893,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
         JObject media = [];
         foreach ((string nodeId, MediaRecord record) in Media)
         {
-            string value = workflow[nodeId]?["inputs"] is JObject mediaInputs ? mediaInputs.Properties().Where(p => p.Name.EndsWith("_base64")).Select(p => $"{p.Value}").FirstOrDefault() : null;
-            media[nodeId] = $"@{record.Param}#{(value is null ? "?" : Sha8(value))}{MediaSize(record)}";
+            string value = workflow[nodeId]?["inputs"] is JObject mediaInputs ? mediaInputs.Properties().Where(p => p.Name.EndsWith("_base64")).Select(p => p.Value.ToString()).FirstOrDefault() : null;
+            string hash = value is not null ? Sha8(value) : record.Media?.RawData is byte[] raw ? $"raw:{Sha8(raw)}" : "?";
+            media[nodeId] = $"@{record.Param}#{hash}{MediaSize(record)}";
         }
         result["media"] = media;
         JObject parameters = [];
@@ -1497,7 +1905,12 @@ public class WorkflowTrace(WorkflowGenerator gen)
             JToken last = FormatParamValue(read.Type, read.LastValue);
             string firstText = first?.ToString(Formatting.None) ?? "null";
             string lastText = last?.ToString(Formatting.None) ?? "null";
-            parameters[key] = firstText == lastText && read.FirstSource == read.LastSource ? $"{firstText} ({read.FirstSource})" : $"{firstText} ({read.FirstSource}) then {lastText} ({read.LastSource})";
+            string text = firstText == lastText && read.FirstSource == read.LastSource ? $"{firstText} ({read.FirstSource})" : $"{firstText} ({read.FirstSource}) then {lastText} ({read.LastSource})";
+            if (read.Values.Count > 2)
+            {
+                text += $"; {read.Values.Count}{(read.Values.Count >= MaxDistinctParamValues ? "+" : "")} distinct values over {read.Count} reads: {read.Values.Select(v => FormatParamValue(read.Type, v)?.ToString(Formatting.None) ?? "null").JoinString(" | ")}";
+            }
+            parameters[key] = text;
         }
         result["params_read"] = parameters;
         if (Gen.UserInput.SectionParamOverrides.Count > 0)

@@ -758,7 +758,17 @@ public partial class WorkflowGenerator
             Trace?.Fail(ex);
             throw;
         }
-        Trace?.Finish();
+        if (Trace is not null)
+        {
+            try
+            {
+                Trace.Finish();
+            }
+            catch (Exception ex)
+            {
+                Trace.FinishFailed(ex);
+            }
+        }
         return Workflow;
     }
 

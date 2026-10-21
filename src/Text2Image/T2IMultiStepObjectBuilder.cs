@@ -20,6 +20,9 @@ public class T2IMultiStepObjectBuilder
     /// <summary>ExtraMeta key for the debug record of how an object prompt's image was composed. Set when <see cref="Settings.AddDebugData"/> is enabled.</summary>
     public const string TraceMetadataKey = "debug_trace_objects";
 
+    /// <summary>ExtraMeta key a backend's workflow trace is stored under (WorkflowTrace.MetadataKey in the ComfyUI backend).</summary>
+    public const string WorkflowTraceMetadataKey = "debug_trace";
+
     /// <summary>Returns "#" plus the first 8 hex chars of the SHA-256 of some text, so prompt text is never written raw into debug records.</summary>
     public static string TraceHash(string text) => $"#{Utilities.HashSHA256((text ?? "").EncodeUTF8())[..8]}";
 
@@ -44,11 +47,18 @@ public class T2IMultiStepObjectBuilder
     {
         passTrace["seed"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Seed.Type.ID) is long seed ? seed : null;
         passTrace["model"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Model.Type.ID) is T2IModel model ? T2IParamTypes.CleanModelName(model.Name) : null;
-        passTrace["workflow"] = (passInput.ExtraMeta.GetValueOrDefault("debug_trace") as JObject)?["workflow"]?.DeepClone();
+        passTrace["workflow"] = (passInput.ExtraMeta.GetValueOrDefault(WorkflowTraceMetadataKey) as JObject)?["workflow"]?.DeepClone();
         if (result is ImageFile img)
         {
-            (int width, int height) = img.GetResolution();
-            passTrace["result"] = $"{width}x{height} #{Utilities.HashSHA256(img.RawData)[..8]} {img.Type.MimeType}";
+            try
+            {
+                ImageInfo info = ISImage.Identify(img.RawData);
+                passTrace["result"] = $"{info.Width}x{info.Height} #{Utilities.HashSHA256(img.RawData)[..8]} {img.Type.MimeType}";
+            }
+            catch (Exception ex)
+            {
+                passTrace["result"] = $"unreadable image ({ex.GetType().Name}) #{Utilities.HashSHA256(img.RawData ?? [])[..8]} {img.Type?.MimeType}";
+            }
         }
         else
         {

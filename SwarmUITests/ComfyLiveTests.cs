@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FreneticUtilities.FreneticExtensions;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SixLabors.ImageSharp.PixelFormats;
@@ -230,6 +231,10 @@ public class ComfyLiveTests : SwarmUITest
         return ([.. Enumerable.Range(0, 3).Select(c => meanPasted[c] - (s * meanUnder[c]))], s);
     }
 
+    /// <summary>Inputs the generator sends that the live ComfyUI does not declare, as Class.input; ComfyUI ignores them. SwarmKSampler.py has no control_after_generate (WorkflowGenerator.CreateKSampler sets it),
+    /// and SwarmImageCompositeMaskedColorCorrecting has no resize_source (WorkflowGenerator's segment and mask composites set it). Any other undeclared input fails the live test.</summary>
+    public static readonly string[] KnownUndeclaredInputs = ["SwarmKSampler.control_after_generate", "SwarmImageCompositeMaskedColorCorrecting.resize_source"];
+
     /// <summary>Qwen Image 2.1 with a LoRA, inpainting a static mask and refining a CLIPSeg segment, runs on real ComfyUI to the final save, and the saved image is the init image changed exactly where the static mask and the segment mask say:
     /// Swarm's crop bounds, cropped masks and paste-back coordinates put the generated pixels where the masks are. The model's RGBA output is alpha-composited (SwarmImageCompositeMaskedColorCorrecting multiplies the mask by the source alpha),
     /// so a pixel under one mask is A * G + (1 - A) * init, and under both masks the same blend applied twice. The trace records the graph that was sent, and the live object_info types every link.</summary>
@@ -282,7 +287,7 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(samplerInputs["start_at_step"].Value<int>(), Is.EqualTo((int)Math.Round(samplerInputs["steps"].Value<int>() * (1 - segmentRecord["creativity"].Value<double>()))));
         Assert.That(trace["type_errors"], Is.Empty, $"live object_info types every link: {trace["type_errors"]}");
         Assert.That(trace["classes_missing_from_object_info"], Is.Empty, $"{trace["classes_missing_from_object_info"]}");
-        TestContext.Out.WriteLine($"undeclared inputs: {trace["undeclared_inputs"]}");
+        Assert.That(((JArray)trace["undeclared_inputs"]).Select(t => $"{t}".After(':')).Distinct(), Is.EquivalentTo(KnownUndeclaredInputs), $"the only inputs the live ComfyUI does not declare are the known ones: {trace["undeclared_inputs"]}");
         TestContext.Out.WriteLine($"outputs: {string.Join(", ", job.Outputs.Select(o => $"node {o.BackendInternalHint} real={o.IsReal} {o.File.Type.MimeType} {o.File.RawData.Length} bytes"))}");
         T2IEngine.ImageOutput final = job.Outputs.Single(o => o.IsReal);
         Assert.That(final.BackendInternalHint, Is.EqualTo("9"), "the final image came from the final save node");
@@ -343,6 +348,49 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(wrong, Is.Empty, $"{wrong.Count} pixels wrong, first: {string.Join("; ", wrong.Take(20))}");
     }
 
+    /// <summary>The offline typing fixture (<see cref="WorkflowTraceTypingTests.SdxlObjectInfo"/>) matches the live ComfyUI's object_info: for every fixture class, the same required and optional input names,
+    /// the same type for every input that is not a choice list, a choice list wherever the fixture has one, and the same output types and output-node flag.</summary>
+    [Test]
+    public async Task TestTypingFixtureMatchesLiveObjectInfo()
+    {
+        ComfyUIAPIBackend backend = await InitBackend();
+        static string inputType(JToken spec) => spec?[0] is JValue type && $"{type}" != "COMBO" ? $"{type}" : "(choice)";
+        List<string> mismatches = [];
+        foreach (JProperty fixtureClass in JObject.Parse(WorkflowTraceTypingTests.SdxlObjectInfo).Properties())
+        {
+            if (backend.RawObjectInfo[fixtureClass.Name] is not JObject live)
+            {
+                mismatches.Add($"{fixtureClass.Name}: not in the live object_info");
+                continue;
+            }
+            JObject fixture = (JObject)fixtureClass.Value;
+            foreach (string group in new[] { "required", "optional" })
+            {
+                JObject fixtureInputs = fixture["input"]?[group] as JObject ?? [], liveInputs = live["input"]?[group] as JObject ?? [];
+                string fixtureNames = fixtureInputs.Properties().Select(p => p.Name).Order().JoinString(", "), liveNames = liveInputs.Properties().Select(p => p.Name).Order().JoinString(", ");
+                if (fixtureNames != liveNames)
+                {
+                    mismatches.Add($"{fixtureClass.Name} {group} inputs: fixture [{fixtureNames}], live [{liveNames}]");
+                }
+                foreach (JProperty input in fixtureInputs.Properties())
+                {
+                    if (liveInputs[input.Name] is JToken liveSpec && inputType(input.Value) != inputType(liveSpec))
+                    {
+                        mismatches.Add($"{fixtureClass.Name}.{input.Name}: fixture {inputType(input.Value)}, live {inputType(liveSpec)}");
+                    }
+                }
+            }
+            foreach (string key in new[] { "output", "output_node" })
+            {
+                if (!JToken.DeepEquals(fixture[key], live[key]))
+                {
+                    mismatches.Add($"{fixtureClass.Name} {key}: fixture {fixture[key]?.ToString(Formatting.None)}, live {live[key]?.ToString(Formatting.None)}");
+                }
+            }
+        }
+        Assert.That(mismatches, Is.Empty, string.Join("\n", mismatches));
+    }
+
     /// <summary>Color of the synthetic segment crop.</summary>
     public static readonly Rgba32 CropColor = new(250, 20, 200, 255);
 
@@ -375,13 +423,15 @@ public class ComfyLiveTests : SwarmUITest
         T2IParamInput input = WorkflowGeneratorHarness.BuildInput(SegmentRequest());
         JObject workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, backend.ModelFolderFormat, [.. backend.SupportedFeatures], backend.RawObjectInfo).ParseToJson();
         JObject trace = (JObject)input.ExtraMeta["debug_trace"];
-        string segmentStage = $"{((JArray)trace["segments"]).Single()["stage"]}";
-        HashSet<string> segmentNodes = [.. ((JArray)trace["nodes"][segmentStage]).Select(n => $"{n}".Before(':'))];
-        (string compositeId, JObject composite) = workflow.Properties().Where(p => $"{p.Value["class_type"]}" == "SwarmImageCompositeMaskedColorCorrecting" && segmentNodes.Contains(p.Name)).Select(p => (p.Name, (JObject)p.Value)).Single();
+        JObject segment = (JObject)((JArray)trace["segments"]).Single();
+        string segmentStage = $"{segment["stage"]}";
+        string compositeId = $"{((JArray)segment["crop"]["pasted_by"]).Single()}".Before(':');
+        JObject composite = (JObject)workflow[compositeId];
+        Assert.That($"{composite["class_type"]}", Is.EqualTo("SwarmImageCompositeMaskedColorCorrecting"), "the segment record names the node that pastes its crop back");
         (string scaleId, JObject scale) = WorkflowTraceTests.Source(workflow, composite["inputs"]["source"]);
         Assert.That($"{scale["class_type"]}", Is.EqualTo("ImageScale"), "the redraw is scaled back to the crop bounds");
         (string decodeId, JObject decode) = WorkflowTraceTests.Source(workflow, scale["inputs"]["image"]);
-        Assert.That(segmentNodes, Does.Contain(decodeId), $"{decodeId}:{decode["class_type"]} is the segment's decoded redraw");
+        Assert.That($"{trace["nodes"][decodeId]}", Does.StartWith($"{decodeId}:{decode["class_type"]}@{segmentStage} "), $"{decodeId}:{decode["class_type"]} is the segment's decoded redraw, in the image record's node table");
         (string thresholdId, JObject threshold) = WorkflowTraceTests.Source(workflow, composite["inputs"]["mask"]);
         Assert.That($"{threshold["class_type"]}", Is.EqualTo("ThresholdMask"));
         using SixLabors.ImageSharp.Image<Rgba32> crop = new(37, 53, CropColor);

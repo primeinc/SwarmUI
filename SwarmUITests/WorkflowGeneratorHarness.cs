@@ -289,13 +289,19 @@ public static class WorkflowGeneratorHarness
         return a.WorkflowText == b.WorkflowText || ComparableText(a.Workflow) == ComparableText(b.Workflow);
     }
 
-    /// <summary>Returns the workflow text with the random SaveImage 'filename_prefix' masked.</summary>
+    /// <summary>Returns true if a value is the generator's random SaveImage prefix: "SwarmUI_", four to eight hex digits, "_" (WGNodeData.SaveOutput formats Random.Shared.Next() as "X4").</summary>
+    public static bool IsRandomSavePrefix(string value)
+    {
+        return value.StartsWith("SwarmUI_") && value.EndsWith('_') && value.Length >= 13 && value[8..^1].All(Uri.IsHexDigit);
+    }
+
+    /// <summary>Returns the workflow text with the random SaveImage 'filename_prefix' masked; any other prefix value stays, so a changed prefix still compares different.</summary>
     public static string ComparableText(JObject workflow)
     {
         JObject copy = (JObject)workflow.DeepClone();
         foreach (JProperty property in copy.Properties())
         {
-            if (property.Value["inputs"] is JObject inputs && inputs["filename_prefix"] is JValue prefix && $"{prefix}".StartsWith("SwarmUI_"))
+            if (property.Value["inputs"] is JObject inputs && inputs["filename_prefix"] is JValue prefix && IsRandomSavePrefix($"{prefix}"))
             {
                 inputs["filename_prefix"] = "SwarmUI_(random)_";
             }

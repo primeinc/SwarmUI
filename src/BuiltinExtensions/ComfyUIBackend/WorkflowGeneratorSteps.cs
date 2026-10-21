@@ -529,6 +529,7 @@ public class WorkflowGeneratorSteps
                         ["start_at_step"] = startStep,
                         ["previews"] = g.UserInput.Get(T2IParamTypes.NoPreviews) ? "none" : "default"
                     });
+                    g.Trace?.SamplerCall(unsampler, new JObject() { ["kind"] = "unsampler", ["section"] = 0, ["steps"] = steps, ["start_step"] = startStep });
                     g.CurrentMedia = g.CurrentMedia.WithPath([unsampler, 0]);
                     g.MainSamplerAddNoise = false;
                 }
@@ -1931,6 +1932,7 @@ public class WorkflowGeneratorSteps
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
+                    g.Trace?.SegmentCrop(g.MaskShrunkInfo, oversize);
                     g.EnableDifferential();
                     if (part.ContextID > 0)
                     {
