@@ -103,6 +103,49 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     }
 
     /// <summary>
+    /// Comfy validates the REQUIRED inputs of every node, not just its class
+    /// name and our newer optional Qwen sockets. Catch schema regressions such
+    /// as missing LanPaint_Info / Inpainting_mode before the workflow executes.
+    /// Use only the selected backend's live /object_info; absent schema entries
+    /// are handled by the independent node-registration validation.
+    /// </summary>
+    public static void ValidateQwen21NativeRequiredInputs(JObject workflow, JObject backendObjectInfo)
+    {
+        if (workflow is null || backendObjectInfo is null)
+        {
+            return;
+        }
+        bool isQwen = HasQwen21AdvancedEncoderInputs(workflow)
+            || workflow.Properties().Any(node => node.Value?["class_type"]?.ToString() is
+                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent");
+        if (!isQwen)
+        {
+            return;
+        }
+        foreach (JProperty node in workflow.Properties())
+        {
+            string nodeType = node.Value?["class_type"]?.ToString();
+            if (nodeType is null || backendObjectInfo[nodeType]?["input"]?["required"] is not JObject required)
+            {
+                continue;
+            }
+            JObject inputs = node.Value?["inputs"] as JObject;
+            string[] missing = [.. required.Properties()
+                .Where(property => inputs?[property.Name] is null
+                    || inputs[property.Name].Type == JTokenType.Null)
+                .Select(property => property.Name)];
+            if (missing.Length > 0)
+            {
+                throw new SwarmUserErrorException(
+                    $"The selected ComfyUI backend requires {string.Join(", ", missing)} " +
+                    $"on node {node.Name} ({nodeType}), but the Qwen workflow does not supply them. " +
+                    "Do not rely on Python function defaults: fix the generated node inputs " +
+                    "or use a matching native node version on THIS backend.");
+            }
+        }
+    }
+
+    /// <summary>
     /// Qwen-specific SwarmTextEncodeAdvanced input sockets are newer than the
     /// node's class name. NodeTypes alone cannot prove that an API-by-URL
     /// backend has the independent image_N sockets or native Qwen empty-text
@@ -1124,6 +1167,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         // yet lack Qwen's independent image_N sockets. Raw graphs must reject
         // this BEFORE initImageFixer uploads image files, just like generated.
         ValidateQwen21IndependentVisionSockets(inventory, backendObjectInfo);
+        ValidateQwen21NativeRequiredInputs(inventory, backendObjectInfo);
     }
 
     public volatile int ImageIDDedup = 0;
@@ -1231,6 +1275,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 JObject expandedRawGraph = JObject.Parse(workflow);
                 ValidateNativeQwenSegmentNodes(expandedRawGraph, NodeTypes);
                 ValidateQwen21IndependentVisionSockets(expandedRawGraph, RawObjectInfo);
+                ValidateQwen21NativeRequiredInputs(expandedRawGraph, RawObjectInfo);
             }
             else
             {
@@ -1240,6 +1285,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 JObject nativeGraph = JObject.Parse(workflow);
                 ValidateNativeQwenSegmentNodes(nativeGraph, NodeTypes);
                 ValidateQwen21IndependentVisionSockets(nativeGraph, RawObjectInfo);
+                ValidateQwen21NativeRequiredInputs(nativeGraph, RawObjectInfo);
                 preserveQwenOriginalInitUpload = ShouldPreserveQwenOriginalInitUpload(nativeGraph, user_input);
                 workflow = initImageFixer(workflow);
             }
