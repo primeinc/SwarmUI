@@ -35,6 +35,8 @@ jobs:
         # that Qwen segment LoRA weights were matched or applied during inference.
         - name: Validate vendored upstream Qwen node and production routing (NOT inference)
           run: python3 -m unittest discover -s tests -p test_qwen_native_bundle.py -v
+        - name: Execute live Qwen mask-chain verifier with inverse and invalid CPU controls
+          run: python3 -m unittest discover -s tests -p test_qwen_live_mask_chain_cpu.py -v
         - name: Validate live acceptance test syntax (NOT inference)
           run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
