@@ -53,7 +53,7 @@ def real_shipped_encoder(source_override=None):
     # Execute the actual encoder class, replacing only unrelated Comfy/runtime
     # dependencies. combine_leaves deliberately invokes its real tokenize
     # closure, allowing us to observe the native kwargs passed to clip.tokenize.
-    def combine_leaves(clip, leaves, tokenize_fn, per_leaf=False):
+    def combine_leaves(clip, leaves, tokenize_fn, per_leaf=False, blank_tokenize_fn=None):
         return tokenize_fn("".join(item.text or "" for item in leaves)), False
 
     scope = {
