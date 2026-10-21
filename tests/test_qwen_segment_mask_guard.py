@@ -214,6 +214,20 @@ class MaskGuardTests(unittest.TestCase):
             self.node.validate(1.0 - fully_detected,
                                minimum_confidence=0.0, maximum_coverage=1.0)
 
+    def test_inverse_selection_must_binarize_before_inversion(self):
+        # Native Comfy InvertMask.execute returns (1 - mask) and
+        # ThresholdMask.execute returns (mask > value).float().
+        # Once fractional confidences are inverted, ThresholdMask(0) selects
+        # most of the ORIGINAL subject a second time, not its complement.
+        detected = torch.tensor([0.0, 0.2, 0.7, 1.0]).view(1, 1, 4)
+        old_pipeline = ((1.0 - detected) > 0.0).float()
+        correct_pipeline = 1.0 - (detected > 0.0).float()
+        self.assertEqual(old_pipeline.flatten().tolist(), [1.0, 1.0, 1.0, 0.0],
+                         "Adversarial control: raw inversion preserves ghost subject support")
+        self.assertEqual(correct_pipeline.flatten().tolist(), [1.0, 0.0, 0.0, 0.0],
+                         "Binary-first inversion excludes every selected subject pixel")
+        self.assertFalse(torch.equal(old_pipeline, correct_pipeline))
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))
