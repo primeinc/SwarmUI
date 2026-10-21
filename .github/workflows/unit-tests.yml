@@ -65,6 +65,8 @@ jobs:
           run: python3 -m unittest discover -s tests -p test_qwen_lora_manifest_cpu.py -v
         - name: Execute live Qwen mask-chain verifier with inverse and invalid CPU controls
           run: python3 -m unittest discover -s tests -p test_qwen_live_mask_chain_cpu.py -v
+        - name: Verify scheduled Qwen LoRA hook acceptance with native graph controls (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_live_dynamic_hook_cpu.py -v
         - name: Install CPU tensor dependencies for upstream CropAndStitch tests
           run: |
             python3 -m pip install 'numpy<3' pillow scipy safetensors requests
