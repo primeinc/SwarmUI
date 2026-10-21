@@ -246,7 +246,7 @@ namespace SwarmUI.Text2Image
                     JObject objectsTrace = user_input.ExtraMeta.GetValueOrDefault(T2IMultiStepObjectBuilder.TraceMetadataKey) as JObject;
                     if (objectsTrace is not null && multiImg is null)
                     {
-                        objectsTrace["final"] = "object composition stopped early; the image is a single generation of the full prompt, traced under debug_trace";
+                        objectsTrace["final"] = claim.ShouldCancel ? "object composition was cancelled; no composite was made" : "object composition stopped early; the image is a single generation of the full prompt, traced under debug_trace";
                     }
                     if (multiImg is not null)
                     {
