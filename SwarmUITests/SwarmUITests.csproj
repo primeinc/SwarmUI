@@ -10,6 +10,7 @@
     <TestProjectType>UnitTest</TestProjectType>
     <Nullable>Disable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- SwarmUI runs with server GC (Microsoft.NET.Sdk.Web default). The parallel trace tests take about 10 s with it and 31 s without. -->
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <DefaultItemExcludes>$(DefaultItemExcludes);ComfyLive/.work/**</DefaultItemExcludes>
   </PropertyGroup>
