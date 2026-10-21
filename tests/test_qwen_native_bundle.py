@@ -128,7 +128,10 @@ class NativeQwenBundleTest(unittest.TestCase):
         self.assertIn('"maximum_coverage": ("FLOAT", {"default": 0.99', masks)
         self.assertIn('string detectorGuard = g.CreateNode("SwarmRequireNonEmptyMask"', steps,
                       "Inverse tag must validate the non-inverted detector support before InvertMask")
-        self.assertIn('invertInput = detectorGuard', steps)
+        self.assertIn('string originalBinary = g.CreateNode("ThresholdMask"', steps,
+                      "Qwen inverse edits need a binary original before taking the complement")
+        self.assertIn('["mask"] = NodePath(detectorGuard, 0)', steps)
+        self.assertIn('invertInput = originalBinary', steps)
         self.assertIn('["mask"] = NodePath(invertInput, 0)', steps)
         self.assertIn('["maximum_coverage"] = 1.0', steps,
                       "Inverted target can intentionally cover the whole canvas")
