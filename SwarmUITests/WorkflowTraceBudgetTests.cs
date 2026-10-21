@@ -29,7 +29,8 @@ public class WorkflowTraceBudgetTests : SwarmUITest
     }
 
     /// <summary>Most a traced build may allocate beyond the untraced build of the same request, plus one read of each of its images' bytes:
-    /// the trace sizes an image the generator did not resize with ImageSharp's Image.Identify, which reads every PNG chunk to check its CRC (ImageSharp 3.1.12 PngDecoderCore.TryReadChunk and ReadChunkData).
+    /// the trace sizes an image the generator did not resize with ImageSharp's Image.Identify, which reads every PNG chunk's data into a buffer, image data included, and checks the CRC of IHDR, PLTE, IDAT and fdAT
+    /// (ImageSharp 3.1.12 PngDecoderCore.TryReadChunk, ReadChunkData and ValidateChunk; PngChunk.IsCritical under the default PngCrcChunkHandling.IgnoreNonCritical).
     /// With ImageSharp's default allocator that buffer is pooled and returned; this test allocates every buffer (<see cref="SimpleGcMemoryAllocator"/>), so it counts.</summary>
     public const long MaxTracedExtraBytes = 1536 * 1024;
 
@@ -43,8 +44,8 @@ public class WorkflowTraceBudgetTests : SwarmUITest
     /// <summary>Most <see cref="WorkflowTrace.Build"/> may allocate.</summary>
     public const long MaxBuildBytes = 1024 * 1024;
 
-    /// <summary>Most a traced build may take, as a multiple of the untraced build's time, plus <see cref="TimeSlackMs"/>: a bound for pathological slowdowns that holds on a busy machine.</summary>
-    public const double MaxTracedTimeRatio = 4;
+    /// <summary>Most a traced build may take, as a multiple of the untraced build's time, plus <see cref="TimeSlackMs"/>. Traced builds measure 1.1x to 1.9x, the most with large media.</summary>
+    public const double MaxTracedTimeRatio = 2;
 
     /// <summary>Fixed allowance added to the time bound, for timer and scheduling noise on short builds.</summary>
     public const double TimeSlackMs = 10;
