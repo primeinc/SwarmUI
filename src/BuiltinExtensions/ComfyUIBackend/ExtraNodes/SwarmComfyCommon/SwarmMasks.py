@@ -150,10 +150,12 @@ class SwarmRequireNonEmptyMask:
     CATEGORY = "SwarmUI/masks"
 
     def validate(self, mask, minimum_confidence=0.5, maximum_coverage=0.99):
-        # Match the downstream CropAndStitch hipass filter exactly. A mask
-        # containing only scores below that cutoff would otherwise be emptied
-        # after this guard, silently triggering upstream full-frame fallback.
-        # Guard every frame separately so other images do not hide failures.
+        # CLIPSeg already applies the user's detector threshold. Check for
+        # finite positive support BEFORE ThresholdMask(value=0) binarizes it.
+        # CropAndStitch then applies its 0.5 hipass to a binary (0 or 1)
+        # mask, rather than discarding accepted low-confidence pixels again.
+        # Guard each frame separately so one valid image cannot hide another
+        # image's empty detector mask.
         frames = mask.unsqueeze(0) if mask.ndim == 2 else mask.reshape(-1, *mask.shape[-2:])
         kept = torch.isfinite(frames) & (frames > minimum_confidence)
         has_subject = torch.any(kept, dim=(-2, -1))
