@@ -109,6 +109,90 @@ public class QwenSegmentLoraChainTests : SwarmUITest
             .Message, Does.Contain("ambiguous"));
     }
 
+    private static T2IModel QwenPromptModel()
+    {
+        T2IModelClass modelClass = new()
+        {
+            ID = T2IModelClassSorter.CompatQwenImage21.ID,
+            CompatClass = T2IModelClassSorter.CompatQwenImage21,
+            Name = "Qwen Image 2.1",
+            StandardWidth = 1024,
+            StandardHeight = 1024
+        };
+        return new T2IModel(null, "/models/diffusion_models",
+            "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
+        {
+            ModelClass = modelClass,
+            StandardWidth = 1024,
+            StandardHeight = 1024
+        };
+    }
+
+    [Test]
+    public static void ExplicitMissingQwenSegmentLoRAMustFailAtActualPromptProcessor()
+    {
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.Model, QwenPromptModel());
+        T2IPromptHandling.PromptTagContext context = new()
+        {
+            Input = input,
+            SectionID = 11,
+            Loras = ["installed/real.safetensors"]
+        };
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            T2IPromptHandling.PromptTagPostProcessors["lora"]("subjects/not-installed", context));
+        Assert.That(error.Message, Does.Contain("Qwen segment 11"));
+        Assert.That(error.Message, Does.Contain("not-installed"));
+        Assert.That(error.Message, Does.Contain("Refusing to generate"));
+        Assert.That(input.Get(T2IParamTypes.Loras), Is.Null,
+            "An unresolved authored LoRA must not be promoted as if installed.");
+    }
+
+    [Test]
+    public static void MissingQwenSegmentLoRAMustFailWithNonQwenBaseModelOverride()
+    {
+        T2IModelClass sdClass = new()
+        {
+            ID = T2IModelClassSorter.CompatSdv1.ID,
+            CompatClass = T2IModelClassSorter.CompatSdv1,
+            Name = "SDv1"
+        };
+        T2IModel sdModel = new(null, "/models/Stable-Diffusion",
+            "/models/Stable-Diffusion/test.safetensors", "test.safetensors")
+        {
+            ModelClass = sdClass
+        };
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.Model, sdModel);
+        input.Set(T2IParamTypes.SegmentModel, QwenPromptModel());
+        T2IPromptHandling.PromptTagContext context = new()
+        {
+            Input = input,
+            SectionID = 11,
+            Loras = ["installed/real.safetensors"]
+        };
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            T2IPromptHandling.PromptTagPostProcessors["lora"]("missing/adapter", context))
+            .Message, Does.Contain("Qwen segment 11"));
+    }
+
+    [Test]
+    public static void UnrelatedGlobalUnresolvedLoRAStillUsesLegacyWarningPath()
+    {
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.Model, QwenPromptModel());
+        T2IPromptHandling.PromptTagContext context = new()
+        {
+            Input = input,
+            SectionID = 0,
+            Loras = ["installed/real.safetensors"]
+        };
+        Assert.DoesNotThrow(() =>
+            T2IPromptHandling.PromptTagPostProcessors["lora"]("missing/global", context));
+        Assert.That(input.ExtraMeta.ContainsKey("parser_warnings"), Is.True,
+            "Only explicit segmented Qwen adapters must fail closed.");
+    }
+
     private static WorkflowGenerator Prepare(int segmentConfinement = 11, double selectedStrength = 1)
     {
         T2IParamInput input = new(null);
