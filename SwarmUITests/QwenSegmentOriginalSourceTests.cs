@@ -428,6 +428,10 @@ public class QwenSegmentOriginalSourceTests
         PromptRegion.Part authoredSegment = new PromptRegion(input.Get(T2IParamTypes.Prompt))
             .Parts.Single(p => p.Type == PromptRegion.PartType.Segment);
         bool invertedSegment = authoredSegment.Strength < 0;
+        Assert.That(crop.Node["inputs"]?["mask_fill_holes"]?.ToObject<bool>(),
+            Is.EqualTo(!invertedSegment),
+            "Native CropAndStitch hole fill would erase the intentionally excluded "
+            + "subject inside a negative-strength segment mask");
         var guards = nodes.Where(x => x.Node["class_type"]?.ToString() == "SwarmRequireNonEmptyMask").ToArray();
         var invert = nodes.SingleOrDefault(x => x.Node["class_type"]?.ToString() == "InvertMask");
         var requireMask = invertedSegment
