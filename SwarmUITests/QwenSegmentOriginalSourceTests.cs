@@ -156,6 +156,11 @@ public class QwenSegmentOriginalSourceTests
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, true, -1, true, 1, true, false)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, true, 1, false, true)]
     [TestCase("sunrise, a girl walks down the street <segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, true, 1, false, true)]
+    // Existing Swarm negative-strength tag inverts a detected small subject.
+    // The pre-inversion detector must still reject empty foreground, while
+    // the deliberate complement may legitimately cover over 99% of the image.
+    [TestCase("<segment:girl,-0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", false, true, -1, false, 1, false, false)]
+    [TestCase("<segment:girl,-0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes", true, false, -1, false, 1, false, false)]
     public void ProductionQwenGraphUsesOriginalSourceWithoutRewritingInstruction(string prompt, bool independentPromptImage, bool hasInitImage, double sectionLoraWeight, bool useBase64Images, int batchSize, bool useSegmentOverride, bool referenceEdit)
     {
         if (T2IParamTypes.Model is null)
