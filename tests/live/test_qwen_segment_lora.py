@@ -241,6 +241,8 @@ def validate_qwen_subject_mask_chain(graph, crop_id):
             raise AssertionError(f"Expected connected {kind} output 0, got {ref!r}")
         node = graph.get(str(ref[0]))
         if not node or node["class_type"] != kind:
+            if kind == "SwarmClipSeg":
+                raise AssertionError("Binary subject mask must derive from the actual text detector")
             raise AssertionError(f"Expected {kind} on native Qwen mask chain, got {node!r}")
         return node
 
