@@ -1169,10 +1169,17 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
             rawWorkflow, "${", "}", _ => unresolvedClassMacro);
         JObject inventory = JObject.Parse(structuralGraph);
-        // A macro-driven class_type cannot be verified before uploading
-        // referenced files. Reject it rather than discovering unsupported
-        // native nodes only after irreversible API-by-URL uploads.
-        if (inventory.Properties().Any(property =>
+        // This early static-class restriction is only for Qwen 2.1 native
+        // graphs, whose missing backend nodes must be caught before uploads.
+        // Ordinary raw Comfy workflows historically support class_type macros
+        // expanded in CreateWorkflow; applying this restriction to them would
+        // reject unrelated user-authored workflows before expansion.
+        bool requiresQwenPreflight = HasQwen21AdvancedEncoderInputs(inventory)
+            || inventory.Properties().Any(node =>
+                node.Value?["class_type"]?.ToString() is
+                    "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent"
+                    or "TextEncodeQwenImage21");
+        if (requiresQwenPreflight && inventory.Properties().Any(property =>
             property.Value?["class_type"] is null
             || property.Value["class_type"].Type != JTokenType.String
             || property.Value["class_type"].ToString().Contains(
