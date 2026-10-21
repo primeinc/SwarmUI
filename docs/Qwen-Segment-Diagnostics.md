@@ -17,15 +17,39 @@ sharing because prompts and model filenames may remain.
 
 ## Current source and runtime distinction
 
-The current Qwen segment workflow generates native `TextEncodeQwenImage21`,
-`KSampler`, and `ImageCompositeMasked` nodes, and ships the unchanged
-upstream `nodes_qwen.py` module as `ComfyQwenNodes_Upstream.py`
-(GPL-3.0 license included). The prior
-`SwarmQwenImage21SegmentEncode` and Qwen Python diagnostics are removed.
+The current Qwen segment workflow uses `SwarmTextEncodeAdvanced` for
+the complete Swarm prompt-tag language, upstream `VAEEncode` and
+`ReferenceLatent` for both conditioning references, and unchanged upstream
+`InpaintCropImproved` / `InpaintStitchImproved` adapters. The default **Masked Img2Img** path uses upstream
+`LanPaint_ImageEncode`, `LanPaint_KSampler`, and `LanPaint_ImageDecode`.
+The separate **Reference Edit** mode uses ComfyUI's `KSampler` and
+an empty native-format crop latent produced by `VAEEncode` and
+`LatentMultiply(0)`. Both modes use upstream CropAndStitch for the final
+image; neither generates the old homemade Qwen diagnostics gallery.
+An effective Qwen segment-model override controls original-photo source
+selection even when the base checkpoint is not Qwen. Replicated source-image
+batches offset the segment seed per image so edits are not identical clones.
+For API-by-URL Comfy backends without the Swarm base64 image loader,
+Qwen's original Init Image also skips the legacy upload-to-canvas resize.
+Other img2img and custom workflows retain their existing resize behavior.
+
+The user's segment instruction is passed to `SwarmTextEncodeAdvanced`
+without any invented replacement wording or synthetic `<image1>` token.
+Swarm's real prompt processor handles residual weight, schedule, embedding
+and LoRA-hook markup, rather than flattening it through a token-count
+estimator. Native Qwen tokenization then receives the resulting text and
+image tensors. This must be verified with the actual generated graph. The selected Comfy backend's own `/object_info` node inventory
+is checked before submission; bundled nodes on another backend do not make
+external API-by-URL backends compatible.
+
+Swarm bundles unchanged upstream Qwen, LanPaint, and CropAndStitch sources
+under separate node packages, retaining their respective licenses. Empty
+CLIPSeg masks fail before the crop adapter rather than becoming whole-frame
+fallback crops. Neither this wiring nor CPU tests prove semantic replacement.
 
 The live, opt-in `tests/integration/qwen_segment_text_replacement.py`
-preflights **real exported Comfy API graphs** and the running backend's
-`object_info/TextEncodeQwenImage21` before allowing GPU inference.
+preflights **real exported Comfy API graphs** and all node classes in the
+running backend's `/object_info` before allowing model-backed inference.
 It rejects a disconnected detector, wrong full-frame reference, obsolete
 custom encoder, non-native sampler, missing crop, blurred-mask-driven
 crop bounds, empty-mask fallthrough, and non-native compositor.
@@ -39,18 +63,29 @@ The exact previously failing prompt remains:
 
 Source-level tests and successful CI do **not** establish semantic identity
 replacement. A pixel delta, a LoRA loader on the model path, and four
-denoising callbacks are necessary but insufficient evidence. Closure
-requires actual generated results that replace the child as requested
+denoising callbacks are necessary but insufficient evidence. Closure requires actual generated results that replace the child as requested
 with correct crop and final composite, plus positive/negative LoRA controls.
+
+No GPU or model weights are required for the source-level C# tests, real CPU
+PyTorch mask-guard controls, unchanged upstream crop/stitch tensor tests, or
+offline inspection of an exported Comfy API graph. These tests can disprove
+incorrect sampler links, LoRA loader identity, output multiplicity, mask
+thresholds, and pixel blending. They cannot demonstrate whether Qwen turns
+a particular girl into the requested boy or whether a particular LoRA changes
+model output. Those two acceptance claims require the relevant weights and a
+runnable inference backend, not necessarily GPU hardware. Do not call source
+and tensor contracts untestable just because no local GPU is connected.
 
 ## References
 
 - SwarmUI: `WorkflowGeneratorQwenSegment.cs`,
   `WorkflowGeneratorSteps.cs#RunSegmentationProcessing`,
-  `WorkflowGenerator.cs#CreateImageMaskCrop,RecompositeCropped`.
+  `ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py`,
+  `ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py`.
 - ComfyUI@e3bee7ffcb7d6547ed0bcd15221792f3b8646b17:
-  `comfy_extras/nodes_qwen.py#TextEncodeQwenImage21.execute`,
-  `nodes.py#KSampler.sample`,
-  `comfy_extras/nodes_mask.py#ImageCompositeMasked`.
+  `comfy/text_encoders/qwen_image21.py#QwenImage21Tokenizer.tokenize_with_weights`,
+  `comfy_extras/nodes_edit_model.py#ReferenceLatent.execute`,
+  `nodes.py#KSampler.sample`. Original `TextEncodeQwenImage21.execute`
+  is an upstream comparison, **not** the current segment generator node.
 - SwarmUI `launchtools/qwen_segment_capture.py`: backend GET API capture,
   diagnostic connection analysis, no image-generation execution.

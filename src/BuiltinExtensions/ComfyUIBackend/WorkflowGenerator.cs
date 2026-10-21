@@ -932,7 +932,12 @@ public partial class WorkflowGenerator
         List<JArray> result = [];
         for (int i = 0; i < images.Count; i++)
         {
-            JArray imgNode = GetPromptImage(true, false, i);
+            // Qwen native vision and reference latents must share each
+            // independent 32-pixel-aligned source image. Other model families
+            // retain their existing prompt-reference resizing behavior.
+            JArray imgNode = IsQwenImage21()
+                ? GetNativeQwen21PromptReference(i)
+                : GetPromptImage(true, false, i);
             result.Add(imgNode);
         }
         return result;
@@ -2872,33 +2877,61 @@ public partial class WorkflowGenerator
         }
         else if (IsQwenImage21())
         {
-            JArray imageNode = GetPromptImage(true, true, 0);
-            for (int i = 1; i < 16; i++)
-            {
-                JArray image2 = GetPromptImage(true, true, i);
-                if (image2 is null)
-                {
-                    break;
-                }
-                string batched = CreateNode("ImageBatch", new JObject()
-                {
-                    ["image1"] = imageNode,
-                    ["image2"] = image2
-                });
-                imageNode = [batched, 0];
-            }
-            node = CreateNode("SwarmTextEncodeAdvanced", new JObject()
+            // Never combine independent native Qwen references with ImageBatch:
+            // it rescales later images to the first size, then the VAE encodes
+            // different pixels than the vision tower. The same helper is used
+            // below when attaching native ReferenceLatent conditioning.
+            JObject inputs = new()
             {
                 ["clip"] = clip,
                 ["lora_hooks"] = CreateDynamicLoraHooks(),
                 ["steps"] = steps,
                 ["prompt"] = prompt,
+                ["qwen21_prevent_empty_text"] = true,
                 ["width"] = width,
                 ["height"] = height,
                 ["target_width"] = width,
-                ["target_height"] = height,
-                ["images"] = imageNode
-            }, id);
+                ["target_height"] = height
+            };
+            if (UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none"
+                && UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> qwenRefs)
+                && qwenRefs.Count > 0)
+            {
+                if (qwenRefs.Count > 16)
+                {
+                    throw new SwarmUserErrorException("Qwen Image 2.1 accepts at most 16 reference images.");
+                }
+                if (qwenRefs.Count == 1)
+                {
+                    inputs["images"] = GetNativeQwen21PromptReference(0);
+                }
+                else
+                {
+                    for (int i = 0; i < qwenRefs.Count; i++)
+                    {
+                        inputs[$"image_{i + 1}"] = GetNativeQwen21PromptReference(i);
+                    }
+                }
+            }
+            else if (UserInput.Get(ComfyUIBackendExtension.TextEncodedImage, "auto") != "none"
+                && ShouldUseQwen21AutomaticReference())
+            {
+                // The ordinary Init Image edit path attaches its source image
+                // as a ReferenceLatent during sampling. Give that *same image*
+                // to Qwen's vision tokenizer, rather than silently making a
+                // text-only instruction paired with a hidden VAE reference.
+                // Base-image initialization runs before positive/negative
+                // text generation, so these source nodes already exist.
+                if (MaskShrunkInfo?.ScaledImage is not null)
+                {
+                    inputs["images"] = NodePath(MaskShrunkInfo.ScaledImage, 0);
+                }
+                else if (BasicInputImage is not null)
+                {
+                    inputs["images"] = BasicInputImage.Path;
+                }
+            }
+            node = CreateNode("SwarmTextEncodeAdvanced", inputs, id);
         }
         else if (IsMingImage() && isPositive)
         {

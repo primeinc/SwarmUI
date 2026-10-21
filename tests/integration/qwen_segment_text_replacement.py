@@ -12,8 +12,14 @@ Usage:
    --workflow /path/to/actual-swarm-comfy-api-graph.json \
    --comfy-url http://127.0.0.1:8188 --outdir /path/to/evidence --attempts 1
 
-A positive pixel-change result is not semantic acceptance. The output remains
-NOT_CLOSED until reviewed against the requested subject transformation.
+Graph preflight also works without Comfy, Qwen weights, or a GPU:
+
+ python tests/integration/qwen_segment_text_replacement.py \
+   --workflow /path/to/actual-swarm-comfy-api-graph.json --preflight-only
+
+A passing preflight is graph-contract evidence, not a model-backed image
+test. A positive pixel-change result is not semantic acceptance. The output
+remains NOT_CLOSED until reviewed against the requested subject transformation.
 """
 from __future__ import annotations
 
@@ -28,8 +34,6 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 
-import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "launchtools"))
 import qwen_segment_capture as capture
@@ -46,6 +50,7 @@ NODE_IDS = {
     "mask_used_image": "__swarm_text_probe_mask_used_image",
     "mask_used": "__swarm_text_probe_mask_used",
     "after": "__swarm_text_probe_after",
+    "final_input": "__swarm_text_probe_final_input",
 }
 OUTPUT_KINDS = ("before", "crop_before", "crop_after", "mask", "mask_used", "after")
 _HTTP = build_opener(ProxyHandler({}))
@@ -76,6 +81,19 @@ def inspect_and_instrument(original):
     graph = copy.deepcopy(original)
     if not capture.graph_or_none(graph):
         raise AssertionError("Not an actual SwarmUI-exported Comfy API workflow")
+
+    # A production export must have one final output SINK. This alone says
+    # nothing about IMAGE batch size; verify actual image count from history
+    # during inference before claiming a single final result.
+    final_outputs = [
+        k for k, v in graph.items()
+        if v["class_type"] in ("SwarmSaveImageWS", "SaveImage", "PreviewImage")
+    ]
+    if len(final_outputs) != 1:
+        raise AssertionError(
+            f"Expected exactly one final output sink in the original graph, "
+            f"got {len(final_outputs)}: {final_outputs}"
+        )
 
     detector_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "SwarmClipSeg"],
@@ -112,34 +130,87 @@ def inspect_and_instrument(original):
             "Segment-only crop source depends on a base sampler instead of the "
             f"original photograph: {pre_segment_samplers}"
         )
-    if crop.get("mask") != [detector_id, 0]:
-        raise AssertionError("Crop adapter isn't consuming the real detector mask")
+    guard_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "SwarmRequireNonEmptyMask"
+         and v["inputs"].get("mask") == [detector_id, 0]],
+        "nonempty-detector-mask guard",
+    )
+    # CLIPSeg already applied the author's <segment:...threshold>. Its
+    # normalized/interpolated output still carries valid positive pixels
+    # below 0.5; a second 0.5 cutoff would silently replace the user's choice.
+    # Binarize all detector-selected support BEFORE crop/stitch hipass(0.5).
+    if abs(float(graph[guard_id]["inputs"].get("minimum_confidence", -1))) > 1e-6:
+        raise AssertionError("Segment detector guard must not add a second threshold")
+    # A normalized weak background response can leave positive scores over
+    # almost the whole frame. ThresholdMask(0) would turn all of them opaque.
+    # Require a finite cutoff at the actual detector-mask guard, not a new
+    # implicit CLIPSeg score threshold.
+    max_coverage = graph[guard_id]["inputs"].get("maximum_coverage")
+    if not isinstance(max_coverage, (float, int)) or not (0 < max_coverage <= 0.99):
+        raise AssertionError(
+            "Qwen mask guard must reject near-whole-canvas detection without "
+            "changing the authored CLIPSeg confidence threshold")
+    solid_mask_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ThresholdMask"
+         and v["inputs"].get("mask") == [guard_id, 0]
+         and abs(float(v["inputs"].get("value", -1))) < 1e-6],
+        "native binary subject-mask threshold after the authored CLIPSeg threshold",
+    )
+    if crop.get("mask") != [solid_mask_id, 0]:
+        raise AssertionError("Crop adapter must consume the validated BINARY subject mask, not fractional detector confidence")
     if abs(float(crop.get("mask_hipass_filter", -1)) - 0.5) > 1e-6:
         raise AssertionError("Crop adapter must exclude low-confidence detector background")
     if not crop.get("output_resize_to_target_size"):
         raise AssertionError("Crop adapter must generate the target-resolution Qwen reference")
 
+    # Swarm's production Qwen 2.1 segment path now uses the standard
+    # SwarmTextEncodeAdvanced parser for weight/schedule/LoRA tags and Comfy's
+    # ReferenceLatent for VAE references. Requiring TextEncodeQwenImage21
+    # here would reject the production graph while blessing an obsolete fixture.
+    if any(v["class_type"] == "TextEncodeQwenImage21" for v in graph.values()):
+        raise AssertionError("Unexpected old Qwen encoder: Swarm segment tags must use the native Swarm parser")
     enc_id = require_single(
-        [k for k, v in graph.items() if v["class_type"] == "TextEncodeQwenImage21"],
-        "native TextEncodeQwenImage21",
+        [k for k, v in graph.items() if v["class_type"] == "SwarmTextEncodeAdvanced"
+         and v["inputs"].get("prompt", "").strip() == PROMPT],
+        "authored positive SwarmTextEncodeAdvanced instruction",
     )
     encoder = graph[enc_id]["inputs"]
-    if encoder.get("prompt", "").strip() != PROMPT:
-        raise AssertionError(f"Wrong exact segment instruction {encoder.get('prompt')!r}")
-    # The official Qwen example joins the source image with the SOURCE's own
-    # transparency, and passes the INPAINT mask separately to LanPaint.
-    # Swarm's RGB crop preserves ordinary RGB image pixels without manufacturing
-    # alpha from the region targeted for replacement.
     masked_reference = [crop_id, 1]
-    if encoder.get("images.image_1") != masked_reference:
-        raise AssertionError("Native Qwen must receive the exact CropAndStitch image")
+    # A full Swarm export legitimately includes additional empty global/base
+    # negative encoders. Identify the SEGMENT negative by its exact source
+    # crop, not by treating every empty prompt in the graph as the same node.
+    neg_id = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "SwarmTextEncodeAdvanced"
+         and v["inputs"].get("prompt") == ""
+         and (v["inputs"].get("images") or v["inputs"].get("image_1")) == masked_reference],
+        "native segment negative conditioning on the original subject crop",
+    )
+    if ((encoder.get("images") or encoder.get("image_1")) != masked_reference
+            or (graph[neg_id]["inputs"].get("images") or
+                graph[neg_id]["inputs"].get("image_1")) != masked_reference):
+        raise AssertionError("Both Swarm vision encoders must see the exact CropAndStitch source crop")
     if any(v["class_type"] == "JoinImageWithAlpha" and
-           v["inputs"].get("image") == [crop_id, 1] and
+           v["inputs"].get("image") == masked_reference and
            v["inputs"].get("alpha") == [crop_id, 2]
            for v in graph.values()):
         raise AssertionError("Inpainting mask incorrectly reused as source transparency")
-    if "images.image_2" in encoder:
-        raise AssertionError("Original whole frame duplicated as an extra Qwen reference")
+    vae_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "VAEEncode"
+         and v["inputs"].get("pixels") == masked_reference],
+        "original crop VAE reference latent",
+    )
+    positive_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ReferenceLatent"
+         and v["inputs"].get("conditioning") == [enc_id, 0]
+         and v["inputs"].get("latent") == [vae_ref, 0]],
+        "source reference attached to positive conditioning",
+    )
+    negative_ref = require_single(
+        [k for k, v in graph.items() if v["class_type"] == "ReferenceLatent"
+         and v["inputs"].get("conditioning") == [neg_id, 0]
+         and v["inputs"].get("latent") == [vae_ref, 0]],
+        "source reference attached to negative conditioning",
+    )
 
     # Segment default is actual native Qwen masked inpainting. The upstream
     # adapter's cropped IMAGE and MASK must both reach LanPaint_ImageEncode,
@@ -157,6 +228,8 @@ def inspect_and_instrument(original):
         "upstream LanPaint_KSampler on the MASKED latent",
     )
     sampler = graph[sampler_id]["inputs"]
+    if sampler.get("positive") != [positive_ref, 0] or sampler.get("negative") != [negative_ref, 0]:
+        raise AssertionError("Source-attached positive and negative conditioning must reach the actual segment sampler")
     steps = int(sampler.get("steps", -1))
     denoise = float(sampler.get("denoise", -1))
     cfg = float(sampler.get("cfg", -1))
@@ -166,10 +239,16 @@ def inspect_and_instrument(original):
         raise AssertionError(f"Native Qwen CFG should be 1.0, got {cfg}")
     if int(sampler.get("LanPaint_NumSteps", 0)) != 5:
         raise AssertionError("LanPaint's upstream inner update schedule is missing")
-    if any(v["class_type"] == "KSampler" and
-           v["inputs"].get("latent_image") == [enc_id, 2]
+    if sampler.get("LanPaint_PromptMode") != "Image First":
+        raise AssertionError("LanPaint's required prompt mode is not wired")
+    if sampler.get("LanPaint_Info") != "LanPaint KSampler.":
+        raise AssertionError("LanPaint's required information input is missing")
+    if sampler.get("Inpainting_mode") != "🖼️ Image Inpainting":
+        raise AssertionError("LanPaint's required native inpainting mode is missing")
+    if any(v["class_type"] == "LatentMultiply" and
+           v["inputs"].get("samples") == [vae_ref, 0]
            for v in graph.values()):
-        raise AssertionError("Unmasked empty-latent sampler remains reachable in masked segment edit")
+        raise AssertionError("Unmasked Reference Edit latent must not be generated for masked segment sampling")
 
     stitch_id = require_single(
         [k for k, v in graph.items() if v["class_type"] == "InpaintStitchImproved"],
@@ -218,8 +297,17 @@ def inspect_and_instrument(original):
     }
     preview("mask_used", [NODE_IDS["mask_used_image"], 0])
     preview("after", [stitch_id, 0])
+    # SwarmSaveImageWS writes its output straight over WebSocket and returns
+    # {}, so /history does NOT expose its images. Observe the exact IMAGE
+    # tensor feeding the ORIGINAL save sink via an explicit diagnostic node.
+    final_sink_input = graph[final_outputs[0]].get("inputs", {}).get("images")
+    if not isinstance(final_sink_input, list) or len(final_sink_input) != 2:
+        raise AssertionError("Final output sink has no valid IMAGE tensor input")
+    preview("final_input", final_sink_input)
     return graph, {
-        "detector": detector_id, "crop_adapter": crop_id,
+        "final_output_sink": final_outputs[0],
+        "detector": detector_id, "validated_mask": guard_id,
+        "solid_subject_mask": solid_mask_id, "crop_adapter": crop_id,
         "source_reference": crop_id,
         "encoder": enc_id, "sampler": sampler_id, "stitch_adapter": stitch_id,
         "mode": "Masked Img2Img", "sampler_class": "LanPaint_KSampler",
@@ -230,7 +318,88 @@ def inspect_and_instrument(original):
         "mask_used_definition": "adapter output 2 (cropped mask), not inaccessible private stitcher blend",
     }
 
-def read_result(base, prompt_id, timeout_seconds):
+def require_single_final_image(outputs, save_node_id, final_input_probe_id=None):
+    # A single SaveImage/SwarmSaveImageWS node may consume a batch. If
+    # this backend does not expose output metadata, do not manufacture
+    # one-image acceptance from merely having one output node.
+    saved = outputs.get(save_node_id, {})
+    images = saved.get("images")
+    if not isinstance(images, list) and final_input_probe_id:
+        # The WebSocket sink intentionally yields no history metadata.
+        # PreviewImage observes the exact same input tensor, not a parallel
+        # approximation of the compositor.
+        images = outputs.get(final_input_probe_id, {}).get("images")
+    if not isinstance(images, list):
+        raise AssertionError(
+            f"Single final IMAGE batch UNVERIFIED: neither sink {save_node_id} "
+            "nor its input-tensor probe has an images list")
+    if len(images) != 1:
+        raise AssertionError(
+            f"Expected one final saved image, got {len(images)} in sink {save_node_id}")
+    return images[0]
+
+
+def validate_runtime_node_contracts(base_url, graph):
+    # Inspect every actual submitted node, including instrumented previews,
+    # splitters and mask converters. A fixed allowlist can miss a real failure.
+    schemas = {}
+    for class_type in sorted({node["class_type"] for node in graph.values()}):
+        registered = fetch_json(base_url, "object_info/" + class_type)
+        if class_type not in registered:
+            raise AssertionError(
+                f"Actual Comfy backend is missing node {class_type} "
+                "required by the submitted graph")
+        schemas[class_type] = registered[class_type]
+    for node_id, node in graph.items():
+        schema_inputs = schemas[node["class_type"]].get("input", {})
+        required = set(schema_inputs.get("required", {}))
+        missing = sorted(required - set(node["inputs"]))
+        if missing:
+            raise AssertionError(
+                f"Native node {node_id} ({node['class_type']}) is missing required "
+                f"Comfy inputs: {missing}")
+        # A stale SwarmTextEncodeAdvanced declares the same class_type but not
+        # the newly added per-reference image_N sockets. Comfy's node schema
+        # must advertise every independently wired image before inference.
+        if node["class_type"] == "SwarmTextEncodeAdvanced":
+            known_sockets = required | set(schema_inputs.get("optional", {}))
+            missing_images = sorted(
+                name for name in node["inputs"]
+                if name.startswith("image_") and name[6:].isdigit()
+                and name not in known_sockets)
+            if missing_images:
+                raise AssertionError(
+                    f"Selected Comfy backend has obsolete SwarmTextEncodeAdvanced "
+                    f"node: missing image sockets {missing_images} in /object_info. "
+                    "Update SwarmText.py on this backend and refresh its schema.")
+            for name in node["inputs"]:
+                if (name.startswith("image_") and name[6:].isdigit()
+                        and name in known_sockets):
+                    definition = schema_inputs.get("required", {}).get(
+                        name, schema_inputs.get("optional", {}).get(name))
+                    if not isinstance(definition, list) or not definition or definition[0] != "IMAGE":
+                        raise AssertionError(
+                            f"Selected Comfy backend declares {name} as a non-IMAGE socket")
+            # Qwen 2.1's native text node uses prevent_empty_text=True for
+            # BOTH conditionings. The Swarm adapter exposes this as an explicit
+            # optional node input, which older backends silently lack.
+            if node["inputs"].get("qwen21_prevent_empty_text") is not None:
+                if "qwen21_prevent_empty_text" not in known_sockets:
+                    raise AssertionError(
+                        "Selected Comfy backend has obsolete SwarmTextEncodeAdvanced: "
+                        "missing qwen21_prevent_empty_text socket in /object_info. "
+                        "Update SwarmText.py on this backend and refresh its schema.")
+                definition = schema_inputs.get("optional", {}).get(
+                    "qwen21_prevent_empty_text",
+                    schema_inputs.get("required", {}).get("qwen21_prevent_empty_text"))
+                if not isinstance(definition, list) or not definition or definition[0] != "BOOLEAN":
+                    raise AssertionError(
+                        "Selected Comfy backend must declare qwen21_prevent_empty_text as BOOLEAN")
+    return schemas
+
+
+def read_result(base, prompt_id, timeout_seconds, final_output_sink):
+    from PIL import Image  # inference-only: offline graph audit needs no Pillow
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         record = fetch_json(base, "history/" + prompt_id).get(prompt_id)
@@ -241,7 +410,10 @@ def read_result(base, prompt_id, timeout_seconds):
         if status.get("status_str") == "error":
             raise AssertionError(f"Actual Comfy execution failed: {status}")
         outputs = record.get("outputs", {})
-        if all(outputs.get(NODE_IDS[kind], {}).get("images") for kind in OUTPUT_KINDS):
+        if status.get("completed") and all(
+            outputs.get(NODE_IDS[kind], {}).get("images") for kind in OUTPUT_KINDS
+        ):
+            require_single_final_image(outputs, final_output_sink, NODE_IDS["final_input"])
             result = {}
             for kind in OUTPUT_KINDS:
                 images = outputs[NODE_IDS[kind]]["images"]
@@ -264,6 +436,7 @@ def read_result(base, prompt_id, timeout_seconds):
 
 
 def measure(a, b):
+    import numpy as np  # inference-only
     if a.size != b.size:
         raise AssertionError(f"Size mismatch in real image comparison: {a.size} != {b.size}")
     left = np.asarray(a, dtype=np.float32)
@@ -275,8 +448,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", type=Path, required=True,
                         help="Genuine SwarmUI-exported Comfy API workflow for the reported failure")
-    parser.add_argument("--comfy-url", required=True, help="Real Comfy test backend, explicitly selected")
-    parser.add_argument("--outdir", type=Path, required=True)
+    parser.add_argument("--comfy-url", help="Real Comfy test backend, required for inference only")
+    parser.add_argument("--outdir", type=Path, help="Image evidence directory (required for inference only)")
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="Validate the actual exported graph offline; no backend, models, network, or GPU required")
     parser.add_argument("--attempts", type=int, default=1,
                         help="Number of real inference attempts with different segment seeds (1-10)")
     parser.add_argument("--timeout", type=int, default=900)
@@ -287,19 +462,30 @@ def main(argv=None):
     if isinstance(original, dict) and "prompt" in original and isinstance(original["prompt"], dict):
         original = original["prompt"]
     graph, spec = inspect_and_instrument(original)
+    if args.preflight_only:
+        print(json.dumps({
+            "verdict": "GRAPH_PREFLIGHT_PASSED_NOT_IMAGE_ACCEPTANCE",
+            "mode": "offline",
+            "node_count": len(original),
+            "structural_invariants": spec,
+            "model_inference_runs": 0,
+            "semantic_subject_replacement_verified": False,
+            "image_space_lora_effect_verified": False,
+            "runtime_node_registration_verified": False,
+            "native_schema_completeness_verified": False,
+            "one_final_output_sink_verified": True,
+            "exactly_one_final_image_verified": False,
+        }, indent=2))
+        return 0
+    if not args.comfy_url or args.outdir is None:
+        parser.error("--comfy-url and --outdir are required for model-backed inference")
+    import numpy as np  # model-backed diagnostics, never needed by --preflight-only
     stats = fetch_json(args.comfy_url, "system_stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("system"), dict):
         raise AssertionError("The requested URL is not a real Comfy backend")
-    # Probe EVERY load-bearing runtime node before scheduling expensive GPU work.
-    # A checked-in plugin does not prove Comfy loaded or registered it.
-    for expected_node in (
-        "TextEncodeQwenImage21", "InpaintCropImproved", "InpaintStitchImproved",
-        "KSampler", "LanPaint_ImageDecode",
-    ):
-        registered = fetch_json(args.comfy_url, "object_info/" + expected_node)
-        if expected_node not in registered:
-            raise AssertionError(f"Actual Comfy backend does not expose {expected_node}; "
-                                 "a checked-in plugin is not proof that the runtime loaded it.")
+    # Compare ALL actual submitted node schemas before expensive inference.
+    # The diagnostic PreviewImage/MaskToImage nodes are also load-bearing.
+    validate_runtime_node_contracts(args.comfy_url, graph)
     args.outdir.mkdir(parents=True, exist_ok=True)
     results = []
     for i in range(args.attempts):
@@ -321,7 +507,7 @@ def main(argv=None):
         pid = queued.get("prompt_id")
         if not isinstance(pid, str) or not pid:
             raise AssertionError(f"Real Comfy backend refused to queue this workflow: {queued}")
-        images = read_result(args.comfy_url, pid, args.timeout)
+        images = read_result(args.comfy_url, pid, args.timeout, spec["final_output_sink"])
         for kind, image in images.items():
             image.save(args.outdir / f"run-{i+1:02d}-{kind}.png")
         mask = np.asarray(images["mask"].convert("L"), dtype=np.float32) / 255

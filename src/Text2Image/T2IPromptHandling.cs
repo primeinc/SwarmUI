@@ -132,6 +132,55 @@ public class T2IPromptHandling
         return vals.JoinString(",");
     }
 
+    /// <summary>
+    /// Resolve an authored LoRA tag against the model catalog without erasing
+    /// its filename case before exact matching. On Linux, Portrait and
+    /// portrait can be different adapters; the generic fuzzy name matcher
+    /// cannot distinguish them after case folding. Preserve its existing
+    /// single-match and partial-name behavior when no case collision exists.
+    /// </summary>
+    public static string MatchPromptLoraName(string requested, IEnumerable<string> available)
+    {
+        if (requested is null || available is null)
+        {
+            return null;
+        }
+        static string normalized(string name)
+        {
+            string path = name.Replace('\\', '/');
+            // Prompt markup may contain doubly escaped Windows separators.
+            // Normalize path separators without changing Linux filename case.
+            while (path.Contains("//", StringComparison.Ordinal))
+            {
+                path = path.Replace("//", "/", StringComparison.Ordinal);
+            }
+            const string ext = ".safetensors";
+            return path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)
+                ? path[..^ext.Length] : path;
+        }
+        string exactPath = normalized(requested);
+        string[] candidates = [.. available];
+        string exact = candidates.FirstOrDefault(name =>
+            string.Equals(normalized(name), exactPath, StringComparison.Ordinal));
+        if (exact is not null)
+        {
+            return exact;
+        }
+        string[] caseConflicts = [.. candidates.Where(name =>
+            string.Equals(normalized(name), exactPath, StringComparison.OrdinalIgnoreCase))];
+        if (caseConflicts.Length > 1)
+        {
+            throw new SwarmUserErrorException(
+                $"LoRA '{requested}' is ambiguous: multiple installed filenames differ only by case. " +
+                "Specify the exact case-sensitive path shown in the model catalog.");
+        }
+        if (caseConflicts.Length == 1)
+        {
+            return caseConflicts[0];
+        }
+        return T2IParamTypes.GetBestModelInList(requested, candidates);
+    }
+
     /// <summary>Mapping of prompt tag prefixes, to allow for registration of custom prompt tags.</summary>
     public static Dictionary<string, Func<string, PromptTagContext, string>> PromptTagProcessors = [];
 
@@ -550,7 +599,7 @@ public class T2IPromptHandling
             string retainedData = data;
             string parseData = PromptRegion.RemoveTagAttachment(data, "cid", out _);
             data = context.Parse(parseData);
-            string lora = data.ToLowerFast().Replace('\\', '/');
+            string lora = data.Replace('\\', '/');
             int colonIndex = lora.IndexOf(':');
             double strength = 1;
             double tencStrength = double.NaN;
@@ -571,9 +620,28 @@ public class T2IPromptHandling
                 }
             }
             context.Loras ??= [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(context.Input.SourceSession)];
-            string matched = T2IParamTypes.GetBestModelInList(lora, context.Loras);
+            string matched = MatchPromptLoraName(lora, context.Loras);
             if (matched is null)
             {
+                // An explicit Qwen segment LoRA must not disappear into a
+                // warning. If the parser drops it, the native sampler-chain
+                // verifier sees no selected adapter and can pass a render
+                // where the author's requested segment LoRA was never loaded.
+                bool isQwen21(T2IModel model) => model?.ModelClass?.CompatClass?.ID
+                    == T2IModelClassSorter.CompatQwenImage21.ID;
+                // The explicit SegmentModel overrides the base checkpoint.
+                // An SD segment over a Qwen base still uses the ordinary
+                // segment parser; do not force Qwen-only errors onto it.
+                T2IModel segmentOverride = context.Input?.Get(T2IParamTypes.SegmentModel);
+                T2IModel effectiveSegmentModel = segmentOverride
+                    ?? context.Input?.Get(T2IParamTypes.Model);
+                if (context.SectionID >= 10 && isQwen21(effectiveSegmentModel))
+                {
+                    throw new SwarmUserErrorException(
+                        $"Qwen segment {context.SectionID}: requested LoRA '{lora}' is not installed " +
+                        "or not visible in the selected LoRA model catalog. " +
+                        "Refusing to generate an image without the authored segment LoRA.");
+                }
                 context.TrackWarning($"Lora '{lora}' does not exist and will be ignored (out of {context.Loras.Length} existing loras).");
                 return null;
             }
@@ -766,7 +834,10 @@ public class T2IPromptHandling
                 context.Loras ??= [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(context.Input.SourceSession)];
                 foreach (string lora in loras)
                 {
-                    string matched = T2IParamTypes.GetBestModelInList(lora, context.Loras);
+                    // Match the exact adapter selected by the authored tag.
+                    // The generic case-folded catalog lookup can resolve a
+                    // different Linux file and insert its wrong trigger phrase.
+                    string matched = MatchPromptLoraName(lora, context.Loras);
                     if (matched is not null)
                     {
                         add(Program.T2IModelSets["LoRA"].GetModel(matched)?.Metadata?.TriggerPhrase.Replace(';', ','));

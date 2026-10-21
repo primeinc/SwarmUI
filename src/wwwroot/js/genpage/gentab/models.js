@@ -1082,6 +1082,16 @@ function trt_modal_create() {
     });
 }
 
+/** Compute automatic model-specific CFG defaults, never overriding saved choices. */
+function recommendedCfgOnModelSwitch(previousCompat, nextCompat, currentValue, savedUserValue, previousAutoValue) {
+    let oldDefault = previousCompat == 'qwen-image-2.1' ? '1' : '7';
+    let newDefault = nextCompat == 'qwen-image-2.1' ? '1' : '7';
+    if (oldDefault == newDefault || `${currentValue}` != oldDefault || (savedUserValue && savedUserValue != previousAutoValue)) {
+        return null;
+    }
+    return newDefault;
+}
+
 /** Helper class that manages the state of the currently selected model. */
 class CurrentModelHelper {
     constructor() {
@@ -1094,6 +1104,7 @@ class CurrentModelHelper {
         this.curWidth = null;
         this.curHeight = null;
         this.desiredModel = null;
+        this.autoCfgValue = null;
         this.modelSelector.addEventListener('change', () => this.currentModelChanged());
     }
 
@@ -1115,6 +1126,7 @@ class CurrentModelHelper {
             return;
         }
         this.antiDup = true;
+        let previousCompat = this.curCompatClass;
         let priorModel = this.curModel;
         if (priorModel) {
             modelPresetLinkManager.removePresetsFrom('Stable-Diffusion', priorModel);
@@ -1142,6 +1154,26 @@ class CurrentModelHelper {
             this.curCompatClass = compatClass;
             this.curSpecialFormat = specialFormat;
             this.curModel = name;
+        }
+        // ComfyUI's Qwen Image 2.1 templates use CFG 1, not Swarm's generic
+        // CFG 7. The browser submits its displayed CFG value on every request,
+        // so change the visible automatic value when switching model family.
+        // Never override a saved/manual CFG choice or a non-default value.
+        let cfgInput = document.getElementById('input_cfgscale');
+        if (cfgInput) {
+            let cfgCookie = getCookie('lastparam_input_cfgscale');
+            let recommended = recommendedCfgOnModelSwitch(
+                previousCompat, this.curCompatClass, cfgInput.value, cfgCookie, this.autoCfgValue);
+            if (recommended != null) {
+                let cfgParam = gen_param_types.find(p => p.id == 'cfgscale');
+                if (cfgParam) {
+                    setDirectParamValue(cfgParam, recommended, cfgInput, false, false);
+                    this.autoCfgValue = recommended;
+                    if (document.getElementById('alt_negativeprompt_textbox')) {
+                        tweakNegativePromptBox();
+                    }
+                }
+            }
         }
         reviseBackendFeatureSet();
         modelPresetLinkManager.addPresetsFrom('Stable-Diffusion', this.curModel);

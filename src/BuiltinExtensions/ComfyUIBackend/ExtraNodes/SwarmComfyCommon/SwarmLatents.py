@@ -33,6 +33,39 @@ class SwarmOffsetEmptyLatentImage:
         return ({"samples":latent}, )
 
 
+class SwarmEmptyQwenImage21Latent:
+    """Native-format Qwen Image 2.1 latent for 32-pixel-aligned T2I canvases.
+
+    ComfyUI TextEncodeQwenImage21 returns 64 channels at a 16x spatial ratio;
+    the generic EmptyLatentImage instead produces incompatible 4-channel data.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "width": ("INT", {"default": 1024, "min": 32, "max": 16384, "step": 32}),
+            "height": ("INT", {"default": 1024, "min": 32, "max": 16384, "step": 32}),
+            "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+        }}
+
+    CATEGORY = "SwarmUI/latents"
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "generate"
+    DESCRIPTION = "Create a Qwen Image 2.1 empty latent (64 channels at 1/16 image resolution)."
+
+    def generate(self, width, height, batch_size=1):
+        # Step=32 on the UI socket does NOT guarantee raw/API clients send
+        # aligned values. Reject, rather than silently floor the output to
+        # 16 * (width//16) and return a different image size.
+        if width < 32 or height < 32 or width % 32 or height % 32:
+            raise ValueError(
+                f"Qwen Image 2.1 width and height must be a multiple of 32; "
+                f"requested {width}x{height}. Refusing latent truncation.")
+        latent = torch.zeros(
+            [batch_size, 64, height // 16, width // 16],
+            device=comfy.model_management.intermediate_device())
+        return ({"samples": latent},)
+
+
 class SwarmAudioSilentMaskPrefixSuffix:
     @classmethod
     def INPUT_TYPES(s):
@@ -101,5 +134,6 @@ class SwarmAudioSilentMaskPrefixSuffix:
 
 NODE_CLASS_MAPPINGS = {
     "SwarmOffsetEmptyLatentImage": SwarmOffsetEmptyLatentImage,
+    "SwarmEmptyQwenImage21Latent": SwarmEmptyQwenImage21Latent,
     "SwarmAudioSilentMaskPrefixSuffix": SwarmAudioSilentMaskPrefixSuffix
 }
