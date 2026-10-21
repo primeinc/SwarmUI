@@ -1,6 +1,8 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json;
@@ -50,9 +52,48 @@ public class WorkflowTraceBudgetTests : SwarmUITest
     /// <summary>Fixed allowance added to the time bound, for timer and scheduling noise on short builds.</summary>
     public const double TimeSlackMs = 10;
 
-    /// <summary>Cost of one action: elapsed ticks and bytes allocated on this thread.</summary>
+    /// <summary>Counts the bytes the shared char and byte array pools allocate on one thread when a rent finds no pooled array.
+    /// Whether a rent finds one depends on the pool's trimming at each gen2 GC, which follows system memory pressure, not on the code measured (.NET 8 SharedArrayPool.Rent and Trim):
+    /// a Qwen Image 2.1 build's interpolated CreateNode keys (DefaultInterpolatedStringHandler rents from ArrayPool&lt;char&gt;.Shared) moved its count by 2 to 6 MiB from run to run.
+    /// ArrayPoolEventSource raises BufferAllocated(bufferId, bufferSize, poolId, bucketId, reason) on the renting thread, and poolId is the pool's GetHashCode.</summary>
+    public sealed class PoolRefills : EventListener
+    {
+        /// <summary>Pool IDs ArrayPoolEventSource reports for the shared char and byte pools.</summary>
+        public static readonly int CharPoolId = ArrayPool<char>.Shared.GetHashCode(), BytePoolId = ArrayPool<byte>.Shared.GetHashCode();
+
+        /// <summary>Managed thread whose refills are counted: the one that creates the listener.</summary>
+        public readonly int ThreadId = Environment.CurrentManagedThreadId;
+
+        /// <summary>Bytes of arrays the shared char and byte pools allocated on <see cref="ThreadId"/>.</summary>
+        public long Bytes;
+
+        /// <inheritdoc/>
+        protected override void OnEventSourceCreated(EventSource source)
+        {
+            if (source.Name == "System.Buffers.ArrayPoolEventSource")
+            {
+                EnableEvents(source, EventLevel.Informational);
+            }
+        }
+
+        /// <inheritdoc/>
+        protected override void OnEventWritten(EventWrittenEventArgs e)
+        {
+            if (e.EventId != 2 || Environment.CurrentManagedThreadId != ThreadId)
+            {
+                return;
+            }
+            int length = (int)e.Payload[1], pool = (int)e.Payload[2];
+            Bytes += pool == CharPoolId ? length * 2L : pool == BytePoolId ? length : 0;
+        }
+    }
+
+    /// <summary>Shared-pool refills subtracted from every measurement, while <see cref="TestTraceCostStaysWithinBudget"/> runs.</summary>
+    public static PoolRefills Refills;
+
+    /// <summary>Cost of one action: elapsed ticks and bytes allocated on this thread, less <see cref="Refills"/>.</summary>
     /// <param name="Ticks">Elapsed <see cref="Stopwatch"/> ticks.</param>
-    /// <param name="Bytes">Bytes allocated on the measuring thread.</param>
+    /// <param name="Bytes">Bytes allocated on the measuring thread, less shared-pool refills.</param>
     public record class Cost(long Ticks, long Bytes)
     {
         /// <summary>Elapsed milliseconds.</summary>
@@ -68,11 +109,11 @@ public class WorkflowTraceBudgetTests : SwarmUITest
         long ticks = long.MaxValue, bytes = long.MaxValue;
         for (int i = 0; i < repeats; i++)
         {
-            long allocated = GC.GetAllocatedBytesForCurrentThread();
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - (Refills?.Bytes ?? 0);
             long start = Stopwatch.GetTimestamp();
             action();
             ticks = Math.Min(ticks, Stopwatch.GetTimestamp() - start);
-            bytes = Math.Min(bytes, GC.GetAllocatedBytesForCurrentThread() - allocated);
+            bytes = Math.Min(bytes, GC.GetAllocatedBytesForCurrentThread() - (Refills?.Bytes ?? 0) - allocated);
         }
         return new(ticks, bytes);
     }
@@ -155,18 +196,22 @@ public class WorkflowTraceBudgetTests : SwarmUITest
     }
 
     /// <summary>The budgets, for a segment request with an init image and a prompt image across three model families, with small and with large media.
-    /// ImageSharp's default allocator pools image buffers, which made a build's allocation differ by about 2 MiB between processes; measurement uses <see cref="SimpleGcMemoryAllocator"/>, which allocates every buffer, so the counts repeat.</summary>
+    /// ImageSharp's default allocator pools image buffers, which made a build's allocation differ by about 2 MiB between processes; measurement uses <see cref="SimpleGcMemoryAllocator"/>, which allocates every buffer,
+    /// and subtracts the shared array pools' refills (<see cref="PoolRefills"/>), so the counts repeat.</summary>
     [Test]
     public void TestTraceCostStaysWithinBudget()
     {
         MemoryAllocator priorAllocator = SixLabors.ImageSharp.Configuration.Default.MemoryAllocator;
         SixLabors.ImageSharp.Configuration.Default.MemoryAllocator = new SimpleGcMemoryAllocator();
+        using PoolRefills refills = new();
+        Refills = refills;
         try
         {
             MeasureAndCheckBudgets();
         }
         finally
         {
+            Refills = null;
             SixLabors.ImageSharp.Configuration.Default.MemoryAllocator = priorAllocator;
         }
     }
@@ -199,7 +244,7 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             }
         }
         timer.Stop();
-        TestContext.Out.WriteLine($"{costs.Count} cases measured in {timer.ElapsedMilliseconds} ms (after one warm-up, min of 5 alternating runs each, this thread only):");
+        TestContext.Out.WriteLine($"{costs.Count} cases measured in {timer.ElapsedMilliseconds} ms (after one warm-up, min of 5 alternating runs each, this thread only, {(Refills?.Bytes ?? 0) / 1024} KiB of shared-pool refills subtracted):");
         foreach (CaseCost cost in costs)
         {
             TestContext.Out.WriteLine($"  {cost.Label} (media {cost.MediaBytes / 1024} KiB): untraced {cost.Untraced}; traced {cost.Traced}; extra {cost.ExtraBytes / 1024.0:0.0} KiB; checkpoint {cost.Checkpoint}");
