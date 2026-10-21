@@ -188,6 +188,43 @@ public class QwenSegmentNativePromptTests : SwarmUITest
     }
 
     [Test]
+    public static void PromptImageOnlySourceWithDisabledReferenceDoesNotLeakIntoVision()
+    {
+        // A user-provided PromptImages[0] becomes the source when there is no
+        // Init Image. Disabling the original reference must also exclude it
+        // from the list of independent visual references.
+        using SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24> pixels = new(96, 96);
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.PromptImages,
+            new System.Collections.Generic.List<SwarmUI.Utils.Image> { new(pixels) });
+        input.Set(T2IParamTypes.SegmentQwenUseOriginalReference, false, sectionId: 11);
+        WorkflowGenerator generator = new()
+        {
+            UserInput = input,
+            Workflow = new JObject(),
+            Features = new() { "comfy_loadimage_b64" }
+        };
+        WGNodeData clip = new(new JArray("clip", 0), generator, WGNodeData.DT_TEXTENC, null);
+        WGNodeData vae = new(new JArray("vae", 0), generator, WGNodeData.DT_VAE, null);
+        generator.CreateQwen21SegmentConditioning("Keep the scene.", "", clip, vae,
+            new JArray("crop", 1), new JArray("crop", 2), 11, steps: 4);
+        JObject[] encoders = [.. generator.Workflow.Properties()
+            .Where(p => p.Value?["class_type"]?.ToString() == "SwarmTextEncodeAdvanced")
+            .Select(p => (JObject)p.Value)];
+        Assert.That(encoders, Has.Length.EqualTo(2));
+        foreach (JObject encoder in encoders)
+        {
+            JObject inputs = (JObject)encoder["inputs"];
+            Assert.That(inputs["images"]?.Type == JTokenType.Array, Is.False,
+                "Do not smuggle the explicitly disabled edit source into Qwen vision");
+            Assert.That(inputs["image_1"], Is.Null,
+                "The original Prompt Image cannot return as an independent reference");
+        }
+        Assert.That(generator.Workflow.Properties().Count(p =>
+            p.Value?["class_type"]?.ToString() == "ReferenceLatent"), Is.Zero);
+    }
+
+    [Test]
     public static void DisablingOriginalReferenceDoesNotInventAnImageOrTextToken()
     {
         var (positive, negative, graph, _) = ConditionersFor("HannahLynn", useOriginalReference: false);
