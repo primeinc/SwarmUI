@@ -76,7 +76,8 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         // backend image uploads or workflow submission.
         bool isSegmentEdit = usedTypes.Contains("InpaintCropImproved");
         bool isQwen21ImageGeneration = usedTypes.Contains("SwarmEmptyQwenImage21Latent");
-        bool isQwen21NativeEdit = HasQwen21AdvancedEncoderInputs(workflow);
+        bool isQwen21NativeEdit = HasQwen21AdvancedEncoderInputs(workflow)
+            || usedTypes.Contains("TextEncodeQwenImage21");
         if (!isSegmentEdit && !isQwen21ImageGeneration && !isQwen21NativeEdit)
         {
             return;
@@ -94,7 +95,9 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         {
             throw new SwarmUserErrorException(
                 "The selected ComfyUI backend does not have required " +
-                (isSegmentEdit ? "Qwen segmented-edit" : "Qwen Image 2.1 text-to-image") +
+                (isSegmentEdit ? "Qwen segmented-edit" :
+                    isQwen21ImageGeneration ? "Qwen Image 2.1 text-to-image" :
+                    "Qwen Image 2.1 image-edit") +
                 " nodes registered: " +
                 string.Join(", ", missing) +
                 ". Install/enable those node packages on THIS backend and refresh its /object_info. " +
