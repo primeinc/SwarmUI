@@ -132,6 +132,45 @@ public class T2IPromptHandling
         return vals.JoinString(",");
     }
 
+    /// <summary>
+    /// Resolve an authored LoRA tag against the model catalog without erasing
+    /// its filename case before exact matching. On Linux, Portrait and
+    /// portrait can be different adapters; the generic fuzzy name matcher
+    /// cannot distinguish them after case folding. Preserve its existing
+    /// single-match and partial-name behavior when no case collision exists.
+    /// </summary>
+    public static string MatchPromptLoraName(string requested, IEnumerable<string> available)
+    {
+        if (requested is null || available is null)
+        {
+            return null;
+        }
+        static string normalized(string name)
+        {
+            string path = name.Replace('\\', '/');
+            const string ext = ".safetensors";
+            return path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)
+                ? path[..^ext.Length] : path;
+        }
+        string exactPath = normalized(requested);
+        string[] candidates = [.. available];
+        string exact = candidates.FirstOrDefault(name =>
+            string.Equals(normalized(name), exactPath, StringComparison.Ordinal));
+        if (exact is not null)
+        {
+            return exact;
+        }
+        string[] caseConflicts = [.. candidates.Where(name =>
+            string.Equals(normalized(name), exactPath, StringComparison.OrdinalIgnoreCase))];
+        if (caseConflicts.Length > 1)
+        {
+            throw new SwarmUserErrorException(
+                $"LoRA '{requested}' is ambiguous: multiple installed filenames differ only by case. " +
+                "Specify the exact case-sensitive path shown in the model catalog.");
+        }
+        return T2IParamTypes.GetBestModelInList(requested, candidates);
+    }
+
     /// <summary>Mapping of prompt tag prefixes, to allow for registration of custom prompt tags.</summary>
     public static Dictionary<string, Func<string, PromptTagContext, string>> PromptTagProcessors = [];
 
@@ -550,7 +589,7 @@ public class T2IPromptHandling
             string retainedData = data;
             string parseData = PromptRegion.RemoveTagAttachment(data, "cid", out _);
             data = context.Parse(parseData);
-            string lora = data.ToLowerFast().Replace('\\', '/');
+            string lora = data.Replace('\\', '/');
             int colonIndex = lora.IndexOf(':');
             double strength = 1;
             double tencStrength = double.NaN;
@@ -571,7 +610,7 @@ public class T2IPromptHandling
                 }
             }
             context.Loras ??= [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(context.Input.SourceSession)];
-            string matched = T2IParamTypes.GetBestModelInList(lora, context.Loras);
+            string matched = MatchPromptLoraName(lora, context.Loras);
             if (matched is null)
             {
                 context.TrackWarning($"Lora '{lora}' does not exist and will be ignored (out of {context.Loras.Length} existing loras).");
