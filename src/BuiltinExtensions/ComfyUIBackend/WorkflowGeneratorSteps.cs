@@ -2247,9 +2247,25 @@ public class WorkflowGeneratorSteps
                     }
                     if (part.Strength < 0)
                     {
+                        // Inverse segmentation is an existing Swarm tag feature.
+                        // Guard the ORIGINAL detector support before inversion:
+                        // an empty detector becomes an all-white inverted mask.
+                        // The complement may legitimately cover >99% of the
+                        // canvas, so its subsequent guard must allow 100%.
+                        string invertInput = segmentNode;
+                        if (g.IsQwenImage21())
+                        {
+                            string detectorGuard = g.CreateNode("SwarmRequireNonEmptyMask", new JObject()
+                            {
+                                ["mask"] = NodePath(segmentNode, 0),
+                                ["minimum_confidence"] = 0.0,
+                                ["maximum_coverage"] = 1.0
+                            });
+                            invertInput = detectorGuard;
+                        }
                         segmentNode = g.CreateNode("InvertMask", new JObject()
                         {
-                            ["mask"] = NodePath(segmentNode, 0)
+                            ["mask"] = NodePath(invertInput, 0)
                         });
                     }
                     // Keep detector support separate from the expanded / blurred compositor mask.
@@ -2366,7 +2382,7 @@ public class WorkflowGeneratorSteps
                             // Refuse nearly full-canvas detection before it
                             // becomes an opaque replacement mask. Do not
                             // silently change the authored CLIPSeg threshold.
-                            ["maximum_coverage"] = 0.99
+                            ["maximum_coverage"] = part.Strength < 0 ? 1.0 : 0.99
                         });
                         // Native ThresholdMask converts accepted CLIPSeg confidence
                         // into an opaque subject mask. Without this, the
