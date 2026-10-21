@@ -1,0 +1,3 @@
+Negative control: PR source commit af3713772739d28d9c31f531056f1bd519c8de3b
+Expected failure: RawQwenPreflightMustEnforceActualLanPaintRequiredFields because prior preflight validates node names but not required LanPaint inputs.
+This is a pinned test-only branch, not a production merge target.
