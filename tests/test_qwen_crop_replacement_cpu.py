@@ -126,5 +126,45 @@ class CropReplacementTests(unittest.TestCase):
                             "Strong remote context must change native bounds")
 
 
+    def test_native_crop_inverse_mask_must_keep_enclosed_excluded_subject(self):
+        # This is the exact inverse-segment adversarial case: an author's
+        # subject is the BLACK hole inside a WHITE complement selection.
+        # Native fillholes_iterative_hipass_fill_m would change the black
+        # hole to white, silently sampling over the excluded person.
+        image = torch.full((1, 256, 256, 3), 0.15, dtype=torch.float32)
+        image[:, 96:160, 96:160, :] = 0.9
+        inverse = torch.ones((1, 256, 256), dtype=torch.float32)
+        inverse[:, 96:160, 96:160] = 0.0
+        args = dict(
+            image=image, mask=inverse,
+            downscale_algorithm="bilinear", upscale_algorithm="bicubic",
+            preresize=False, preresize_mode="ensure minimum resolution",
+            preresize_min_width=1024, preresize_min_height=1024,
+            preresize_max_width=16384, preresize_max_height=16384,
+            mask_expand_pixels=0, mask_invert=False,
+            mask_blend_pixels=0, mask_hipass_filter=0.5,
+            extend_for_outpainting=False, extend_up_factor=1.0,
+            extend_down_factor=1.0, extend_left_factor=1.0,
+            extend_right_factor=1.0, context_from_mask_extend_factor=1.2,
+            output_resize_to_target_size=True, output_target_width=256,
+            output_target_height=256, output_padding="32",
+            device_mode="cpu (compatible)"
+        )
+        crop = InpaintCropImproved()
+        stitch = InpaintStitchImproved()
+        def composited(fill_holes):
+            metadata, pixels, _ = crop.inpaint_crop(
+                **{**args, "mask_fill_holes": fill_holes})[:3]
+            return stitch.inpaint_stitch(
+                metadata, torch.full_like(pixels, 0.4))[0]
+        preserved = composited(False)
+        wrongly_filled = composited(True)
+        self.assertGreater(float(preserved[0, 128, 128, 0]), 0.85,
+                           "An intentionally EXCLUDED subject must remain the source pixel")
+        self.assertLess(float(wrongly_filled[0, 128, 128, 0]), 0.55,
+                        "Negative control: native hole-fill must demonstrate why it is unsafe")
+        self.assertGreater(float(preserved[0, 10, 10, 0]), 0.3,
+                           "The INVERTED surrounding area still receives replacement pixels")
+
 if __name__ == "__main__":
     unittest.main()
