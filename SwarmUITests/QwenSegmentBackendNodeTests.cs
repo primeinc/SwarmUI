@@ -604,6 +604,24 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
         Assert.That(error.Message, Does.Contain("LanPaint_KSampler"));
     }
 
+    [TestCase("${node_kind}")]
+    [TestCase("Preview${node_kind}")]
+    public static void NonQwenRawMacroDrivenClassRetainsPreviouslySupportedExpansion(string dynamicClass)
+    {
+        // Preflight targets Qwen native contracts, not ordinary raw workflow
+        // macros: the existing CreateWorkflow path expands these for users.
+        string graph = """
+            {
+                "source":{"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "custom":{"class_type":"__DYNAMIC__","inputs":{"value":5}}
+            }
+            """.Replace("__DYNAMIC__", dynamicClass);
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(
+                graph, new HashSet<string> { "LoadImage" }),
+            "Qwen-specific preflight must not reject unrelated raw workflow class macros");
+    }
+
     [Test]
     public static void RawQwenPreflightRejectsDynamicClassTypeBeforeUpload()
     {
