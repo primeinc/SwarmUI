@@ -144,5 +144,79 @@ class ClipSegCacheCPU(unittest.TestCase):
                                  self.bodies["config.json"])
 
 
+class ClipSegModelReuseCPU(unittest.TestCase):
+    def fixture(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+
+        module = load_real_module()
+
+        class CountingProcessor:
+            loads = 0
+
+            @classmethod
+            def from_pretrained(cls, _path):
+                cls.loads += 1
+                time.sleep(0.01)
+                return cls()
+
+        class CountingModel:
+            loads = 0
+
+            @classmethod
+            def from_pretrained(cls, _path):
+                cls.loads += 1
+                time.sleep(0.01)
+                return cls()
+
+        module.CLIPSegProcessor = CountingProcessor
+        module.CLIPSegForImageSegmentation = CountingModel
+        return module, CountingProcessor, CountingModel, ThreadPoolExecutor
+
+    @staticmethod
+    def populate(location, names):
+        location.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (location / name).write_bytes(b"valid-stamp")
+
+    def test_repeated_regions_reuse_loaded_detector(self):
+        module, processor, model, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            location = Path(root)
+            self.populate(location, module._CLIPSEG_FILES)
+            first = module._load_cached_clipseg(str(location))
+            second = module._load_cached_clipseg(str(location))
+            self.assertIs(first, second)
+            self.assertEqual((processor.loads, model.loads), (1, 1))
+            self.assertEqual(len(module._CLIPSEG_MODEL_CACHE), 2,
+                             "Only one bounded cache entry may be retained")
+
+    def test_changed_model_file_and_new_directory_invalidate_cache(self):
+        module, processor, model, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / "A"
+            second = Path(root) / "B"
+            self.populate(first, module._CLIPSEG_FILES)
+            self.populate(second, module._CLIPSEG_FILES)
+            old = module._load_cached_clipseg(str(first))
+            (first / "config.json").write_bytes(b"new-valid-metadata-stamp")
+            repaired = module._load_cached_clipseg(str(first))
+            self.assertIsNot(repaired, old)
+            distinct = module._load_cached_clipseg(str(second))
+            self.assertIsNot(distinct, repaired)
+            self.assertEqual((processor.loads, model.loads), (3, 3))
+
+    def test_concurrent_regions_load_one_model(self):
+        module, processor, model, ThreadPoolExecutor = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            location = Path(root)
+            self.populate(location, module._CLIPSEG_FILES)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(
+                    module._load_cached_clipseg, [str(location)] * 8))
+            self.assertTrue(all(value is results[0] for value in results))
+            self.assertEqual((processor.loads, model.loads), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()
