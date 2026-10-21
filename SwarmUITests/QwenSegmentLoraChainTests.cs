@@ -177,6 +177,26 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void FullSwarmPromptParserRejectsMissingQwenSegmentAdapterAfterCidAssignment()
+    {
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.Model, QwenPromptModel());
+        T2IPromptHandling.PromptTagContext context = new()
+        {
+            Input = input,
+            Param = T2IParamTypes.Prompt.Type.ID,
+            Loras = ["installed/real.safetensors"]
+        };
+        // Full three-pass Swarm parsing must propagate the generated segment
+        // cid to the following LoRA tag before the actual postprocessor runs.
+        const string prompt = "<segment:girl,0.8,0.1> Edit the girl <lora:missing/portrait>";
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            T2IPromptHandling.ProcessPromptLike(prompt, context, true));
+        Assert.That(error.Message, Does.Contain("Qwen segment 11"));
+        Assert.That(error.Message, Does.Contain("missing/portrait"));
+    }
+
+    [Test]
     public static void NonQwenSegmentOverrideMustNotAcquireQwenMissingLoRAError()
     {
         T2IModelClass sdClass = new()
