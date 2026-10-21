@@ -98,6 +98,61 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
     }
 
     [Test]
+    public static void RawQwenPreflightMustEnforceActualLanPaintRequiredFields()
+    {
+        // The exact regression class that originally bypassed C# and CPU
+        // checks: Python sampler defaults do not satisfy Comfy workflow JSON.
+        JObject backend = new()
+        {
+            ["LanPaint_KSampler"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["required"] = new JObject
+                    {
+                        ["LanPaint_NumSteps"] = new JArray("INT"),
+                        ["LanPaint_PromptMode"] = new JArray("STRING"),
+                        ["LanPaint_Info"] = new JArray("STRING"),
+                        ["Inpainting_mode"] = new JArray("STRING")
+                    }
+                }
+            }
+        };
+        JObject graph = new()
+        {
+            ["crop"] = Node("InpaintCropImproved"),
+            ["sampler"] = new JObject
+            {
+                ["class_type"] = "LanPaint_KSampler",
+                ["inputs"] = new JObject
+                {
+                    ["LanPaint_NumSteps"] = 5,
+                    ["LanPaint_PromptMode"] = "Image First",
+                    ["LanPaint_Info"] = "LanPaint KSampler.",
+                    ["Inpainting_mode"] = "Image Inpainting"
+                }
+            }
+        };
+        HashSet<string> available = ["InpaintCropImproved", "LanPaint_KSampler"];
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(graph.ToString(), available, backend));
+        foreach (string field in new[] { "LanPaint_Info", "Inpainting_mode", "LanPaint_NumSteps" })
+        {
+            JObject absent = (JObject)graph.DeepClone();
+            ((JObject)absent["sampler"]["inputs"]).Remove(field);
+            SwarmUserErrorException failure = Assert.Throws<SwarmUserErrorException>(() =>
+                ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(absent.ToString(), available, backend),
+                $"Comfy's required '{field}' must fail before sending the workflow");
+            Assert.That(failure.Message, Does.Contain(field));
+        }
+        // Other models do not inherit Qwen-only native contract checks.
+        JObject ordinary = new() { ["sampler"] = graph["sampler"].DeepClone() };
+        ((JObject)ordinary["sampler"]["inputs"]).Remove("LanPaint_Info");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(ordinary.ToString(), available, backend));
+    }
+
+    [Test]
     public static void StaleExternalSwarmTextSchemaRejectsIndependentQwenReferences()
     {
         JObject graph = NativeGraph();
