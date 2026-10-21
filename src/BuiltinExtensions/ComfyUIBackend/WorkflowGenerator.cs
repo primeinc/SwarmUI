@@ -23,9 +23,14 @@ public partial class WorkflowGenerator
     /// "-10" is the priority of the first core pre-init,
     /// "0" is before final outputs,
     /// "10" is final output.</param>
-    /// <param name="Name">Optional human-readable name of the step.</param>
-    /// <param name="Source">Registration source, as file:line.</param>
-    public record class WorkflowGenStep(Action<WorkflowGenerator> Action, double Priority, string Name = null, string Source = null);
+    public record class WorkflowGenStep(Action<WorkflowGenerator> Action, double Priority)
+    {
+        /// <summary>Optional human-readable name of the step.</summary>
+        public string Name;
+
+        /// <summary>Registration source, as file:line.</summary>
+        public string Source;
+    }
 
     /// <summary>Callable steps for modifying workflows as they go.</summary>
     public static List<WorkflowGenStep> Steps = [];
@@ -51,14 +56,14 @@ public partial class WorkflowGenerator
     /// <summary>Register a new step to the workflow generator.</summary>
     public static void AddStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        Steps.Add(new(step, priority, name, $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}"));
+        Steps.Add(new(step, priority) { Name = name, Source = $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}" });
         Steps = [.. Steps.OrderBy(s => s.Priority)];
     }
 
     /// <summary>Register a new step to the workflow generator.</summary>
     public static void AddModelGenStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        ModelGenSteps.Add(new(step, priority, name, $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}"));
+        ModelGenSteps.Add(new(step, priority) { Name = name, Source = $"{callerFile.Replace('\\', '/').AfterLast('/')}:{callerLine}" });
         ModelGenSteps = [.. ModelGenSteps.OrderBy(s => s.Priority)];
     }
 

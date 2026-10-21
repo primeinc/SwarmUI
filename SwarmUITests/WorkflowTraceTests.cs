@@ -951,6 +951,17 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.DoesNotThrow(() => trace.RecordSent(null, "{}"), "a null sent workflow is logged, not thrown");
     }
 
+    /// <summary><see cref="WorkflowGenerator.WorkflowGenStep"/> keeps upstream's positional shape, so an extension that constructs or deconstructs it as (Action, Priority) still compiles; the step's name and source are not positional.</summary>
+    [Test]
+    public void TestWorkflowGenStepKeepsTheUpstreamShape()
+    {
+        Action<WorkflowGenerator> action = _ => { };
+        WorkflowGenerator.WorkflowGenStep step = new(action, 5);
+        (Action<WorkflowGenerator> deconstructed, double priority) = step;
+        Assert.That((deconstructed, priority, step.Name, step.Source), Is.EqualTo((action, 5.0, (string)null, (string)null)));
+        Assert.That(WorkflowGenerator.Steps.All(s => !string.IsNullOrEmpty(s.Source)), Is.True, "every registered step records its source");
+    }
+
     /// <summary>Without ComfyUI object_info, the record says that link types, declared inputs and node classes were not checked, instead of listing no problems.</summary>
     [Test]
     public void TestMissingObjectInfoIsStated()
