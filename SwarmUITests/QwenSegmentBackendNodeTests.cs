@@ -219,6 +219,70 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, new JObject()));
     }
 
+
+    [Test]
+    public static void QwenOnlyRawImageEditWithoutSegmentOrEmptyLatentMustPreflightBackend()
+    {
+        // A valid custom Qwen image-edit graph can supply its own starting
+        // latent, so neither InpaintCropImproved nor SwarmEmptyQwenImage21Latent
+        // is a reliable sentinel for newly required Swarm encoder inputs.
+        JObject graph = new()
+        {
+            ["source"] = Node("LoadImage"),
+            ["vision"] = Node("SwarmTextEncodeAdvanced")
+        };
+        graph["vision"]["inputs"]["image_1"] = new JArray("source", 0);
+        graph["vision"]["inputs"]["qwen21_prevent_empty_text"] = true;
+        HashSet<string> available = ["LoadImage"];
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, available))
+            .Message, Does.Contain("SwarmTextEncodeAdvanced"),
+            "A Qwen encoder-only graph must not bypass selected-backend node inventory");
+
+        available.Add("SwarmTextEncodeAdvanced");
+        JObject backend = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["images"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend))
+            .Message, Does.Contain("image_1"),
+            "A Qwen raw edit has no crop/empty-latent sentinel but still needs typed image slots");
+
+        JObject optional = (JObject)backend["SwarmTextEncodeAdvanced"]["input"]["optional"];
+        optional["image_1"] = new JArray("IMAGE");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend))
+            .Message, Does.Contain("qwen21_prevent_empty_text"));
+        optional["qwen21_prevent_empty_text"] = new JArray("BOOLEAN");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateNativeQwenSegmentNodes(graph, available));
+
+        const string raw = """
+            {
+                "source":{"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "vision":{"class_type":"SwarmTextEncodeAdvanced",
+                    "inputs":{"image_1":["source",0],"qwen21_prevent_empty_text":true}}
+            }
+            """;
+        optional.Remove("image_1");
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, available, backend))
+            .Message, Does.Contain("image_1"),
+            "Raw edits must fail before the image-upload placeholder is resolved");
+        optional["image_1"] = new JArray("IMAGE");
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, available, backend));
+    }
+
     [Test]
     public static void RawQwenPreflightRejectsStaleIndependentVisionSocketsBeforeUpload()
     {
