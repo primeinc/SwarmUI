@@ -629,9 +629,13 @@ public class T2IPromptHandling
                 // where the author's requested segment LoRA was never loaded.
                 bool isQwen21(T2IModel model) => model?.ModelClass?.CompatClass?.ID
                     == T2IModelClassSorter.CompatQwenImage21.ID;
-                if (context.SectionID >= 10 && context.Input is not null
-                    && (isQwen21(context.Input.Get(T2IParamTypes.Model))
-                        || isQwen21(context.Input.Get(T2IParamTypes.SegmentModel))))
+                // The explicit SegmentModel overrides the base checkpoint.
+                // An SD segment over a Qwen base still uses the ordinary
+                // segment parser; do not force Qwen-only errors onto it.
+                T2IModel segmentOverride = context.Input?.Get(T2IParamTypes.SegmentModel);
+                T2IModel effectiveSegmentModel = segmentOverride
+                    ?? context.Input?.Get(T2IParamTypes.Model);
+                if (context.SectionID >= 10 && isQwen21(effectiveSegmentModel))
                 {
                     throw new SwarmUserErrorException(
                         $"Qwen segment {context.SectionID}: requested LoRA '{lora}' is not installed " +
