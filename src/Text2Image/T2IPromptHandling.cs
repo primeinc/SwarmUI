@@ -805,7 +805,10 @@ public class T2IPromptHandling
                 context.Loras ??= [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(context.Input.SourceSession)];
                 foreach (string lora in loras)
                 {
-                    string matched = T2IParamTypes.GetBestModelInList(lora, context.Loras);
+                    // Match the exact adapter selected by the authored tag.
+                    // The generic case-folded catalog lookup can resolve a
+                    // different Linux file and insert its wrong trigger phrase.
+                    string matched = MatchPromptLoraName(lora, context.Loras);
                     if (matched is not null)
                     {
                         add(Program.T2IModelSets["LoRA"].GetModel(matched)?.Metadata?.TriggerPhrase.Replace(';', ','));
