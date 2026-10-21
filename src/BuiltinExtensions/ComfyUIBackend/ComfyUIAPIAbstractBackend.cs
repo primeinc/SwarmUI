@@ -1153,12 +1153,6 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     }
 
     /// <summary>
-    /// Parse raw Comfy workflow node types without uploading referenced files.
-    /// Raw placeholders may intentionally be unquoted until CreateWorkflow
-    /// substitutes their values; the same inert-null preprocessing is used by
-    /// TryIsValid when deciding whether a custom workflow fits a backend.
-    /// </summary>
-    /// <summary>
     /// Resolve ONLY class_type placeholders before CreateWorkflow performs
     /// image uploads. A dynamic selector can name Qwen even when no other
     /// Qwen node is statically visible. No user prompt or workflow is changed.
@@ -1208,6 +1202,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         });
     }
 
+    /// <summary>
+    /// Parse raw Comfy node types and statically check Qwen requirements
+    /// before any remote image upload. Other workflows keep existing macros.
+    /// </summary>
     public static void PreflightRawQwenSegmentNodes(
         string rawWorkflow, IReadOnlySet<string> availableNodeTypes,
         JObject backendObjectInfo = null, T2IParamInput userInput = null)
