@@ -100,25 +100,38 @@ class SwarmClipSeg:
     DESCRIPTION = "Segment an image using CLIPSeg, creating a mask of what part of an image appears to match the given text."
 
     def seg(self, images, match_text, threshold):
-        # TODO: Batch support?
-        i = 255.0 * images[0, ..., :3].cpu().numpy()
-        img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-        # TODO: Cache the model in RAM in some way?
+        if images.ndim != 4 or images.shape[0] < 1:
+            raise ValueError("SwarmClipSeg expects a nonempty BHWC image batch")
         path = get_path() + "/clipseg-rd64-refined-fp16-safetensors/"
         download_model(path, "https://huggingface.co/mcmonkey/clipseg-rd64-refined-fp16/resolve/main/")
         processor = CLIPSegProcessor.from_pretrained(path)
         model = CLIPSegForImageSegmentation.from_pretrained(path)
-        with torch.no_grad():
-            mask = model(**processor(text=match_text, images=img, return_tensors="pt", padding=True))[0]
-        mask = torch.nn.functional.threshold(mask.sigmoid(), threshold, 0)
-        mask -= mask.min()
-        max = mask.max()
-        if max > 0:
-            mask /= max
-        while mask.ndim < 4:
-            mask = mask.unsqueeze(0)
-        mask = torch.nn.functional.interpolate(mask, size=(images.shape[1], images.shape[2]), mode="bilinear").squeeze(0)
-        return (mask,)
+
+        # The Comfy MASK batch must have the same length and order as IMAGE.
+        # The former implementation inspected only images[0] and returned
+        # a single mask even when the caller supplied multiple images.
+        # Process one image at a time with one loaded detector so each frame
+        # is thresholded and normalized independently, not across the batch.
+        masks = []
+        for frame in images:
+            array = 255.0 * frame[..., :3].cpu().numpy()
+            img = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
+            with torch.no_grad():
+                logits = model(**processor(
+                    text=match_text, images=img, return_tensors="pt", padding=True))[0]
+            mask = torch.nn.functional.threshold(logits.sigmoid(), threshold, 0)
+            mask -= mask.min()
+            maximum = mask.max()
+            if maximum > 0:
+                mask /= maximum
+            while mask.ndim < 4:
+                mask = mask.unsqueeze(0)
+            mask = torch.nn.functional.interpolate(
+                mask, size=(images.shape[1], images.shape[2]), mode="bilinear")
+            if mask.shape[0] != 1 or mask.shape[1] != 1:
+                raise ValueError("SwarmClipSeg detector returned multiple masks for one image")
+            masks.append(mask[:, 0])
+        return (torch.cat(masks, dim=0),)
 
 NODE_CLASS_MAPPINGS = {
     "SwarmClipSeg": SwarmClipSeg,
