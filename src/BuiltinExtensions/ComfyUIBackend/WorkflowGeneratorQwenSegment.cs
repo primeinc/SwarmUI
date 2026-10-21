@@ -10,12 +10,16 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public partial class WorkflowGenerator
 {
     /// <summary>
-    /// Skip PromptImages[0] only when that image was also the crop source.
-    /// An independent InitImage source does not consume PromptImages[0].
+    /// With no Init Image, PromptImages[0] is the selected segment source,
+    /// regardless of whether its additional vision reference is enabled.
+    /// Never add that same source back as an independent extra reference when
+    /// SegmentQwenUseOriginalReference is disabled. An independent Init Image
+    /// does not consume PromptImages[0]. The useOriginal argument is retained
+    /// for callers of this public helper.
     /// </summary>
     public static int FirstQwen21AdditionalReferenceIndex(bool useOriginal, bool hasInitImage)
     {
-        return useOriginal && !hasInitImage ? 1 : 0;
+        return hasInitImage ? 0 : 1;
     }
 
     /// <summary>
