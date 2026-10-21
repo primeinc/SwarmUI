@@ -29,6 +29,54 @@ public class QwenSegmentLoraChainTests : SwarmUITest
         }
     }
 
+    [Test]
+    public static void PromptLoRAIdentityPreservesAuthoredLinuxFilenameCase()
+    {
+        // Case-colliding filenames may coexist on a Linux ComfyUI backend.
+        // A lowercase preprocessing step previously selected the first
+        // catalog entry even when the user explicitly chose the other one.
+        string[] catalog =
+        [
+            "subjects/Portrait.safetensors",
+            "subjects/portrait.safetensors"
+        ];
+        Assert.That(T2IPromptHandling.MatchPromptLoraName("subjects/portrait", catalog),
+            Is.EqualTo("subjects/portrait.safetensors"));
+        Assert.That(T2IPromptHandling.MatchPromptLoraName("subjects/Portrait", catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"));
+        Assert.That(T2IPromptHandling.MatchPromptLoraName(
+            @"subjects\\Portrait.safetensors", catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"),
+            "Windows separators and optional suffix must still resolve the exact adapter.");
+    }
+
+    [Test]
+    public static void AmbiguousCaseInsensitivePromptLoRAMatchMustNotPickWrongAdapter()
+    {
+        string[] catalog =
+        [
+            "subjects/Portrait.safetensors",
+            "subjects/portrait.safetensors"
+        ];
+        SwarmUserErrorException error = Assert.Throws<SwarmUserErrorException>(() =>
+            T2IPromptHandling.MatchPromptLoraName("subjects/PORTRAIT", catalog));
+        Assert.That(error.Message, Does.Contain("ambiguous"));
+        Assert.That(error.Message, Does.Contain("case-sensitive"));
+    }
+
+    [Test]
+    public static void PromptLoRAResolutionKeepsLegacySingleMatchAndFuzzyNames()
+    {
+        string[] catalog = ["subjects/Portrait.safetensors"];
+        Assert.That(T2IPromptHandling.MatchPromptLoraName("subjects/portrait", catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"),
+            "Existing case-insensitive input remains accepted when unambiguous.");
+        Assert.That(T2IPromptHandling.MatchPromptLoraName("Portrait", catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"),
+            "Legacy shorthand selection remains supported.");
+        Assert.That(T2IPromptHandling.MatchPromptLoraName("unrelated", catalog), Is.Null);
+    }
+
     private static WorkflowGenerator Prepare(int segmentConfinement = 11, double selectedStrength = 1)
     {
         T2IParamInput input = new(null);
