@@ -146,6 +146,10 @@ public class WorkflowTraceTests : SwarmUITest
                 failures.Add($"{label}: model load #{load.Index} ({load.Type} {load.Model}) has no model output recorded");
             }
         }
+        foreach (WorkflowTrace.EditRecord edit in trace.Edits.Where(e => e.Step < 0))
+        {
+            failures.Add($"{label}: {trace.DescribeEdit(edit)}: an edit made outside any generator step");
+        }
         if (trace.StepStack.Count != 0 || trace.LoadStack.Count != 0 || trace.Stages.Count != 0)
         {
             failures.Add($"{label}: unbalanced trace scopes (steps={trace.StepStack.Count}, loads={trace.LoadStack.Count}, stages={trace.Stages.Count})");
@@ -206,7 +210,8 @@ public class WorkflowTraceTests : SwarmUITest
     /// <param name="TracedTicks">Traced build time.</param>
     /// <param name="SummaryChars">Stored summary metadata length.</param>
     /// <param name="JpegNotice">True if a JPEG save would store the use-PNG notice instead of the trace.</param>
-    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int SummaryChars = 0, bool JpegNotice = false);
+    /// <param name="EditSteps">Name of the step behind each in-place edit the trace recorded.</param>
+    public record class CaseOutcome(string Label, string Rejected, string Crash, List<string> Failures, long PlainTicks, long TracedTicks, int SummaryChars = 0, bool JpegNotice = false, List<string> EditSteps = null);
 
     /// <summary>For a request the untraced build throws on, checks that tracing changed nothing about the failure: same exception, same partial workflow, same input state, no trace stored in metadata, tracker detached, error recorded, and the partial trace still builds.</summary>
     public static void CheckFailureIsNoOp(Attempt plain, Attempt traced, string label, List<string> failures)
@@ -289,7 +294,7 @@ public class WorkflowTraceTests : SwarmUITest
             failures.Add($"{label}: tracing changed the workflow");
         }
         (int summaryChars, bool jpegNotice) = CheckTrace(traced, label, failures);
-        return new(label, null, null, failures, plainTicks, tracedTicks, summaryChars, jpegNotice);
+        return new(label, null, null, failures, plainTicks, tracedTicks, summaryChars, jpegNotice, [.. traced.Trace.Edits.Select(e => traced.Trace.StepName(e.Step))]);
     }
 
     /// <summary>The fitness function: every main model class, in both checkpoint and diffusion_models formats, across every option variant.
@@ -330,6 +335,8 @@ public class WorkflowTraceTests : SwarmUITest
         {
             CaseOutcome largest = checkedOutcomes[^1];
             TestContext.Out.WriteLine($"Stored summary size (PNG, full trace): median {checkedOutcomes[checkedOutcomes.Count / 2].SummaryChars} chars, max {largest.SummaryChars} chars ({largest.Label}); {checkedOutcomes.Count(o => o.JpegNotice)} over the {WorkflowTrace.MaxExifSummaryChars} char EXIF limit, which a JPEG or WebP save replaces with the use-PNG notice.");
+            List<string> editSteps = [.. checkedOutcomes.SelectMany(o => o.EditSteps)];
+            TestContext.Out.WriteLine($"In-place edits recorded: {editSteps.Count} in {checkedOutcomes.Count(o => o.EditSteps.Count > 0)} builds; by step: {editSteps.GroupBy(s => s).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count()}").JoinString(", ")}");
         }
         foreach (CaseOutcome crash in upstreamCrashes)
         {
@@ -435,6 +442,276 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(summary["prompts"][$"{segmentEntry["prompt"]}"]?.Value<int>(), Is.EqualTo($"{encNode["inputs"]["prompt"]}".Length), "the segment prompt is listed with its length");
         Assert.That(positiveChainText, Does.Contain($"{refPixelsId}:SwarmImageScaleForMP"));
         Assert.That(summary.ToString(Formatting.None), Does.Not.Contain("zqx"));
+    }
+
+    /// <summary>Returns the nodes upstream of a link, nearest first, recursing only through nodes of the given stage: the nodes a sampler input chain in the trace must list.</summary>
+    public static List<(string, JObject)> StageWalk(JObject workflow, JToken link, WorkflowTrace trace, string stage, bool modelOnly)
+    {
+        List<(string, JObject)> found = [];
+        HashSet<string> seen = [];
+        Queue<JToken> queue = new([link]);
+        while (queue.Count > 0)
+        {
+            (string id, JObject node) = Source(workflow, queue.Dequeue());
+            if (node is null || !seen.Add(id))
+            {
+                continue;
+            }
+            found.Add((id, node));
+            if (trace.Nodes.GetValueOrDefault(id)?.Stage != stage || WorkflowTrace.SamplerClasses.Contains($"{node["class_type"]}"))
+            {
+                continue;
+            }
+            foreach (JProperty input in ((JObject)node["inputs"]).Properties().Where(p => WorkflowTrace.IsLink(p.Value) && (!modelOnly || p.Name == "model")))
+            {
+                queue.Enqueue(input.Value);
+            }
+        }
+        return found;
+    }
+
+    /// <summary>The segment record of every main model class that builds a segment with a confined LoRA, checked against an independent walk of its graph: the segment sampler's section,
+    /// the nodes its model and positive chains list, the LoRA confined to the segment's section, and the text the segment's prompt record names.
+    /// The classes with model-specific segment conditioning must build. Prints each class's chain signature: the records differ across model families.</summary>
+    [Test]
+    public void TestSegmentRecordsMatchTheGraphForEveryModelClass()
+    {
+        Lora("test_alien_lora");
+        string prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment} <lora:test_alien_lora>";
+        string[] required = ["qwen-image-2.1", "qwen-image-edit", "qwen-image-edit-plus", "Flux.1-dev/kontext", "krea-2"];
+        List<string> failures = [];
+        Dictionary<string, List<string>> signatures = [];
+        HashSet<string> builtClasses = [];
+        int built = 0, rejected = 0;
+        foreach (T2IModelClass modelClass in MainModelClasses())
+        {
+            foreach (bool diffusionModels in new[] { false, true })
+            {
+                string label = $"{modelClass.ID} [{(diffusionModels ? "diffusion_models" : "checkpoint")}]";
+                Attempt attempt = TryGenerate(new() { Model = ModelFor(modelClass, diffusionModels), Prompt = prompt }, true);
+                if (attempt.Error is not null)
+                {
+                    rejected++;
+                    continue;
+                }
+                built++;
+                builtClasses.Add(modelClass.ID);
+                PromptRegion.Part part = new PromptRegion(attempt.Input.Get(T2IParamTypes.Prompt)).Parts.Single(p => p.Type == PromptRegion.PartType.Segment);
+                string stage = $"seg{part.ContextID}";
+                JObject workflow = attempt.Generator.Workflow;
+                WorkflowTrace trace = attempt.Generator.Trace;
+                JObject summary = (JObject)attempt.Input.ExtraMeta[WorkflowTrace.MetadataKey];
+                List<string> samplerIds = [.. workflow.Properties().Where(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}") && trace.Nodes[p.Name].Stage == stage).Select(p => p.Name)];
+                if (samplerIds.Count == 0)
+                {
+                    failures.Add($"{label}: no sampler at stage {stage}");
+                    continue;
+                }
+                foreach (string samplerId in samplerIds)
+                {
+                    JObject inputs = (JObject)workflow[samplerId]["inputs"];
+                    if (!trace.SamplerCalls.TryGetValue(samplerId, out JObject call) || call["section"]?.Value<int>() != part.ContextID)
+                    {
+                        failures.Add($"{label}: sampler {samplerId} has no CreateKSampler record for section {part.ContextID}: {call?.ToString(Formatting.None) ?? "none"}");
+                    }
+                    JObject entry = ((JArray)summary["samplers"]).OfType<JObject>().FirstOrDefault(s => $"{s["node"]}".StartsWith($"{samplerId}:"));
+                    if (entry is null)
+                    {
+                        failures.Add($"{label}: sampler {samplerId} has no summary record");
+                        continue;
+                    }
+                    // Guider samplers (SamplerCustomAdvanced) take the model and conditioning through their guider.
+                    JToken guider = inputs["guider"];
+                    JToken modelLink = inputs["model"] ?? (WorkflowTrace.IsLink(guider) ? workflow[$"{guider[0]}"]?["inputs"]?["model"] : null);
+                    JToken positiveLink = inputs["positive"] ?? guider;
+                    List<(string, JObject)> modelWalk = WorkflowTrace.IsLink(modelLink) ? StageWalk(workflow, modelLink, trace, stage, true) : [];
+                    List<(string, JObject)> positiveWalk = WorkflowTrace.IsLink(positiveLink) ? StageWalk(workflow, positiveLink, trace, stage, false) : [];
+                    foreach (JProperty input in inputs.Properties().Where(p => WorkflowTrace.IsLink(p.Value)))
+                    {
+                        if (workflow[$"{input.Value[0]}"] is null)
+                        {
+                            failures.Add($"{label}: sampler {samplerId} input '{input.Name}' links to node {input.Value[0]}, which is not in the workflow: {workflow[samplerId].ToString(Formatting.None)}");
+                        }
+                        string listed = entry["inputs"]?[input.Name]?.ToString(Formatting.None) ?? "";
+                        List<(string, JObject)> walk = StageWalk(workflow, input.Value, trace, stage, false);
+                        foreach ((string id, JObject node) in walk.Take(WorkflowTrace.MaxChainNodes))
+                        {
+                            if (!listed.Contains($"\"{id}:{node["class_type"]}"))
+                            {
+                                failures.Add($"{label}: sampler {samplerId} input '{input.Name}' reaches {id}:{node["class_type"]}, which its trace chain does not list");
+                            }
+                        }
+                    }
+                    if (modelWalk.Count == 0 || positiveWalk.Count == 0)
+                    {
+                        failures.Add($"{label}: sampler {samplerId} has no model or conditioning input: {workflow[samplerId].ToString(Formatting.None)}");
+                    }
+                    if (!trace.Loras.Any(l => l.Contains("test_alien_lora") && l.Contains($"section={part.ContextID} ") && l.EndsWith($"@{stage}")))
+                    {
+                        failures.Add($"{label}: no LoRA application recorded for section {part.ContextID} at {stage}: [{trace.Loras.JoinString("; ")}]");
+                    }
+                    foreach ((string loraId, JObject loraNode) in modelWalk.Where(n => $"{n.Item2["inputs"]?["lora_name"]}" == "test_alien_lora.safetensors"))
+                    {
+                        if (!trace.Loras.Any(l => l.Contains($" {loraId}:{loraNode["class_type"]} ") && l.Contains($"section={part.ContextID} ")))
+                        {
+                            failures.Add($"{label}: LoRA node {loraId}:{loraNode["class_type"]} on the segment model chain is not recorded for section {part.ContextID}");
+                        }
+                    }
+                    List<string> encoded = [.. positiveWalk.SelectMany(n => ((JObject)n.Item2["inputs"]).Properties().Where(p => WorkflowTrace.PromptInputNames.Contains(p.Name) && p.Value.Type == JTokenType.String).Select(p => $"{p.Value}"))];
+                    string segmentPrompt = $"{((JArray)summary["segments"]).Single()["prompt"]}";
+                    if (!encoded.Any(text => segmentPrompt == $"@{stage}.pos#{WorkflowTrace.Sha8(text)}"))
+                    {
+                        failures.Add($"{label}: the segment record names prompt {segmentPrompt}, which no encoder on sampler {samplerId}'s positive chain gets ({encoded.Count} prompt inputs found)");
+                    }
+                    string signature = $"model<-[{modelWalk.Select(n => $"{n.Item2["class_type"]}").JoinString(",")}] positive<-[{positiveWalk.Select(n => $"{n.Item2["class_type"]}").Distinct().JoinString(",")}]";
+                    signatures.GetOrCreate(signature, () => []).Add(label);
+                }
+            }
+        }
+        foreach (string id in required.Where(id => !builtClasses.Contains(id)))
+        {
+            failures.Add($"{id}: required model class did not build a segment");
+        }
+        TestContext.Out.WriteLine($"{built} builds checked, {rejected} rejected by the generator, {signatures.Count} distinct segment chain signatures:");
+        foreach ((string signature, List<string> labels) in signatures.OrderBy(s => s.Key))
+        {
+            TestContext.Out.WriteLine($"  {signature}\n      {labels.JoinString("\n      ")}");
+        }
+        Assert.That(signatures.Count, Is.GreaterThan(1), "segment records differ across model families");
+        Assert.That(failures, Is.Empty, string.Join("\n", failures.Take(60)));
+    }
+
+    /// <summary>Changes made to the workflow outside CreateNode, the way extensions make them, are attributed to the step that made them, and to the innermost step when a model-generation step runs inside a step:
+    /// an input edited in place (as SeedVR2Upscaler's RunOnNodesOfClass does), a node replaced by assignment, an input added inside a model load, and a node inserted by assignment, which the fitness check rejects.</summary>
+    [Test]
+    public void TestInPlaceEditsAndInsertionsAreAttributed()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        const string editStep = "trace test: edit sampler steps", replaceStep = "trace test: replace save node", insertStep = "trace test: insert preview", modelGenStep = "trace test: mark model";
+        List<WorkflowGenerator.WorkflowGenStep> steps = [.. WorkflowGenerator.Steps], modelGenSteps = [.. WorkflowGenerator.ModelGenSteps];
+        try
+        {
+            WorkflowGenerator.AddStep(g => g.RunOnNodesOfClass("SwarmKSampler", (_, n) => n["inputs"]["steps"] = 7), 9.5, editStep);
+            WorkflowGenerator.AddStep(g => g.Workflow["9"] = g.Workflow["9"].DeepClone(), 10.5, replaceStep);
+            WorkflowGenerator.AddStep(g => g.Workflow["900001"] = new JObject() { ["class_type"] = "PreviewImage", ["inputs"] = new JObject() { ["images"] = g.Workflow["9"]["inputs"]["images"].DeepClone() } }, 10.5, insertStep);
+            WorkflowGenerator.AddModelGenStep(g => g.Workflow[$"{g.LoadingModel[0]}"]["inputs"]["trace_test_marker"] = 1, 1000, modelGenStep);
+            Build plain = Generate(new() { Model = model, Prompt = PromptMarkerBase }, false);
+            Build traced = Generate(new() { Model = model, Prompt = PromptMarkerBase }, true);
+            Assert.That(SameWorkflow(traced, plain), Is.True, "tracing changed the workflow");
+            WorkflowTrace trace = traced.Trace;
+            string samplerId = traced.Workflow.Properties().Single(p => $"{p.Value["class_type"]}" == "SwarmKSampler").Name;
+            WorkflowTrace.EditRecord stepsEdit = trace.Edits.Single(e => e.NodeId == samplerId);
+            Assert.That((stepsEdit.Field, stepsEdit.Before.Value<int>(), stepsEdit.After.Value<int>(), trace.StepName(stepsEdit.Step)), Is.EqualTo(("steps", 20, 7, editStep)));
+            WorkflowTrace.EditRecord markerEdit = trace.Edits.Single(e => e.Field == "trace_test_marker");
+            Assert.That((markerEdit.Before, markerEdit.After.Value<int>(), trace.StepName(markerEdit.Step), trace.StepRecords[markerEdit.Step].IsModelGen), Is.EqualTo(((JToken)null, 1, modelGenStep, true)), "attributed to the model-generation step, not the step that loaded the model");
+            WorkflowTrace.EditRecord replaced = trace.Edits.Single(e => e.NodeId == "9");
+            Assert.That((replaced.Field, trace.StepName(replaced.Step)), Is.EqualTo(("(node)", replaceStep)));
+            Assert.That(trace.StepName(trace.InsertedBy["900001"]), Is.EqualTo(insertStep));
+            Assert.That(trace.Edits, Has.Count.EqualTo(3), string.Join("\n", trace.Edits.Select(trace.DescribeEdit)));
+            JObject summary = (JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey];
+            string edits = summary["edits"].ToString(Formatting.None);
+            Assert.That(edits, Does.Contain($"{samplerId}:SwarmKSampler.steps: 20 -> 7 by {editStep}"));
+            Assert.That(edits, Does.Contain($"{markerEdit.NodeId}:{markerEdit.ClassType}.trace_test_marker: (absent) -> 1 by {modelGenStep}"));
+            Assert.That(edits, Does.Contain($"9:SwarmSaveImageWS replaced outside CreateNode (was SwarmSaveImageWS) by {replaceStep}"));
+            Assert.That(summary["untracked_nodes"].ToString(Formatting.None), Does.Contain($"900001:PreviewImage inserted by {insertStep}"));
+            Assert.That(summary["steps"].ToString(Formatting.None), Does.Contain($"{editStep} (WorkflowTraceTests.cs:").And.Contain($"edited=[{samplerId}]").And.Contain("inserted_without_createnode=[900001]"));
+            List<string> failures = [];
+            CheckTrace(traced, "extension steps", failures);
+            Assert.That(failures, Does.Contain("extension steps: node 900001:PreviewImage has no provenance record"), string.Join("\n", failures));
+        }
+        finally
+        {
+            WorkflowGenerator.Steps = steps;
+            WorkflowGenerator.ModelGenSteps = modelGenSteps;
+        }
+    }
+
+    /// <summary>Negative controls for the fitness check: it passes a clean traced build, and fails a build where a node has no provenance record, a record with no origin, a record of the wrong class, or a node left the workflow with no step recorded as removing it.</summary>
+    [Test]
+    public void TestFitnessCheckRejectsMissingProvenance()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true);
+        Request request() => new() { Model = model, Prompt = $"{PromptMarkerBase} <segment:man> {PromptMarkerSegment}" };
+        static string samplerOf(Build build) => build.Workflow.Properties().First(p => WorkflowTrace.SamplerClasses.Contains($"{p.Value["class_type"]}")).Name;
+        List<string> clean = [];
+        CheckTrace(Generate(request(), true), "clean", clean);
+        Assert.That(clean, Is.Empty, string.Join("\n", clean));
+        Dictionary<string, Func<Build, string>> breaks = new()
+        {
+            ["record removed"] = b =>
+            {
+                string id = samplerOf(b);
+                b.Trace.Nodes.Remove(id);
+                return $"node {id}:{b.Workflow[id]["class_type"]} has no provenance record";
+            },
+            ["origin missing"] = b =>
+            {
+                string id = samplerOf(b);
+                b.Trace.Nodes[id].Origin = null;
+                return $"node {id}:{b.Workflow[id]["class_type"]} provenance incomplete";
+            },
+            ["wrong class"] = b =>
+            {
+                string id = samplerOf(b);
+                b.Trace.Nodes[id].ClassType = "NotTheClass";
+                return $"node {id} recorded as NotTheClass but is {b.Workflow[id]["class_type"]}";
+            },
+            ["unrecorded removal"] = b =>
+            {
+                string id = samplerOf(b);
+                string classType = $"{b.Workflow[id]["class_type"]}";
+                b.Workflow.Remove(id);
+                return $"node {id}:{classType} is gone from the workflow but no step is recorded as removing it";
+            }
+        };
+        foreach ((string name, Func<Build, string> breakIt) in breaks)
+        {
+            Build build = Generate(request(), true);
+            string expected = $"{name}: {breakIt(build)}";
+            List<string> failures = [];
+            CheckTrace(build, name, failures);
+            Assert.That(failures.Any(f => f.StartsWith(expected)), Is.True, $"expected '{expected}', got:\n{string.Join("\n", failures)}");
+        }
+    }
+
+    /// <summary>The graph sent and the graph a backend posts are recorded in the record the image metadata carries, for a PNG image (the full trace) and for a JPEG image over the EXIF limit (the notice); an input without a trace gets nothing.</summary>
+    [Test]
+    public void TestSentAndPostedAreRecordedInTheStoredRecord()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
+        bool priorDebug = Program.ServerSettings.AddDebugData;
+        int priorLimit = WorkflowTrace.MaxExifSummaryChars;
+        try
+        {
+            Program.ServerSettings.AddDebugData = true;
+            foreach ((string format, int limit, bool notice) in new[] { ("PNG", priorLimit, false), ("JPG", 10, true) })
+            {
+                WorkflowTrace.MaxExifSummaryChars = limit;
+                T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase, Params = new() { ["imageformat"] = format } });
+                string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
+                JObject stored = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
+                Assert.That(stored["omitted"] is not null, Is.EqualTo(notice), format);
+                JObject info = (JObject)stored["workflow"];
+                Assert.That($"{info["sent_sha256"]}", Is.EqualTo(Utilities.HashSHA256(workflow.EncodeUTF8())), format);
+                Assert.That(info["rewritten_after_generate"].Value<bool>(), Is.False, format);
+                Assert.That($"{info["posted"]}", Is.EqualTo(WorkflowTrace.NotPosted), format);
+                WorkflowTrace.RecordPosted(input, workflow, "TestBackend");
+                Assert.That(($"{info["posted"]["sha256"]}", $"{info["posted"]["backend"]}", info["posted"]["matches_sent"].Value<bool>()), Is.EqualTo(($"{info["sent_sha256"]}", "TestBackend", true)), format);
+                JObject metadata = input.GenFullMetadataObject();
+                Assert.That($"{metadata["sui_extra_data"][WorkflowTrace.MetadataKey]["workflow"]["posted"]["sha256"]}", Is.EqualTo($"{info["sent_sha256"]}"), $"{format}: the image metadata carries the posted record");
+                WorkflowTrace.RecordPosted(input, $"{workflow} ", "TestBackend");
+                Assert.That(info["posted"]["matches_sent"].Value<bool>(), Is.False, $"{format}: a different posted graph is flagged");
+            }
+            Program.ServerSettings.AddDebugData = false;
+            T2IParamInput untraced = BuildInput(new() { Model = model, Prompt = PromptMarkerBase });
+            WorkflowTrace.RecordPosted(untraced, ComfyUIAPIAbstractBackend.CreateWorkflow(untraced, w => w, null, [.. FullFeatures]), "TestBackend");
+            Assert.That(untraced.ExtraMeta.ContainsKey(WorkflowTrace.MetadataKey), Is.False);
+        }
+        finally
+        {
+            Program.ServerSettings.AddDebugData = priorDebug;
+            WorkflowTrace.MaxExifSummaryChars = priorLimit;
+        }
     }
 
     /// <summary>The segment's redraw is pasted back into the image that reaches the final save, and the trace's downstream path says so.</summary>

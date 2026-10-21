@@ -238,6 +238,11 @@ public class ComfyLiveTests : SwarmUITest
         string sent = ComfyUIAPIAbstractBackend.CreateWorkflow(offlineInput, w => w, backend.ModelFolderFormat, [.. backend.SupportedFeatures], backend.RawObjectInfo);
         Assert.That($"{trace["workflow"]["sent_sha256"]}", Is.EqualTo(Utilities.HashSHA256(sent.EncodeUTF8())), "the trace's sent_sha256 is the graph regenerated from the same input");
         Assert.That(trace["workflow"]["rewritten_after_generate"].Value<bool>(), Is.False);
+        JObject posted = trace["workflow"]["posted"] as JObject;
+        Assert.That(posted, Is.Not.Null, $"the backend recorded what it posted: {trace["workflow"]["posted"]}");
+        Assert.That($"{posted["sha256"]}", Is.EqualTo($"{trace["workflow"]["sent_sha256"]}"), "the graph posted to /prompt is the graph the trace describes");
+        Assert.That($"{posted["backend"]}", Is.EqualTo(nameof(ComfyUIAPIBackend)));
+        Assert.That(posted["matches_sent"].Value<bool>(), Is.True);
         JObject workflow = sent.ParseToJson();
         (HashSet<string> executed, HashSet<string> cached) = NodesRun(job);
         List<string> notExecuted = [.. workflow.Properties().Where(p => !executed.Contains(p.Name)).Select(p => $"{p.Name}:{p.Value["class_type"]}")];

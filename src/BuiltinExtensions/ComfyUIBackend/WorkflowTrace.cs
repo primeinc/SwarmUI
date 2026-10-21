@@ -9,7 +9,7 @@ using SwarmUI.Utils;
 namespace SwarmUI.Builtin_ComfyUIBackend;
 
 /// <summary>Records how a <see cref="WorkflowGenerator"/> built its workflow, without altering the workflow.
-/// Covers the steps that ran, the stage and origin of every node, the Swarm type of every node output, every model load and LoRA, every parameter read, prompt and media placeholders, node removals and rewires, and the input chains of every sampler.
+/// Covers the steps that ran, the stage and origin of every node, the Swarm type of every node output, every model load and LoRA, every parameter read, prompt and media placeholders, node removals, rewires and in-place edits with the step that made each, and the input chains of every sampler.
 /// Exists only for generations where <see cref="Settings.AddDebugData"/> is enabled, or where a caller attaches one explicitly.</summary>
 public class WorkflowTrace(WorkflowGenerator gen)
 {
@@ -64,6 +64,12 @@ public class WorkflowTrace(WorkflowGenerator gen)
 
         /// <summary>Node IDs that left the workflow during this step.</summary>
         public List<string> Removed = [];
+
+        /// <summary>IDs of nodes already in the workflow that this step changed in place.</summary>
+        public List<string> Edited = [];
+
+        /// <summary>Node IDs that entered the workflow during this step without <see cref="WorkflowGenerator.CreateNode(string, Action{string, JObject}, string, string, string, int)"/>.</summary>
+        public List<string> Inserted = [];
 
         /// <summary>Typed state of the generator's trackers after the step, for top-level steps.</summary>
         public JObject State;
@@ -181,6 +187,21 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <param name="Height">Embedded height, if resized.</param>
     public record class MediaRecord(string Param, MediaFile Media, int? Width, int? Height);
 
+    /// <summary>A change to a node already in the workflow: an input set, changed or removed, its class changed, or the whole node replaced without CreateNode.</summary>
+    /// <param name="Step">Index of the innermost step running when the change was made, or -1.</param>
+    /// <param name="NodeId">Workflow node ID.</param>
+    /// <param name="ClassType">Node class after the change.</param>
+    /// <param name="Field">Input name, "class_type", or "(node)" for a replaced node.</param>
+    /// <param name="Before">Value before, or null if absent.</param>
+    /// <param name="After">Value after, or null if removed.</param>
+    public record class EditRecord(int Step, string NodeId, string ClassType, string Field, JToken Before, JToken After);
+
+    /// <summary>A node as it was at the last <see cref="Checkpoint"/>.</summary>
+    /// <param name="Node">The node object in the workflow.</param>
+    /// <param name="ClassType">Its class.</param>
+    /// <param name="Inputs">A copy of its inputs.</param>
+    public record class NodeSnapshot(JObject Node, string ClassType, JObject Inputs);
+
     /// <summary>Scope for <see cref="EnterStage(string)"/>.</summary>
     public class StageScope(WorkflowTrace trace) : IDisposable
     {
@@ -239,6 +260,18 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Connection rewires, in order.</summary>
     public List<string> Rewires = [];
 
+    /// <summary>Changes to nodes already in the workflow, in order.</summary>
+    public List<EditRecord> Edits = [];
+
+    /// <summary>Every node as it was at the last <see cref="Checkpoint"/>, by ID.</summary>
+    public Dictionary<string, NodeSnapshot> Snapshots = [];
+
+    /// <summary>Node IDs CreateNode wrote since the last <see cref="Checkpoint"/>.</summary>
+    public HashSet<string> CreatedSinceCheckpoint = [];
+
+    /// <summary>Index of the step during which each node entered the workflow without CreateNode, by node ID.</summary>
+    public Dictionary<string, int> InsertedBy = [];
+
     /// <summary>Free-form events, such as early stops.</summary>
     public List<string> Events = [];
 
@@ -294,6 +327,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Records that a step began.</summary>
     public void BeginStep(WorkflowGenerator.WorkflowGenStep step, bool isModelGen)
     {
+        Checkpoint(InnermostStep);
         StepRecord record = new()
         {
             Index = StepRecords.Count,
@@ -310,23 +344,12 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Records that the innermost step ended.</summary>
     public void EndStep()
     {
+        Checkpoint(InnermostStep);
         StepRecord record = StepRecords[StepStack[^1]];
         StepStack.RemoveAt(StepStack.Count - 1);
         if (StepStack.Count > 0)
         {
             return;
-        }
-        foreach (string id in LiveNodes.ToList())
-        {
-            if (!Gen.Workflow.ContainsKey(id))
-            {
-                LiveNodes.Remove(id);
-                record.Removed.Add(id);
-                if (Nodes.TryGetValue(id, out NodeRecord node))
-                {
-                    node.RemovedBy = record.Name;
-                }
-            }
         }
         record.State = new()
         {
@@ -340,6 +363,98 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["mask_crop"] = Gen.MaskShrunkInfo?.BoundsNode is null ? null : $"bounds={Gen.MaskShrunkInfo.BoundsNode} mask={Gen.MaskShrunkInfo.CroppedMask} latent={Gen.MaskShrunkInfo.MaskedLatent} image={Gen.MaskShrunkInfo.ScaledImage}",
             ["differential"] = Gen.IsDifferentialDiffusion
         };
+    }
+
+    /// <summary>Index of the innermost running step, or -1.</summary>
+    public int InnermostStep => StepStack.Count > 0 ? StepStack[^1] : -1;
+
+    /// <summary>Returns the name of a step by index, or "(outside any step)" for -1.</summary>
+    public string StepName(int step) => step >= 0 ? StepRecords[step].Name : "(outside any step)";
+
+    /// <summary>Attributes every change to the workflow since the last checkpoint to the given step: nodes removed, nodes inserted without CreateNode, and inputs or classes of existing nodes changed in place.
+    /// Runs at every step boundary, so a change is attributed to the innermost step that was running when it was made.</summary>
+    /// <param name="step">Index of the step that was innermost since the last checkpoint, or -1.</param>
+    public void Checkpoint(int step)
+    {
+        JObject workflow = Gen.Workflow;
+        StepRecord record = step >= 0 ? StepRecords[step] : null;
+        foreach (string id in LiveNodes.ToList())
+        {
+            if (!workflow.ContainsKey(id))
+            {
+                LiveNodes.Remove(id);
+                Snapshots.Remove(id);
+                record?.Removed.Add(id);
+                if (Nodes.TryGetValue(id, out NodeRecord node))
+                {
+                    node.RemovedBy = StepName(step);
+                }
+            }
+        }
+        foreach (JProperty property in workflow.Properties())
+        {
+            if (property.Value is not JObject node)
+            {
+                continue;
+            }
+            string id = property.Name;
+            string classType = $"{node["class_type"]}";
+            JObject inputs = node["inputs"] as JObject;
+            bool created = CreatedSinceCheckpoint.Contains(id);
+            if (!Snapshots.TryGetValue(id, out NodeSnapshot prior))
+            {
+                if (!created && !Nodes.ContainsKey(id) && InsertedBy.TryAdd(id, step))
+                {
+                    record?.Inserted.Add(id);
+                }
+                Snapshots[id] = new(node, classType, inputs?.DeepClone() as JObject);
+                continue;
+            }
+            if (prior.Node != node)
+            {
+                if (!created)
+                {
+                    Edits.Add(new(step, id, classType, "(node)", prior.ClassType, classType));
+                    if (record is not null && !record.Edited.Contains(id))
+                    {
+                        record.Edited.Add(id);
+                    }
+                }
+                Snapshots[id] = new(node, classType, inputs?.DeepClone() as JObject);
+                continue;
+            }
+            if (prior.ClassType == classType && JToken.DeepEquals(prior.Inputs, inputs))
+            {
+                continue;
+            }
+            if (prior.ClassType != classType)
+            {
+                Edits.Add(new(step, id, classType, "class_type", prior.ClassType, classType));
+            }
+            List<string> names = [.. prior.Inputs?.Properties().Select(p => p.Name) ?? []];
+            names.AddRange(inputs?.Properties().Select(p => p.Name).Where(n => !names.Contains(n)) ?? []);
+            foreach (string name in names)
+            {
+                JToken before = prior.Inputs?[name], after = inputs?[name];
+                if (!JToken.DeepEquals(before, after))
+                {
+                    Edits.Add(new(step, id, classType, name, before, after?.DeepClone()));
+                }
+            }
+            if (record is not null && !record.Edited.Contains(id))
+            {
+                record.Edited.Add(id);
+            }
+            Snapshots[id] = new(node, classType, inputs?.DeepClone() as JObject);
+        }
+        if (Snapshots.Count > workflow.Count)
+        {
+            foreach (string id in Snapshots.Keys.Where(k => !workflow.ContainsKey(k)).ToList())
+            {
+                Snapshots.Remove(id);
+            }
+        }
+        CreatedSinceCheckpoint.Clear();
     }
 
     /// <summary>Records that a step stopped all further steps.</summary>
@@ -373,6 +488,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             Overwrites = overwrites
         };
         LiveNodes.Add(id);
+        CreatedSinceCheckpoint.Add(id);
     }
 
     /// <summary>Records that CreateNode returned an existing identical node.</summary>
@@ -539,6 +655,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Error = $"{ex.GetType().Name}: {ex.Message}";
         try
         {
+            Checkpoint(InnermostStep);
             Logs.Debug($"[WorkflowTrace] generation failed, partial trace:\n{Build().ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
         }
         catch (Exception traceEx)
@@ -551,6 +668,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public void Finish()
     {
         Gen.UserInput.ParamReadTracker = null;
+        Checkpoint(InnermostStep);
         Summary = Build();
         string logReference = $"[WorkflowTrace] request {Gen.UserInput.UserRequestId}";
         Logs.Debug($"{logReference}:\n{Summary.ToString(Formatting.Indented)}\n[WorkflowTrace] detail:\n{BuildDetail().ToString(Formatting.Indented)}");
@@ -600,19 +718,65 @@ public class WorkflowTrace(WorkflowGenerator gen)
         };
     }
 
-    /// <summary>Records the workflow text actually sent to ComfyUI.</summary>
+    /// <summary>The "posted" value of a workflow record until a ComfyUI backend posts it through <see cref="ComfyUIAPIAbstractBackend.AwaitJobLive"/>.</summary>
+    public const string NotPosted = "not observed: no post through ComfyUIAPIAbstractBackend.AwaitJobLive";
+
+    /// <summary>Returns the "workflow" objects to update for an input: the summary's, and the stored image metadata record's when the image format stores a notice instead of the summary.</summary>
+    public static List<JObject> WorkflowRecords(T2IParamInput input, JObject summary)
+    {
+        List<JObject> records = [];
+        if (summary?["workflow"] is JObject info)
+        {
+            records.Add(info);
+        }
+        if (input?.ExtraMeta.GetValueOrDefault(MetadataKey) is JObject stored && stored != summary && stored["workflow"] is JObject storedInfo)
+        {
+            records.Add(storedInfo);
+        }
+        return records;
+    }
+
+    /// <summary>Records the workflow text the backend will send to ComfyUI, in the summary and the stored image metadata record.</summary>
     /// <param name="workflow">The final workflow JSON text.</param>
     /// <param name="changedAfterGenerate">True if anything rewrote the workflow text after the generator returned it.</param>
     public void RecordSent(string workflow, bool changedAfterGenerate)
     {
-        if (Summary?["workflow"] is not JObject info)
+        string sha = Utilities.HashSHA256(workflow.EncodeUTF8());
+        List<JObject> records = WorkflowRecords(Gen.UserInput, Summary);
+        if (records.Count == 0)
         {
             return;
         }
-        info["sent_sha256"] = Utilities.HashSHA256(workflow.EncodeUTF8());
-        info["sent_length"] = workflow.Length;
-        info["rewritten_after_generate"] = changedAfterGenerate;
-        Logs.Debug($"[WorkflowTrace] request {Gen.UserInput.UserRequestId}: sent workflow sha256={info["sent_sha256"]} length={workflow.Length} rewritten_after_generate={changedAfterGenerate}");
+        foreach (JObject info in records)
+        {
+            info["sent_sha256"] = sha;
+            info["sent_length"] = workflow.Length;
+            info["rewritten_after_generate"] = changedAfterGenerate;
+            info["posted"] = NotPosted;
+        }
+        Logs.Debug($"[WorkflowTrace] request {Gen.UserInput.UserRequestId}: sent workflow sha256={sha} length={workflow.Length} rewritten_after_generate={changedAfterGenerate}");
+    }
+
+    /// <summary>Records the workflow a ComfyUI backend posts to /prompt for an input, into its stored trace record. Does nothing for an input without one.</summary>
+    /// <param name="input">The input being generated.</param>
+    /// <param name="workflow">The workflow JSON text posted as the "prompt".</param>
+    /// <param name="backend">Name of the posting backend type.</param>
+    public static void RecordPosted(T2IParamInput input, string workflow, string backend)
+    {
+        if (input?.ExtraMeta.GetValueOrDefault(MetadataKey) is not JObject stored || stored["workflow"] is not JObject info)
+        {
+            return;
+        }
+        string sha = Utilities.HashSHA256(workflow.EncodeUTF8());
+        bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
+        info["posted"] = new JObject()
+        {
+            ["sha256"] = sha,
+            ["length"] = workflow.Length,
+            ["backend"] = backend,
+            ["matches_sent"] = matchesSent
+        };
+        Logs.Debug($"[WorkflowTrace] request {input.UserRequestId}: {backend} posted workflow sha256={sha} length={workflow.Length} matches_sent={matchesSent?.ToString() ?? "unknown"}");
     }
 
     /// <summary>Records a workflow that did not come from the generator (custom or raw workflows): logs its description, and stores it for the image format (<see cref="ForImageMetadata"/>) into the input's ExtraMeta.</summary>
@@ -634,7 +798,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
             {
                 ["source"] = source,
                 ["sent_sha256"] = Utilities.HashSHA256((workflow ?? "").EncodeUTF8()),
-                ["sent_length"] = workflow?.Length ?? 0
+                ["sent_length"] = workflow?.Length ?? 0,
+                ["posted"] = NotPosted
             }
         };
         try
@@ -890,6 +1055,35 @@ public class WorkflowTrace(WorkflowGenerator gen)
         };
     }
 
+    /// <summary>Formats one node input value: a link as "id:slot", a string with prompt and media placeholders (<see cref="FormatString"/>), anything over 120 characters as a hash, an absent value as "(absent)".</summary>
+    public string FormatInput(string nodeId, string name, JToken value)
+    {
+        if (value is null)
+        {
+            return "(absent)";
+        }
+        if (IsLink(value))
+        {
+            return $"{value[0]}:{value[1]}";
+        }
+        if (value.Type == JTokenType.String)
+        {
+            return FormatString(nodeId, name, $"{value}");
+        }
+        string raw = value.ToString(Formatting.None);
+        return raw.Length > 120 ? $"#{Sha8(raw)}({raw.Length})" : raw;
+    }
+
+    /// <summary>Describes an edit as "id:Class.input: before -&gt; after by step", or "id:Class replaced outside CreateNode (was Class) by step".</summary>
+    public string DescribeEdit(EditRecord edit)
+    {
+        if (edit.Field == "(node)")
+        {
+            return $"{edit.NodeId}:{edit.ClassType} replaced outside CreateNode (was {edit.Before}) by {StepName(edit.Step)}";
+        }
+        return $"{edit.NodeId}:{edit.ClassType}.{edit.Field}: {FormatInput(edit.NodeId, edit.Field, edit.Before)} -> {FormatInput(edit.NodeId, edit.Field, edit.After)} by {StepName(edit.Step)}";
+    }
+
     /// <summary>Describes one node as a single line: "id:Class@stage &lt;origin&gt; [scalars] {links} =&gt; outputs".</summary>
     /// <param name="id">Node ID.</param>
     /// <param name="node">Node JSON.</param>
@@ -910,7 +1104,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         else if (record is null && Gen is not null)
         {
-            sb.Append(" <untracked>");
+            sb.Append(InsertedBy.TryGetValue(id, out int step) ? $" <untracked, inserted by {StepName(step)}>" : " <untracked>");
         }
         List<string> scalars = [];
         List<string> links = [];
@@ -922,18 +1116,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
                 {
                     links.Add($"{input.Name}<{input.Value[0]}:{input.Value[1]}");
                 }
-                else if (input.Value.Type == JTokenType.Null)
+                else if (input.Value.Type != JTokenType.Null)
                 {
-                    continue;
-                }
-                else if (input.Value.Type == JTokenType.String)
-                {
-                    scalars.Add($"{input.Name}={FormatString(id, input.Name, $"{input.Value}")}");
-                }
-                else
-                {
-                    string raw = input.Value.ToString(Formatting.None);
-                    scalars.Add($"{input.Name}={(raw.Length > 120 ? $"#{Sha8(raw)}({raw.Length})" : raw)}");
+                    scalars.Add($"{input.Name}={FormatInput(id, input.Name, input.Value)}");
                 }
             }
         }
@@ -1096,6 +1281,14 @@ public class WorkflowTrace(WorkflowGenerator gen)
             {
                 text += $" removed=[{step.Removed.JoinString(",")}]";
             }
+            if (step.Edited.Count > 0)
+            {
+                text += $" edited=[{step.Edited.JoinString(",")}]";
+            }
+            if (step.Inserted.Count > 0)
+            {
+                text += $" inserted_without_createnode=[{step.Inserted.JoinString(",")}]";
+            }
             steps.Add(text);
         }
         result["steps"] = steps;
@@ -1217,6 +1410,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             result["rewires"] = new JArray(Rewires.Select(r => (JToken)r));
         }
+        if (Edits.Count > 0)
+        {
+            result["edits"] = new JArray(Edits.Select(e => (JToken)DescribeEdit(e)));
+        }
         if (CacheHits.Count > 0)
         {
             result["cache_hits"] = new JArray(CacheHits.Select(c => (JToken)c));
@@ -1226,7 +1423,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             if (!Nodes.ContainsKey(property.Name))
             {
-                untracked.Add($"{property.Name}:{property.Value["class_type"]}");
+                untracked.Add($"{property.Name}:{property.Value["class_type"]}{(InsertedBy.TryGetValue(property.Name, out int step) ? $" inserted by {StepName(step)}" : "")}");
             }
         }
         if (untracked.Count > 0)

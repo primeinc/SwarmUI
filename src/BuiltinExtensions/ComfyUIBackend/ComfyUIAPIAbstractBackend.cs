@@ -323,6 +323,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         }
         try
         {
+            WorkflowTrace.RecordPosted(user_input, workflow, GetType().Name);
             workflow = $"{{\"prompt\": {workflow}, \"client_id\": \"{id}\"}}";
             if (Logs.MinimumLevel <= Logs.LogLevel.Verbose)
             {
