@@ -45,7 +45,7 @@ public class QwenSegmentLoraChainTests : SwarmUITest
         Assert.That(T2IPromptHandling.MatchPromptLoraName("subjects/Portrait", catalog),
             Is.EqualTo("subjects/Portrait.safetensors"));
         Assert.That(T2IPromptHandling.MatchPromptLoraName(
-            @"subjects\\Portrait.safetensors", catalog),
+            @"subjects\Portrait.safetensors", catalog),
             Is.EqualTo("subjects/Portrait.safetensors"),
             "Windows separators and optional suffix must still resolve the exact adapter.");
     }
