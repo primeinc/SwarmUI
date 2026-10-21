@@ -235,8 +235,33 @@ class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
         base, mask = self.sample()
         variant = base.copy()
         ImageDraw.Draw(variant).rectangle((151, 120, 160, 130), fill=(220, 30, 40))
-        _, outside = region_rms(base, variant, mask)
+        # Only the real configured blend halo may be excluded. The former
+        # implicit 48px exclusion also hid leaks well outside that halo.
+        _, outside = region_rms(base, variant, mask, margin=10)
         self.assertEqual(outside, 0.0)
+
+    def test_near_boundary_leak_outside_actual_margin_is_not_hidden(self):
+        base, mask = self.sample()
+        variant = base.copy()
+        # Mask ends at x=151; configured grow/feather guard is only 8px.
+        # A 48px hard floor gave a false-zero outside RMS for this change.
+        ImageDraw.Draw(variant).rectangle((168, 120, 178, 131), fill=(220, 30, 40))
+        _, outside = region_rms(base, variant, mask, margin=8)
+        self.assertGreater(outside, 2.0)
+        _, old_exclusion = region_rms(base, variant, mask, margin=48)
+        self.assertEqual(old_exclusion, 0.0,
+                         "Negative control: the old 48px floor must conceal this defect")
+
+    def test_small_canvas_has_meaningful_outside_support_at_configured_margin(self):
+        base = Image.new("RGB", (128, 128), (20, 30, 40))
+        mask = Image.new("L", base.size, 0)
+        ImageDraw.Draw(mask).rectangle((48, 48, 80, 80), fill=255)
+        variant = base.copy()
+        ImageDraw.Draw(variant).rectangle((0, 0, 8, 8), fill=(220, 30, 40))
+        _, outside = region_rms(base, variant, mask, margin=34)
+        self.assertGreater(outside, 0.0)
+        with self.assertRaisesRegex(AssertionError, "covers"):
+            region_rms(base, variant, mask, margin=48)
 
     def test_empty_and_whole_frame_detection_fail_clearly(self):
         base, _ = self.sample()
