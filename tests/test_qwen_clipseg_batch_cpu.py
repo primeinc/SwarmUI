@@ -54,6 +54,8 @@ def native_detector():
         "download_model": lambda *_args: None,
         "CLIPSegProcessor": FakeProcessor,
         "CLIPSegForImageSegmentation": FakeModel,
+        "_load_cached_clipseg": lambda path: (
+            FakeProcessor.from_pretrained(path), FakeModel.from_pretrained(path)),
     }
     exec(compile(ast.Module(body=[native], type_ignores=[]),
                  str(SOURCE), "exec"), scope)
