@@ -449,13 +449,17 @@ def test_real_global_and_segment_lora_effect(case):
                 mask_off_first, mask_on, mask_off_again)
             crop_node = next(node for node in off.values()
                              if node["class_type"] == "InpaintCropImproved")
-            # The native crop expands/feathers the binary mask. Do not
-            # misclassify that expected blend halo as a background LoRA leak.
-            # Honor user-configured mask grow/blur, not a fixed magic radius.
+            # The upstream crop expands/feathers the mask. Exclude only the
+            # user-configured expand/feather halo plus an 8px interpolation
+            # allowance; a hardcoded 48px floor hid real LoRA changes just
+            # outside small masks and left tiny images unmeasurable.
+            # This is a conservative detector-space bound, NOT an exported
+            # exact native stitch mask. Fail rather than claim no leakage if
+            # the remaining outside region is empty.
             crop_inputs = crop_node["inputs"]
-            blend_margin = max(
-                48, int(math.ceil(float(crop_inputs.get("mask_expand_pixels", 0)) +
-                                  float(crop_inputs.get("mask_blend_pixels", 0)) + 8)))
+            blend_margin = int(math.ceil(
+                float(crop_inputs.get("mask_expand_pixels", 0))
+                + float(crop_inputs.get("mask_blend_pixels", 0)) + 8))
             baseline_inside, baseline_outside = region_rms(
                 image_off_first, image_off_again, detector_mask, margin=blend_margin)
             effect_inside, effect_outside = region_rms(
