@@ -11,11 +11,23 @@ from PIL import ImageChops, ImageFilter, ImageStat
 
 
 def normalized_lora_path(name):
-    # Comfy model catalogs use actual filenames; Linux paths are case-sensitive.
-    # Different-case adapters in one folder are NOT interchangeable.
-    normalized = str(name).replace("\\", "/").strip("/")
+    # Preserve the exact Linux filename including suffix case and whitespace.
+    # Only normalize separators: the Comfy resolver independently resolves
+    # slash variants, but .safetensors vs .SAFETENSORS can be distinct files.
+    return str(name).replace("\\", "/").strip("/")
+
+
+def same_lora_path(first, second):
+    """Match the C# Qwen sampler LoRA gate's extension-optional identity rule."""
+    a, b = normalized_lora_path(first), normalized_lora_path(second)
+    if a == b:
+        return True
     suffix = ".safetensors"
-    return normalized[:-len(suffix)] if normalized.lower().endswith(suffix) else normalized
+    a_has = a.lower().endswith(suffix)
+    b_has = b.lower().endswith(suffix)
+    if a_has == b_has:
+        return False
+    return a[:-len(suffix)] == b if a_has else a == b[:-len(suffix)]
 
 
 def binary_mask(image):
