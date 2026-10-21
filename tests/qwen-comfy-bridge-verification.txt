@@ -1,0 +1,1 @@
+Pinned CI verification for tests/test_qwen_upstream_model_hook_cpu.py at source 89801b3fca3c9b554c5274577fe38b138cc7a3e4. Validate actual SwarmTextEncodeAdvanced LoRA-tag hook -> Comfy CLIP conditioning -> native sampler ModelPatcher and mutated missing-hook path. Do not infer model-backed image effects.
