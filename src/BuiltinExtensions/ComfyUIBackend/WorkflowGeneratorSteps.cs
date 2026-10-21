@@ -2261,7 +2261,17 @@ public class WorkflowGeneratorSteps
                                 ["minimum_confidence"] = 0.0,
                                 ["maximum_coverage"] = 1.0
                             });
-                            invertInput = detectorGuard;
+                            // A fractional detector mask MUST become an opaque
+                            // binary target before computing its complement.
+                            // InvertMask(0.6) yields 0.4: the downstream
+                            // ThresholdMask(0) would otherwise reselect the
+                            // original subject along with its surroundings.
+                            string originalBinary = g.CreateNode("ThresholdMask", new JObject()
+                            {
+                                ["mask"] = NodePath(detectorGuard, 0),
+                                ["value"] = 0.0
+                            });
+                            invertInput = originalBinary;
                         }
                         segmentNode = g.CreateNode("InvertMask", new JObject()
                         {
