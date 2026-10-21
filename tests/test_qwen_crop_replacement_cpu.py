@@ -21,12 +21,19 @@ class CropReplacementTests(unittest.TestCase):
         # execute and falsify this pixel-compositor contract.
         detector_confidence = mask * 0.6
         guard = get_real_node()
-        validated, = guard.validate(detector_confidence, minimum_confidence=0.5)
+        # CLIPSeg already applied the author's detection threshold. Native
+        # Qwen's CURRENT graph guards nonempty support at zero and binarizes
+        # at zero; the previous 0.5/0.5 fixture silently tested an obsolete
+        # graph and discarded detector-selected soft pixels.
+        validated, = guard.validate(detector_confidence, minimum_confidence=0.0)
         self.assertIs(validated, detector_confidence)
-        with self.assertRaises(ValueError):
-            guard.validate(mask * 0.2, minimum_confidence=0.5)
+        weak_selected = mask * 0.2
+        self.assertIs(guard.validate(weak_selected, minimum_confidence=0.0)[0],
+                      weak_selected)
+        with self.assertRaisesRegex(ValueError, "no subject detected"):
+            guard.validate(torch.zeros_like(mask), minimum_confidence=0.0)
         # Comfy-Org/ComfyUI ThresholdMask.execute uses (mask > value).float().
-        solid_mask = (validated > 0.5).float()
+        solid_mask = (validated > 0.0).float()
         self.assertEqual(torch.count_nonzero(solid_mask).item(), 36 * 36)
 
         crop = InpaintCropImproved()
