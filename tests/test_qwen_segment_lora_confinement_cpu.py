@@ -195,7 +195,7 @@ class LiveLoRAMaskPreflightContractTests(unittest.TestCase):
     def test_non_detector_mask_cannot_be_accepted(self):
         graph = self.graph()
         graph["detector"]["class_type"] = "SolidMask"
-        with self.assertRaisesRegex(AssertionError, "SwarmClipSeg"):
+        with self.assertRaisesRegex(AssertionError, "actual text detector"):
             self.validate_mask(graph, "crop")
 
 
