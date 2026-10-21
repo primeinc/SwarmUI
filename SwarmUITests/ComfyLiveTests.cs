@@ -244,6 +244,29 @@ public class ComfyLiveTests : SwarmUITest
         TestContext.Out.WriteLine($"{workflow.Count} nodes sent, {executed.Count} executed, {cached.Count} from cache; classes: {string.Join(", ", workflow.Properties().Select(p => $"{p.Value["class_type"]}").Distinct().Order())}");
         Assert.That(cached, Is.Empty, "nothing served from ComfyUI's cache (the justfile starts ComfyUI with --cache-none)");
         Assert.That(notExecuted, Is.Empty, "every node sent was executed in this job");
+        // The segment record, against the graph that ran: its sampler is fed the text and the CLIPSeg mask it names.
+        JObject segmentRecord = (JObject)((JArray)trace["segments"]).Single();
+        string segmentStage = $"{segmentRecord["stage"]}";
+        string samplerId = $"{((JArray)trace["samplers"]).Single(s => $"{s["call"]["stage"]}" == segmentStage)["node"]}".Before(':');
+        JObject samplerInputs = (JObject)workflow[samplerId]["inputs"];
+        Assert.That($"{workflow[samplerId]["class_type"]}", Is.EqualTo("SwarmKSampler"));
+        Assert.That(executed, Does.Contain(samplerId));
+        (string encoderId, JObject encoder) = WorkflowTraceTests.Source(workflow, samplerInputs["positive"]);
+        while ($"{encoder["class_type"]}" == "ReferenceLatent")
+        {
+            (encoderId, encoder) = WorkflowTraceTests.Source(workflow, encoder["inputs"]["conditioning"]);
+        }
+        Assert.That($"{encoder["class_type"]}", Is.EqualTo("SwarmTextEncodeAdvanced"), encoderId);
+        Assert.That($"{segmentRecord["prompt"]}", Is.EqualTo($"@{segmentStage}.pos#{WorkflowTrace.Sha8($"{encoder["inputs"]["prompt"]}")}"), "the segment record names the text its encoder got");
+        (string maskId, JObject maskNode) = WorkflowTraceTests.Source(workflow, samplerInputs["latent_image"]);
+        while ($"{maskNode["class_type"]}" != "SwarmClipSeg" && maskNode["inputs"]["mask"] is JArray maskLink)
+        {
+            (maskId, maskNode) = WorkflowTraceTests.Source(workflow, maskLink);
+        }
+        Assert.That($"{maskNode["class_type"]}", Is.EqualTo("SwarmClipSeg"), maskId);
+        Assert.That($"{segmentRecord["mask_text"]}", Is.EqualTo($"@{segmentStage}.mask#{WorkflowTrace.Sha8($"{maskNode["inputs"]["match_text"]}")}"));
+        Assert.That(segmentRecord["threshold"].Value<double>(), Is.EqualTo(maskNode["inputs"]["threshold"].Value<double>()));
+        Assert.That(samplerInputs["start_at_step"].Value<int>(), Is.EqualTo((int)Math.Round(samplerInputs["steps"].Value<int>() * (1 - segmentRecord["creativity"].Value<double>()))));
         Assert.That(trace["type_errors"], Is.Empty, $"live object_info types every link: {trace["type_errors"]}");
         Assert.That(trace["classes_missing_from_object_info"], Is.Empty, $"{trace["classes_missing_from_object_info"]}");
         TestContext.Out.WriteLine($"undeclared inputs: {trace["undeclared_inputs"]}");

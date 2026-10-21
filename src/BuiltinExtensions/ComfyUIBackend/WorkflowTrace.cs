@@ -470,7 +470,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
     }
 
-    /// <summary>Registers a prompt text that will reach a text encoder node, under a label.</summary>
+    /// <summary>Registers a prompt text that will reach a text encoder node, under a label. The first positive prompt labeled in a segment's stage is that segment's prompt.</summary>
     public void LabelPrompt(string text, string label)
     {
         if (text is null)
@@ -481,6 +481,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
         if (!labels.Contains(label))
         {
             labels.Add(label);
+        }
+        if (label == $"{CurrentStage}.pos" && SegmentParts.Count > 0 && SegmentParts[^1] is JObject segment && $"{segment["stage"]}" == CurrentStage && segment["prompt"].Type == JTokenType.Null)
+        {
+            segment["prompt"] = $"@{label}#{Sha8(text)}";
         }
     }
 
@@ -499,7 +503,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         SamplerCalls[nodeId] = args;
     }
 
-    /// <summary>Records a segment part being processed.</summary>
+    /// <summary>Records a segment part being processed. Its "prompt" is filled by <see cref="LabelPrompt"/> with the text its conditioning encodes, and stays null if none is created.</summary>
     public void SegmentPart(PromptRegion.Part part, int index)
     {
         SegmentParts.Add(new JObject()
@@ -510,7 +514,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["mask_text"] = $"@{CurrentStage}.mask#{Sha8(part.DataText)}",
             ["threshold"] = part.Strength,
             ["creativity"] = part.Strength2,
-            ["prompt"] = $"@{CurrentStage}.pos#{Sha8(part.Prompt)}"
+            ["prompt"] = JValue.CreateNull()
         });
     }
 

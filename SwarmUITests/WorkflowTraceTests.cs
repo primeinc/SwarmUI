@@ -430,6 +430,9 @@ public class WorkflowTraceTests : SwarmUITest
         string positiveChainText = samplerEntry["inputs"]["positive"].ToString(Formatting.None);
         Assert.That(positiveChainText, Does.Contain($"{encId}:SwarmTextEncodeAdvanced"));
         Assert.That(positiveChainText, Does.Contain($"prompt=@{stage}.pos#{WorkflowTrace.Sha8(part.Prompt.Trim())}"));
+        JObject segmentEntry = (JObject)((JArray)summary["segments"]).Single();
+        Assert.That($"{segmentEntry["prompt"]}", Is.EqualTo($"@{stage}.pos#{WorkflowTrace.Sha8($"{encNode["inputs"]["prompt"]}")}"), "the segment record names the text its encoder node gets");
+        Assert.That(summary["prompts"][$"{segmentEntry["prompt"]}"]?.Value<int>(), Is.EqualTo($"{encNode["inputs"]["prompt"]}".Length), "the segment prompt is listed with its length");
         Assert.That(positiveChainText, Does.Contain($"{refPixelsId}:SwarmImageScaleForMP"));
         Assert.That(summary.ToString(Formatting.None), Does.Not.Contain("zqx"));
     }
