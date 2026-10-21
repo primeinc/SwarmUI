@@ -121,9 +121,9 @@ public class GeneratorIdentity : SwarmUITest
         {
             Assert.Ignore("Set IDENTITY_OUT, or run 'just run' in SwarmUITests/Identity.");
         }
-        if (WorkflowGenerator.Steps.Count > 0)
+        if (ComfyUIBackendExtension.SamplerParam is not null)
         {
-            Assert.Ignore("Another fixture already registered the generator steps, and registering them again would run each step twice; run 'just run' in SwarmUITests/Identity, which runs this test alone.");
+            Assert.Ignore("Another fixture already ran ComfyUIBackendExtension.OnInit, and running it again would register its parameters twice; run 'just run' in SwarmUITests/Identity, which runs this test alone.");
         }
         Setup();
         Program.ServerSettings.Metadata.ImageMetadataIncludeModelHash = false;

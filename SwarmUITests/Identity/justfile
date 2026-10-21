@@ -21,13 +21,21 @@ worktree:
     git -C "$UPSTREAM" log --oneline -1
 
 # Dump one tree (upstream or head) with debug data off (0) or on (1). The upstream tree gets a copy of GeneratorIdentity.cs for the run.
+# The previous dump is deleted first, and the step fails if the test wrote none (a skipped test passes), so the comparison never reads a stale dump.
 [script]
 dump tree debug:
     if [ "$1" = upstream ]; then dir="$UPSTREAM"; cp "$ID/GeneratorIdentity.cs" "$dir/SwarmUITests/GeneratorIdentity.cs"; else dir="$REPO"; fi
-    echo "== $1 debug=$2 at $(git -C "$dir" rev-parse HEAD)"
+    out="$WORK/$1-debug$2.tsv"
+    rm -f "$out"
+    changes="$(git -C "$dir" status --short --untracked-files=no -- src SwarmUITests | wc -l)"
+    echo "== $1 debug=$2 at $(git -C "$dir" rev-parse HEAD), $changes uncommitted tracked files under src and SwarmUITests"
     status=0
-    IDENTITY_OUT="$WORK/$1-debug$2.tsv" IDENTITY_DEBUG="$2" dotnet test "$dir/SwarmUITests/SwarmUITests.csproj" -c Release --filter "TestCategory=Identity" --logger "console;verbosity=normal" || status=$?
+    IDENTITY_OUT="$out" IDENTITY_DEBUG="$2" dotnet test "$dir/SwarmUITests/SwarmUITests.csproj" -c Release --filter "TestCategory=Identity" --logger "console;verbosity=normal" || status=$?
     if [ "$1" = upstream ]; then rm "$dir/SwarmUITests/GeneratorIdentity.cs"; fi
+    if [ "$status" = 0 ] && [ ! -s "$out" ]; then
+        echo "FAILED: no dump written to $out; the identity test did not run"
+        status=1
+    fi
     exit "$status"
 
 # Compare every dump with upstream's debug-off dump; any difference fails and is written to diff-<dump>.txt.
