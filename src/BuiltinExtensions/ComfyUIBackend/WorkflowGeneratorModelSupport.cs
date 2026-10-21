@@ -559,6 +559,17 @@ public partial class WorkflowGenerator
         }
         else if (IsQwenImage21())
         {
+            // Qwen 2.1 publishes 32-pixel image precision. The custom
+            // empty-latent node allocates [64, height/16, width/16], so an
+            // off-grid API size would silently floor the output canvas while
+            // WGNodeData still claims the original requested pixel dimensions.
+            // Fail instead of resizing/cropping the user's canvas implicitly.
+            if (width < 32 || height < 32 || width % 32 != 0 || height % 32 != 0)
+            {
+                throw new SwarmUserErrorException(
+                    $"Qwen Image 2.1 requires width and height to be a positive multiple of 32 pixels. " +
+                    $"Requested {width}x{height}; refusing implicit latent truncation.");
+            }
             // Match ComfyUI TextEncodeQwenImage21: the Qwen 2.1 latent has
             // 64 channels and a 16x spatial downscale. EmptyLatentImage is
             // only 4 channels and cannot be used for native Qwen generation.
