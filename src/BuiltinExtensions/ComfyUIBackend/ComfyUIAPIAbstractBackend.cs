@@ -41,6 +41,31 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// external API-by-URL Comfy instance with no bundled nodes installed.
     /// Ordinary/non-Qwen generation is not affected.
     /// </summary>
+    private static bool HasQwen21AdvancedEncoderInputs(JObject workflow)
+    {
+        // A saved/raw Qwen image-edit workflow can supply its own VAE latent
+        // and need neither a segment crop nor our T2I empty-latent node.
+        // The new Swarm encoder sockets themselves identify Qwen 2.1 here.
+        return workflow is not null && workflow.Properties().Any(property =>
+        {
+            if (property.Value?["class_type"]?.ToString() != "SwarmTextEncodeAdvanced"
+                || property.Value["inputs"] is not JObject inputs)
+            {
+                return false;
+            }
+            if (inputs.Property("qwen21_prevent_empty_text") is JProperty qwenOption
+                && qwenOption.Value.Type != JTokenType.Null)
+            {
+                return true;
+            }
+            return inputs.Properties().Any(input =>
+                input.Value.Type != JTokenType.Null
+                && input.Name.StartsWith("image_", StringComparison.Ordinal)
+                && int.TryParse(input.Name.AsSpan("image_".Length), out int index)
+                && index >= 1 && index <= 16);
+        });
+    }
+
     public static void ValidateNativeQwenSegmentNodes(JObject workflow, IReadOnlySet<string> availableNodeTypes)
     {
         string[] usedTypes = [.. workflow.Properties()
@@ -51,7 +76,8 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         // backend image uploads or workflow submission.
         bool isSegmentEdit = usedTypes.Contains("InpaintCropImproved");
         bool isQwen21ImageGeneration = usedTypes.Contains("SwarmEmptyQwenImage21Latent");
-        if (!isSegmentEdit && !isQwen21ImageGeneration)
+        bool isQwen21NativeEdit = HasQwen21AdvancedEncoderInputs(workflow);
+        if (!isSegmentEdit && !isQwen21ImageGeneration && !isQwen21NativeEdit)
         {
             return;
         }
@@ -89,9 +115,11 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         // qwen21_prevent_empty_text and optional independent image_N sockets.
         // An older remote backend can register the encoder class name while
         // silently omitting these newly required inputs.
-        if (workflow is null || !workflow.Properties().Any(p =>
-            p.Value?["class_type"]?.ToString() is
-                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent"))
+        if (workflow is null ||
+            (!HasQwen21AdvancedEncoderInputs(workflow)
+             && !workflow.Properties().Any(p =>
+                 p.Value?["class_type"]?.ToString() is
+                     "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent")))
         {
             return;
         }
