@@ -11,6 +11,7 @@
     <Nullable>Disable</Nullable>
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>true</ServerGarbageCollection>
+    <DefaultItemExcludes>$(DefaultItemExcludes);ComfyLive/.work/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\src\SwarmUI.csproj" />

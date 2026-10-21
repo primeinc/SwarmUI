@@ -1,0 +1,84 @@
+# Real ComfyUI on CPU for SwarmUITests ComfyLiveTests: the pinned ComfyUI, SwarmUI's Python dependencies and ExtraNodes,
+# the swarm_null_models hook in ./nodes, and a model folder the tests fill with zero-weight models.
+# `just setup` once, `just clipseg` once, `just start` in its own terminal, then `just test`.
+
+[windows]
+set shell := ['sh', '-cu']
+set script-interpreter := ['sh', '-eu']
+set positional-arguments
+
+export REPO := replace(parent_directory(parent_directory(justfile_directory())), '\', '/')
+export NODES := replace(justfile_directory() / 'nodes', '\', '/')
+export WORK := replace(env('SWARMUI_COMFY_LIVE_WORK', justfile_directory() / '.work'), '\', '/')
+export COMFY_REPO := env('SWARMUI_COMFY_REPO', 'https://github.com/comfyanonymous/ComfyUI')
+export COMFY_COMMIT := '7ef81780f814dc25b4108163e70b22c011e968be'
+export PORT := env('SWARMUI_COMFY_LIVE_PORT', '8189')
+export PYTHON := WORK / if os_family() == 'windows' { 'venv/Scripts/python.exe' } else { 'venv/bin/python' }
+
+# Clone the pinned ComfyUI and install CPU torch, ComfyUI's requirements, and the packages ComfyUISelfStartBackend installs (RequiredPythonPackages, RequiredVersionPythonPackages, the opencv pin from its lib fixes).
+[script]
+setup:
+    mkdir -p "$WORK"
+    if [ ! -d "$WORK/ComfyUI/.git" ]; then
+        git clone --quiet --no-checkout "$COMFY_REPO" "$WORK/ComfyUI"
+    fi
+    git -C "$WORK/ComfyUI" checkout --quiet --detach "$COMFY_COMMIT"
+    git -C "$WORK/ComfyUI" rev-parse HEAD
+    uv venv --quiet --allow-existing --python 3.13 "$WORK/venv"
+    uv pip install --python "$PYTHON" torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    uv pip install --python "$PYTHON" -r "$WORK/ComfyUI/requirements.txt"
+    uv pip install --python "$PYTHON" kornia sentencepiece spandrel pydantic pydantic-settings alembic simpleeval blake3 filelock comfy-angle rembg onnxruntime matplotlib "opencv-python-headless==4.11.0.86" imageio-ffmpeg dill omegaconf "diffusers>=0.36.0" "aiohttp>=3.11.8" "yarl>=1.18.0" "av>=18.1.0" "spandrel>=0.4.1" "transformers>=4.57.3" "pyopengl>=3.1.8" "ultralytics==8.3.197"
+
+# Write the extra_model_paths YAML: the test model folder (with the clipseg folder ComfyUISelfStartBackend forwards), SwarmUI's ExtraNodes and the null-model hook.
+[script]
+paths:
+    mkdir -p "$WORK/models/diffusion_models" "$WORK/models/text_encoders" "$WORK/models/vae" "$WORK/models/loras" "$WORK/models/clipseg"
+    printf '%s\n' \
+        "swarmui:" \
+        "    base_path: $WORK/models" \
+        "    is_default: true" \
+        "    diffusion_models: diffusion_models" \
+        "    text_encoders: text_encoders" \
+        "    clip: text_encoders" \
+        "    vae: vae" \
+        "    loras: loras" \
+        "    clipseg: clipseg" \
+        "swarmui_nodes:" \
+        "    custom_nodes: |" \
+        "        $REPO/src/BuiltinExtensions/ComfyUIBackend/ExtraNodes" \
+        "        $NODES" \
+        > "$WORK/extra_model_paths.yaml"
+    cat "$WORK/extra_model_paths.yaml"
+
+# Build the CLIPSeg model SwarmClipSeg loads (models/clipseg/clipseg-rd64-refined-fp16-safetensors): transformers' own CLIPSeg at small dimensions with seeded random weights, so masks have a random shape, plus the real tokenizer and preprocessor files from the repo SwarmClipSeg downloads.
+[script]
+clipseg seed='7': paths
+    target="$WORK/models/clipseg/clipseg-rd64-refined-fp16-safetensors"
+    mkdir -p "$target"
+    "$PYTHON" -I - "$target" "$1" <<'EOF'
+    import sys
+    import torch
+    from transformers import CLIPSegConfig, CLIPSegForImageSegmentation
+    torch.manual_seed(int(sys.argv[2]))
+    config = CLIPSegConfig(
+        text_config={"vocab_size": 49408, "hidden_size": 16, "intermediate_size": 16, "num_hidden_layers": 1, "num_attention_heads": 1, "max_position_embeddings": 77},
+        vision_config={"hidden_size": 16, "intermediate_size": 16, "num_hidden_layers": 3, "num_attention_heads": 1, "image_size": 352, "patch_size": 16},
+        projection_dim=16, reduce_dim=8, extract_layers=[0, 1, 2], decoder_num_attention_heads=1, decoder_intermediate_size=16)
+    CLIPSegForImageSegmentation(config).save_pretrained(sys.argv[1], safe_serialization=True)
+    EOF
+    for file in merges.txt preprocessor_config.json special_tokens_map.json tokenizer_config.json vocab.json; do
+        curl -sS -f -L -o "$target/$file" "https://huggingface.co/mcmonkey/clipseg-rd64-refined-fp16/resolve/main/$file"
+    done
+    ls -la "$target"
+
+# Run ComfyUI on CPU in the foreground, with no node cache so every node of every job executes.
+[script]
+start: paths
+    cd "$WORK/ComfyUI"
+    exec "$PYTHON" main.py --cpu --cache-none --listen 127.0.0.1 --port "$PORT" --disable-auto-launch --extra-model-paths-config "$WORK/extra_model_paths.yaml"
+
+# Run the live tests against the running ComfyUI.
+[script]
+test:
+    cd "$REPO"
+    SWARMUI_TEST_COMFY_URL="http://127.0.0.1:$PORT" SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=ComfyLive" --logger "console;verbosity=normal"

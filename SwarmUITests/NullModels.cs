@@ -96,9 +96,20 @@ public static class NullModels
         return WriteFile(path, headerBytes, realSize);
     }
 
-    /// <summary>Writes the 8-byte little-endian header length and the header, then extends the file with zeros to its full size without writing them.</summary>
+    /// <summary>Writes the 8-byte little-endian header length and the header, then extends the file with zeros to its full size without writing them.
+    /// An existing file of that size and header is kept as it is: a running ComfyUI may hold it memory-mapped, and Windows refuses to rewrite a mapped file.</summary>
     public static long WriteFile(string path, byte[] headerBytes, long size)
     {
+        if (File.Exists(path) && new FileInfo(path).Length == size)
+        {
+            using FileStream existing = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            byte[] start = new byte[8 + headerBytes.Length];
+            existing.ReadExactly(start);
+            if (start.AsSpan(0, 8).SequenceEqual(BitConverter.GetBytes((ulong)headerBytes.Length)) && start.AsSpan(8).SequenceEqual(headerBytes))
+            {
+                return size;
+            }
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         using FileStream file = new(path, FileMode.Create, FileAccess.Write);
         file.Write(BitConverter.GetBytes((ulong)headerBytes.Length));
