@@ -57,6 +57,8 @@ jobs:
             python-version: '3.12'
         # Exercise upstream real-tensor crop/stitch behavior, not mocks or
         # handrolled imitations. This does not imply a Qwen GPU acceptance pass.
+        - name: Verify LoRA live-manifest identities independently of case names (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_lora_manifest_cpu.py -v
         - name: Execute live Qwen mask-chain verifier with inverse and invalid CPU controls
           run: python3 -m unittest discover -s tests -p test_qwen_live_mask_chain_cpu.py -v
         - name: Install CPU tensor dependencies for upstream CropAndStitch tests
