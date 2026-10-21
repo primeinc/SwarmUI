@@ -373,6 +373,53 @@ public class QwenSegmentBackendNodeTests : SwarmUITest
             ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, installed));
     }
 
+
+    [TestCase("image_0")]
+    [TestCase("image_17")]
+    [TestCase("image_999999999999999999999")]
+    [TestCase("image_unknown")]
+    public static void RawQwenInvalidVisionSocketNameCannotEvadeBackendPreflight(string socket)
+    {
+        JObject graph = new()
+        {
+            ["source"] = Node("LoadImage"),
+            ["vision"] = Node("SwarmTextEncodeAdvanced")
+        };
+        graph["vision"]["inputs"][socket] = new JArray("source", 0);
+        HashSet<string> available = ["LoadImage", "SwarmTextEncodeAdvanced"];
+        JObject backend = new()
+        {
+            ["SwarmTextEncodeAdvanced"] = new JObject
+            {
+                ["input"] = new JObject
+                {
+                    ["optional"] = new JObject { ["image_16"] = new JArray("IMAGE") }
+                }
+            }
+        };
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend))
+            .Message, Does.Contain(socket));
+
+        const string template = """
+            {
+                "source":{"class_type":"LoadImage","inputs":{"image":${initimage}}},
+                "vision":{"class_type":"SwarmTextEncodeAdvanced",
+                    "inputs":{"__SOCKET__":["source",0]}}
+            }
+            """;
+        string raw = template.Replace("__SOCKET__", socket);
+        Assert.That(Assert.Throws<SwarmUserErrorException>(() =>
+            ComfyUIAPIAbstractBackend.PreflightRawQwenSegmentNodes(raw, available, backend))
+            .Message, Does.Contain(socket),
+            "Invalid independent Qwen reference input must fail before image upload");
+
+        ((JObject)graph["vision"]["inputs"]).Remove(socket);
+        graph["vision"]["inputs"]["image_16"] = new JArray("source", 0);
+        Assert.DoesNotThrow(() =>
+            ComfyUIAPIAbstractBackend.ValidateQwen21IndependentVisionSockets(graph, backend));
+    }
+
     [Test]
     public static void RawQwenPreflightRejectsStaleIndependentVisionSocketsBeforeUpload()
     {
