@@ -231,14 +231,40 @@ def validate_qwen_subject_mask_chain(graph, crop_id):
             or int(guard_ref[1]) != 0
             or abs(float(guard["inputs"].get("minimum_confidence", -1))) > 1e-6):
         raise AssertionError("Subject mask must preserve the already-applied authored CLIPSeg threshold")
+    # Native Qwen supports both regular and inverted <segment:...> tags.
+    # The latter intentionally selects the complement of the detector target,
+    # which may cover >99% of the canvas. It is safe ONLY when its original
+    # detector is guarded and binarized BEFORE InvertMask. Otherwise a soft
+    # 0.6-confidence mask inverts to 0.4 and ThresholdMask(0) reselects it.
+    def checked_input(ref, kind):
+        if (not isinstance(ref, list) or len(ref) != 2 or ref[1] != 0):
+            raise AssertionError(f"Expected connected {kind} output 0, got {ref!r}")
+        node = graph.get(str(ref[0]))
+        if not node or node["class_type"] != kind:
+            raise AssertionError(f"Expected {kind} on native Qwen mask chain, got {node!r}")
+        return node
+
     coverage = guard["inputs"].get("maximum_coverage")
-    if not isinstance(coverage, (int, float)) or not (0 < coverage <= 0.99):
-        raise AssertionError("Qwen edit must reject near-full-canvas subject detection")
     detector_ref = guard["inputs"].get("mask")
-    detector = graph.get(str(detector_ref[0])) if isinstance(detector_ref, list) and len(detector_ref) == 2 else None
-    if (not detector or detector["class_type"] != "SwarmClipSeg"
-            or int(detector_ref[1]) != 0):
-        raise AssertionError("Binary subject mask must derive from the actual text detector")
+    origin = (graph.get(str(detector_ref[0]))
+              if isinstance(detector_ref, list) and len(detector_ref) == 2 and detector_ref[1] == 0
+              else None)
+    if origin and origin["class_type"] == "InvertMask":
+        if coverage != 1.0:
+            raise AssertionError("Explicit inverted Qwen target must allow 100% complement coverage")
+        original_binary = checked_input(origin["inputs"].get("mask"), "ThresholdMask")
+        if float(original_binary["inputs"].get("value", -1)) != 0.0:
+            raise AssertionError("Original detector must be binarized BEFORE inversion at threshold zero")
+        original_guard = checked_input(
+            original_binary["inputs"].get("mask"), "SwarmRequireNonEmptyMask")
+        if (original_guard["inputs"].get("minimum_confidence") != 0.0
+                or original_guard["inputs"].get("maximum_coverage") != 1.0):
+            raise AssertionError("Original detector must be nonempty before inversion")
+        checked_input(original_guard["inputs"].get("mask"), "SwarmClipSeg")
+    else:
+        if not isinstance(coverage, (int, float)) or not (0 < coverage <= 0.99):
+            raise AssertionError("Normal Qwen detector must reject near-full-canvas support")
+        checked_input(detector_ref, "SwarmClipSeg")
     return threshold_ref
 
 
