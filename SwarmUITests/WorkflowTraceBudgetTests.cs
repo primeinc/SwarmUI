@@ -190,7 +190,7 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             ["Finish"] = Measure(trace.Finish),
             ["Finish, hash cache cleared"] = Measure(() =>
             {
-                WorkflowTrace.LongHashes.Clear();
+                MetadataHelper.LongHashes.Clear();
                 trace.Finish();
             })
         };

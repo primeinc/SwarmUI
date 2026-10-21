@@ -21,13 +21,14 @@ public class WorkflowTrace(WorkflowGenerator gen)
     public const int FormatVersion = 1;
 
     /// <summary>ExtraMeta key the trace summary is stored under.</summary>
-    public const string MetadataKey = T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey;
+    public const string MetadataKey = MetadataHelper.WorkflowTraceKey;
 
     /// <summary>Node classes treated as samplers for chain analysis. An extension with its own sampler node adds the class here when it loads.</summary>
     public static HashSet<string> SamplerClasses = ["KSampler", "KSamplerAdvanced", "SwarmKSampler", "SamplerCustom", "SamplerCustomAdvanced", "SwarmUnsampler"];
 
-    /// <summary>Node input names that carry prompt text. Text in these inputs is never written raw. An extension with its own text encoder node adds the input name here when it loads.</summary>
-    public static HashSet<string> PromptInputNames = ["text", "prompt", "text_g", "text_l", "lyrics", "caption", "match_text", "style"];
+    /// <summary>Node input names that carry prompt text. Text in these inputs is never written raw. An extension with its own text encoder node adds the input name here when it loads.
+    /// The text of every prompt-view parameter read is also never written raw, under any input name (<see cref="PromptParamTexts"/>).</summary>
+    public static HashSet<string> PromptInputNames = ["text", "prompt", "text_g", "text_l", "lyrics", "caption", "match_text", "style", "tags"];
 
     /// <summary>Maximum number of nodes listed per sampler input chain.</summary>
     public const int MaxChainNodes = 48;
@@ -258,6 +259,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Registered prompt texts, mapped to their labels.</summary>
     public Dictionary<string, List<string>> PromptLabels = [];
 
+    /// <summary>Text values of prompt-view parameters read (<see cref="ParamViewType.PROMPT"/>, such as the negative prompt or the Text2Audio style), mapped to the read key ("id" or "id@section") that first read each.
+    /// A node input with one of these values is written as a hash under any input name (<see cref="FormatString"/>).</summary>
+    public Dictionary<string, string> PromptParamTexts = [];
+
     /// <summary>Media inputs by node ID.</summary>
     public Dictionary<string, MediaRecord> Media = [];
 
@@ -305,57 +310,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
         : Gen.IsRefinerStage ? "refiner"
         : "base";
 
-    /// <summary>Strings and byte arrays at least this long are hashed without copying them and have their hash cached in <see cref="LongHashes"/>.</summary>
-    public const int CachedHashMinLength = 4096;
-
-    /// <summary>SHA-256 hex of long strings and byte arrays, by reference, so base64 media, image bytes and workflow texts are hashed once however often the trace names them.
-    /// Keyed by reference: strings are immutable, and Swarm replaces a media file's RawData array rather than writing into it.</summary>
-    public static readonly ConditionalWeakTable<object, string> LongHashes = new();
-
-    /// <summary>Returns the SHA-256 hex of a string's UTF-8 bytes, the same as <c>Utilities.HashSHA256(text.EncodeUTF8())</c>. Long strings are encoded through a small buffer rather than copied, and their hash is cached.</summary>
-    public static string HashText(string text)
-    {
-        text ??= "";
-        if (text.Length < CachedHashMinLength)
-        {
-            return Utilities.HashSHA256(text.EncodeUTF8());
-        }
-        return LongHashes.GetValue(text, static t => HashWritten(writer => writer.Write((string)t)));
-    }
-
-    /// <summary>Returns the SHA-256 hex of some bytes, cached for long arrays.</summary>
-    public static string HashBytes(byte[] data)
-    {
-        data ??= [];
-        if (data.Length < CachedHashMinLength)
-        {
-            return Utilities.HashSHA256(data);
-        }
-        return LongHashes.GetValue(data, static d => Utilities.HashSHA256((byte[])d));
-    }
-
-    /// <summary>Returns the first 8 hex chars of the SHA-256 of some text.</summary>
-    public static string Sha8(string text) => HashText(text)[..8];
-
-    /// <summary>Returns the first 8 hex chars of the SHA-256 of some bytes.</summary>
-    public static string Sha8(byte[] data) => HashBytes(data)[..8];
-
-    /// <summary>Returns the SHA-256 hex of the text a writer callback writes, as UTF-8 without a byte order mark (<see cref="StringConversionHelper.UTF8Encoding"/>, as <c>EncodeUTF8</c> uses), encoding through a small buffer instead of building the text or its bytes.</summary>
-    public static string HashWritten(Action<TextWriter> write)
-    {
-        using SHA256 sha = SHA256.Create();
-        using (CryptoStream crypto = new(Stream.Null, sha, CryptoStreamMode.Write))
-        using (StreamWriter writer = new(crypto, StringConversionHelper.UTF8Encoding, 4096))
-        {
-            write(writer);
-        }
-        return Utilities.BytesToHex(sha.Hash);
-    }
-
     /// <summary>Returns the SHA-256 of a token's indented JSON text as UTF-8, the same as hashing <c>token.ToString()</c>, without building the text.</summary>
     public static string HashIndentedJson(JToken token)
     {
-        return HashWritten(writer =>
+        return MetadataHelper.HashWritten(writer =>
         {
             JsonTextWriter json = new(writer) { Formatting = Formatting.Indented };
             token.WriteTo(json);
@@ -372,10 +330,14 @@ public class WorkflowTrace(WorkflowGenerator gen)
         Gen.UserInput.ParamReadTracker = OnParamRead;
     }
 
-    /// <summary>Records a parameter read.</summary>
+    /// <summary>Records a parameter read, and the text of a prompt-view parameter (<see cref="PromptParamTexts"/>).</summary>
     public void OnParamRead(T2IParamType type, int section, object value, string source)
     {
         string key = section == 0 ? type.ID : $"{type.ID}@{section}";
+        if (type.ViewType == ParamViewType.PROMPT && value is string text && text.Length > 0)
+        {
+            PromptParamTexts.TryAdd(text, key);
+        }
         if (!ParamReads.TryGetValue(key, out ParamReadRecord record))
         {
             record = new() { Type = type, Section = section, FirstValue = value, FirstSource = source };
@@ -420,6 +382,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
         StepStack.Add(record.Index);
     }
 
+    /// <summary>Index of the last top-level step that ended (<see cref="EndStep"/>), or -1. Model-generation steps that ran inside it come after it in <see cref="StepRecords"/>.</summary>
+    public int LastTopLevelStep = -1;
+
     /// <summary>Records that the innermost step ended.</summary>
     public void EndStep()
     {
@@ -430,6 +395,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             return;
         }
+        LastTopLevelStep = record.Index;
         record.State = new()
         {
             ["model"] = DescribeData(Gen.CurrentModel),
@@ -544,10 +510,10 @@ public class WorkflowTrace(WorkflowGenerator gen)
         CreatedSinceCheckpoint.Clear();
     }
 
-    /// <summary>Records that a step stopped all further steps.</summary>
+    /// <summary>Records that the top-level step that just ended stopped all further steps.</summary>
     public void SkippedFurtherSteps()
     {
-        Events.Add($"step '{StepRecords[^1].Name}' stopped further steps");
+        Events.Add($"step '{StepName(LastTopLevelStep)}' stopped further steps");
     }
 
     /// <summary>Records a node written into the workflow.</summary>
@@ -563,14 +529,15 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             overwrites = prior.Overwrites + 1;
         }
+        string stage = CurrentStage;
         Nodes[id] = new()
         {
             Id = id,
             ClassType = classType,
             Step = step,
-            Stage = CurrentStage,
+            Stage = stage,
             Origin = Origin(member, file, line),
-            Compat = LoadStack.Count > 0 ? Loads[LoadStack[^1]].Compat : Gen.FinalLoadedModel?.ModelClass?.CompatClass?.ID,
+            Compat = LoadStack.Count > 0 ? Loads[LoadStack[^1]].Compat : StageCompat.TryGetValue(stage, out string stageCompat) ? stageCompat : Gen.FinalLoadedModel?.ModelClass?.CompatClass?.ID,
             Load = LoadStack.Count > 0 ? LoadStack[^1] : -1,
             Overwrites = overwrites
         };
@@ -599,6 +566,9 @@ public class WorkflowTrace(WorkflowGenerator gen)
         CacheHits.Add($"{kind} -> {result} @{CurrentStage}");
     }
 
+    /// <summary>Compat class of the latest model load in each stage, by stage. A node created outside a load takes its stage's (<see cref="NodeRecord.Compat"/>), else the generator's final loaded model's.</summary>
+    public Dictionary<string, string> StageCompat = [];
+
     /// <summary>Records the start of a model load.</summary>
     public void BeginModelLoad(T2IModel model, string type, string requestedId, int sectionId)
     {
@@ -616,6 +586,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         };
         Loads.Add(record);
         LoadStack.Add(record.Index);
+        StageCompat[record.Stage] = record.Compat;
     }
 
     /// <summary>Records the end of a model load.</summary>
@@ -636,6 +607,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Records a model load answered from the generator's loader cache.</summary>
     public void ModelLoadCached(T2IModel model, string type, int sectionId, JArray modelOut, JArray clipOut, JArray vaeOut)
     {
+        StageCompat[CurrentStage] = model?.ModelClass?.CompatClass?.ID;
         Loads.Add(new()
         {
             Index = Loads.Count,
@@ -687,7 +659,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (label == $"{CurrentStage}.pos" && SegmentParts.Count > 0 && SegmentParts[^1] is JObject segment && $"{segment["stage"]}" == CurrentStage && segment["prompt"].Type == JTokenType.Null)
         {
-            segment["prompt"] = $"@{label}#{Sha8(text)}";
+            segment["prompt"] = $"@{label}#{MetadataHelper.Sha8(text)}";
         }
     }
 
@@ -714,7 +686,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["index"] = index,
             ["stage"] = CurrentStage,
             ["section"] = part.ContextID,
-            ["mask_text"] = $"@{CurrentStage}.mask#{Sha8(part.DataText)}",
+            ["mask_text"] = $"@{CurrentStage}.mask#{MetadataHelper.Sha8(part.DataText)}",
             ["threshold"] = part.Strength,
             ["creativity"] = part.Strength2,
             ["prompt"] = JValue.CreateNull()
@@ -927,7 +899,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     }
 
     /// <summary>Builds the image record tiers, most complete first; <see cref="ForImageMetadata"/> keeps the first that fits the format. Tier 0 is <see cref="RecordFull"/>.
-    /// Tier 1 reduces every node to its class, stage and provenance, and the parameter reads to those made for a section. Tier 2 drops the node table and gives the steps, removals, rewires, edits, cache hits and node reuse as counts.
+    /// Tier 1 reduces every node to its class, stage and provenance, and the parameter reads to those made for a section. Tier 2 drops the node table, names each node of the samplers' input chains as "id:Class" instead, and gives the steps, removals, rewires, edits, cache hits and node reuse as counts.
     /// Tier 3 keeps the workflow identity, the model and the samplers' nodes and calls. Tier 4 keeps the workflow identity and the sampler count, so it fits whenever the rest of the metadata leaves room for a few hundred characters.
     /// Each tier below 0 says what it omitted and where the full trace is in the server log.</summary>
     public List<JObject> RecordTiers(JObject summary, string logKey)
@@ -958,6 +930,20 @@ public class WorkflowTrace(WorkflowGenerator gen)
         reduced["omitted"] = $"node inputs and output types, and parameter reads outside sections, to fit the image metadata; the full trace is in the {full["full_trace"]}";
         JObject counted = (JObject)reduced.DeepClone();
         counted.Remove("nodes");
+        foreach (JObject sampler in (counted["samplers"] as JArray ?? []).OfType<JObject>())
+        {
+            foreach (JProperty input in (sampler["inputs"] as JObject ?? []).Properties())
+            {
+                foreach (JValue entry in (input.Value as JArray ?? []).OfType<JValue>().ToList())
+                {
+                    string id = $"{entry}";
+                    if (Gen.Workflow[id] is JObject chainNode)
+                    {
+                        entry.Value = $"{id}:{chainNode["class_type"]}";
+                    }
+                }
+            }
+        }
         JObject counts = [];
         foreach (string key in new[] { "steps", "removed", "rewires", "edits", "cache_hits", "node_reuse" })
         {
@@ -1077,7 +1063,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>Post-generate handler (<see cref="T2IEngine.PostGenerateEvent"/>): picks the record tier again for the file being saved and the metadata it is saved with (<see cref="T2IParamInput.GenFullMetadataObject"/>), which by now includes everything written after the trace finished:
     /// the posted workflow, the backend's debug data with the prompt, the generation times, the unused parameter list and the model hashes.
     /// A video or audio file keeps the first tier (its metadata is a track comment). An image is converted to the input's image format: JPEG gets the first tier that fits one EXIF segment (<see cref="ForImageMetadata"/>),
-    /// and with stealth metadata on (PNG or WebP), the first tier from there whose stealth data fits the image's pixels (<see cref="MetadataHelper.StealthCapacityBits"/>).
+    /// and with stealth metadata on (PNG or WebP), the first tier from there whose stealth data fits the image's pixels (<see cref="MetadataHelper.StealthCapacityBits"/>; the size comes from the decode <see cref="ImageFile.ConvertTo"/> reuses for the save).
     /// Does nothing for an input without a tiered record. An error is logged, never thrown: the file is saved with the record it had.</summary>
     public static void FitRecordToSave(T2IEngine.PostGenerationEventParams args)
     {
@@ -1098,8 +1084,8 @@ public class WorkflowTrace(WorkflowGenerator gen)
             string stealthMode = StealthModeOf(input);
             if (isImage && extra is not null && args.File is ImageFile image && ImageFile.StealthApplies(format, stealthMode))
             {
-                SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(image.RawData);
-                long capacity = MetadataHelper.StealthCapacityBits(info.Width, info.Height, stealthMode);
+                SixLabors.ImageSharp.Image decoded = image.ToIS;
+                long capacity = MetadataHelper.StealthCapacityBits(decoded.Width, decoded.Height, stealthMode);
                 for (int i = set.Tiers.IndexOf(pick); i < set.Tiers.Count; i++)
                 {
                     pick = set.Tiers[i];
@@ -1148,25 +1134,19 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return records;
     }
 
-    /// <summary>Returns the "${...}" placeholders in a workflow text, in order of first appearance.</summary>
+    /// <summary>Returns the "${...}" placeholders in a workflow text, each once, in order: parsed by <see cref="StringConversionHelper.QuickSimpleTagFiller"/> with the prefix, suffix and subtag setting <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> fills custom and raw workflows with.</summary>
     public static List<string> Placeholders(string text)
     {
         List<string> result = [];
-        int start = text.IndexOf("${", StringComparison.Ordinal);
-        while (start >= 0)
+        StringConversionHelper.QuickSimpleTagFiller(text ?? "", "${", "}", tag =>
         {
-            int end = text.IndexOf('}', start + 2);
-            if (end < 0)
-            {
-                break;
-            }
-            string placeholder = text[start..(end + 1)];
+            string placeholder = $"${{{tag}}}";
             if (!result.Contains(placeholder))
             {
                 result.Add(placeholder);
             }
-            start = text.IndexOf("${", end + 1, StringComparison.Ordinal);
-        }
+            return null;
+        }, false);
         return result;
     }
 
@@ -1178,7 +1158,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     {
         try
         {
-            string sha = HashText(workflow);
+            string sha = MetadataHelper.HashText(workflow);
             List<JObject> records = WorkflowRecords(Gen.UserInput, Summary);
             if (records.Count == 0)
             {
@@ -1218,7 +1198,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         string label = LogLabel($"{stored["log_key"]}");
         try
         {
-            string sha = HashText(workflow);
+            string sha = MetadataHelper.HashText(workflow);
             bool? matchesSent = info["sent_sha256"] is JValue sent ? $"{sent}" == sha : null;
             foreach (JObject record in WorkflowRecords(input, null))
             {
@@ -1280,7 +1260,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             ["workflow"] = new JObject()
             {
                 ["source"] = source,
-                ["sent_sha256"] = HashText(workflow),
+                ["sent_sha256"] = MetadataHelper.HashText(workflow),
                 ["sent_length"] = workflow?.Length ?? 0,
                 ["posted"] = NotPosted
             }
@@ -1458,24 +1438,29 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return value is JArray arr && arr.Count == 2 && arr[0].Type == JTokenType.String && arr[1].Type == JTokenType.Integer;
     }
 
-    /// <summary>Formats a string node input with placeholders for prompts, media, and long text. Prompt text that is part of a registered prompt, rather than all of one, is labeled "~part" with the labels of the shortest registered prompt that contains it.</summary>
+    /// <summary>Formats a string node input with placeholders for prompts, media, and long text. Prompt text that is part of a registered prompt, rather than all of one, is labeled "~part" with the labels of the shortest registered prompt that contains it.
+    /// The text of a prompt-view parameter read (<see cref="PromptParamTexts"/>) is labeled with that parameter under any input name.</summary>
     public string FormatString(string nodeId, string key, string value)
     {
         if (key.EndsWith("_base64"))
         {
             if (Media.TryGetValue(nodeId, out MediaRecord media))
             {
-                return $"@{media.Param}#{Sha8(value)}{MediaSize(media)}";
+                return $"@{media.Param}#{MetadataHelper.Sha8(value)}{MediaSize(media)}";
             }
-            return $"b64#{Sha8(value)}({value.Length})";
+            return $"b64#{MetadataHelper.Sha8(value)}({value.Length})";
         }
         if (PromptLabels.TryGetValue(value, out List<string> labels))
         {
-            return $"{labels.Select(l => $"@{l}").JoinString("=")}#{Sha8(value)}";
+            return $"{labels.Select(l => $"@{l}").JoinString("=")}#{MetadataHelper.Sha8(value)}";
+        }
+        if (PromptParamTexts.TryGetValue(value, out string promptParam))
+        {
+            return $"@{promptParam}#{MetadataHelper.Sha8(value)}";
         }
         if (HashFreeText && (value.Length > 64 || value.Any(char.IsWhiteSpace)) && !ModelFileExtensions.Any(e => value.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
         {
-            return $"#{Sha8(value)}({value.Length})";
+            return $"#{MetadataHelper.Sha8(value)}({value.Length})";
         }
         if (PromptInputNames.Contains(key))
         {
@@ -1499,18 +1484,19 @@ public class WorkflowTrace(WorkflowGenerator gen)
             }
             if (container is not null)
             {
-                return $"{containerLabels.Select(l => $"@{l}").JoinString("=")}~part#{Sha8(value)}";
+                return $"{containerLabels.Select(l => $"@{l}").JoinString("=")}~part#{MetadataHelper.Sha8(value)}";
             }
-            return $"#{Sha8(value)}({value.Length})";
+            return $"#{MetadataHelper.Sha8(value)}({value.Length})";
         }
         if (value.Length > 120)
         {
-            return $"#{Sha8(value)}({value.Length})";
+            return $"#{MetadataHelper.Sha8(value)}({value.Length})";
         }
         return value;
     }
 
-    /// <summary>Returns " WxH mime" for a media record, reading the image size from its header if it was not resized. Computed once per record.</summary>
+    /// <summary>Returns " WxH mime" for a media record. The size is the generator's resize target if it resized the image, else the image's own decode if Swarm already decoded it (<see cref="ImageFile._CacheISImg"/>),
+    /// else read from its header (ImageSharp Identify, which parses the header chunks without decoding pixels). Computed once per record.</summary>
     public static string MediaSize(MediaRecord media)
     {
         if (media.SizeText is not null)
@@ -1522,9 +1508,17 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             try
             {
-                SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(img.RawData);
-                width = info.Width;
-                height = info.Height;
+                if (img._CacheISImg is SixLabors.ImageSharp.Image decoded)
+                {
+                    width = decoded.Width;
+                    height = decoded.Height;
+                }
+                else
+                {
+                    SixLabors.ImageSharp.ImageInfo info = SixLabors.ImageSharp.Image.Identify(img.RawData);
+                    width = info.Width;
+                    height = info.Height;
+                }
             }
             catch (Exception)
             {
@@ -1546,18 +1540,18 @@ public class WorkflowTrace(WorkflowGenerator gen)
         }
         if (type?.ViewType == ParamViewType.PROMPT && value is string prompt)
         {
-            return $"@{type.ID}#{Sha8(prompt)}({prompt.Length})";
+            return $"@{type.ID}#{MetadataHelper.Sha8(prompt)}({prompt.Length})";
         }
         return value switch
         {
-            string str => str.Length > 120 ? $"#{Sha8(str)}({str.Length})" : str,
+            string str => str.Length > 120 ? $"#{MetadataHelper.Sha8(str)}({str.Length})" : str,
             bool or int or long or float or double => JToken.FromObject(value),
             T2IModel model => $"{T2IParamTypes.CleanModelName(model.Name)} [{model.ModelClass?.ID ?? "?"}]",
-            MediaFile media => $"media#{Sha8(media.RawData)} {media.Type?.MimeType ?? "?"}",
-            List<string> list => new JArray(list.Select(s => (JToken)(s.Length > 120 ? $"#{Sha8(s)}({s.Length})" : s))),
+            MediaFile media => $"media#{MetadataHelper.Sha8(media.RawData)} {media.Type?.MimeType ?? "?"}",
+            List<string> list => new JArray(list.Select(s => (JToken)(s.Length > 120 ? $"#{MetadataHelper.Sha8(s)}({s.Length})" : s))),
             List<T2IModel> models => new JArray(models.Select(m => (JToken)T2IParamTypes.CleanModelName(m.Name))),
             JToken tok => tok.ToString(Formatting.None),
-            System.Collections.IEnumerable items => new JArray(items.Cast<object>().Select(i => i is MediaFile m ? (JToken)$"media#{Sha8(m.RawData)} {m.Type?.MimeType ?? "?"}" : (JToken)$"{i}")),
+            System.Collections.IEnumerable items => new JArray(items.Cast<object>().Select(i => i is MediaFile m ? (JToken)$"media#{MetadataHelper.Sha8(m.RawData)} {m.Type?.MimeType ?? "?"}" : (JToken)$"{i}")),
             _ => $"{value}"
         };
     }
@@ -1578,7 +1572,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
             return FormatString(nodeId, name, value.ToString());
         }
         string raw = value.ToString(Formatting.None);
-        return raw.Length > 120 ? $"#{Sha8(raw)}({raw.Length})" : raw;
+        return raw.Length > 120 ? $"#{MetadataHelper.Sha8(raw)}({raw.Length})" : raw;
     }
 
     /// <summary>Describes an edit as "id:Class.input: before -&gt; after by step", or "id:Class replaced outside CreateNode (was Class) by step".</summary>
@@ -2128,7 +2122,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         {
             foreach (string label in labels)
             {
-                prompts[$"@{label}#{Sha8(text)}"] = text.Length;
+                prompts[$"@{label}#{MetadataHelper.Sha8(text)}"] = text.Length;
             }
         }
         result["prompts"] = prompts;
@@ -2136,7 +2130,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         foreach ((string nodeId, MediaRecord record) in Media)
         {
             string value = workflow[nodeId]?["inputs"] is JObject mediaInputs ? mediaInputs.Properties().Where(p => p.Name.EndsWith("_base64")).Select(p => p.Value.ToString()).FirstOrDefault() : null;
-            string hash = value is not null ? Sha8(value) : record.Media?.RawData is byte[] raw ? $"raw:{Sha8(raw)}" : "?";
+            string hash = value is not null ? MetadataHelper.Sha8(value) : record.Media?.RawData is byte[] raw ? $"raw:{MetadataHelper.Sha8(raw)}" : "?";
             media[nodeId] = $"@{record.Param}#{hash}{MediaSize(record)}";
         }
         result["media"] = media;

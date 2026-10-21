@@ -20,11 +20,8 @@ public class T2IMultiStepObjectBuilder
     /// <summary>ExtraMeta key for the debug record of how an object prompt's image was composed. Set when <see cref="Settings.AddDebugData"/> is enabled.</summary>
     public const string TraceMetadataKey = "debug_trace_objects";
 
-    /// <summary>ExtraMeta key a backend's workflow trace is stored under (WorkflowTrace.MetadataKey in the ComfyUI backend).</summary>
-    public const string WorkflowTraceMetadataKey = "debug_trace";
-
-    /// <summary>Returns "#" plus the first 8 hex chars of the SHA-256 of some text, so prompt text is never written raw into debug records.</summary>
-    public static string TraceHash(string text) => $"#{Utilities.HashSHA256((text ?? "").EncodeUTF8())[..8]}";
+    /// <summary>Returns "#" plus the short hash of some text (<see cref="MetadataHelper.Sha8(string)"/>), so prompt text is never written raw into debug records.</summary>
+    public static string TraceHash(string text) => $"#{MetadataHelper.Sha8(text)}";
 
     /// <summary>Describes one object pass: the object's region, the crop of the base image that is inpainted, the inpaint size, and the mask inside it. The crop box is also where the result is pasted back, resized to the crop size.</summary>
     public static JObject TraceObjectPass(PromptRegion.Part part, int pixelX, int pixelY, int pixelWidth, int pixelHeight, int extraX, int extraY, int extraWidth, int extraHeight, int fixedWidth, int fixedHeight, double scaleWidth, double scaleHeight)
@@ -42,24 +39,25 @@ public class T2IMultiStepObjectBuilder
         };
     }
 
-    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the result image's size and hash.</summary>
+    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the result image's size and hash.
+    /// The size comes from the image's decode (<see cref="ImageFile.ToIS"/>), which composing the image uses next, so the record adds no image parsing.</summary>
     public static void TracePassResult(JObject passTrace, T2IParamInput passInput, MediaFile result)
     {
         passTrace["seed"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Seed.Type.ID) is long seed ? seed : null;
         passTrace["model"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Model.Type.ID) is T2IModel model ? T2IParamTypes.CleanModelName(model.Name) : null;
-        JObject passRecord = passInput.ExtraMeta.GetValueOrDefault(WorkflowTraceMetadataKey) as JObject;
+        JObject passRecord = passInput.ExtraMeta.GetValueOrDefault(MetadataHelper.WorkflowTraceKey) as JObject;
         passTrace["workflow"] = passRecord?["workflow"]?.DeepClone();
         passTrace["log_key"] = passRecord?["log_key"]?.DeepClone();
         if (result is ImageFile img)
         {
             try
             {
-                ImageInfo info = ISImage.Identify(img.RawData);
-                passTrace["result"] = $"{info.Width}x{info.Height} #{Utilities.HashSHA256(img.RawData)[..8]} {img.Type.MimeType}";
+                ISImage decoded = img.ToIS;
+                passTrace["result"] = $"{decoded.Width}x{decoded.Height} #{MetadataHelper.Sha8(img.RawData)} {img.Type.MimeType}";
             }
             catch (Exception ex)
             {
-                passTrace["result"] = $"unreadable image ({ex.GetType().Name}) #{Utilities.HashSHA256(img.RawData ?? [])[..8]} {img.Type?.MimeType}";
+                passTrace["result"] = $"unreadable image ({ex.GetType().Name}) #{MetadataHelper.Sha8(img.RawData ?? [])} {img.Type?.MimeType}";
             }
         }
         else
@@ -195,7 +193,7 @@ public class T2IMultiStepObjectBuilder
         Image composite = new(liveImg);
         if (tracePasses is not null && outerInput.ExtraMeta.GetValueOrDefault(TraceMetadataKey) is JObject objectsTrace)
         {
-            objectsTrace["composite"] = $"{liveImg.Width}x{liveImg.Height} #{Utilities.HashSHA256(composite.RawData)[..8]} {composite.Type.MimeType}";
+            objectsTrace["composite"] = $"{liveImg.Width}x{liveImg.Height} #{MetadataHelper.Sha8(composite.RawData)} {composite.Type.MimeType}";
         }
         return composite;
     }

@@ -1,3 +1,5 @@
+using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SixLabors.ImageSharp;
@@ -5,6 +7,8 @@ using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Text2Image;
 using System.IO;
 using System.IO.Compression;
+using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SwarmUI.Utils;
@@ -14,11 +18,61 @@ public static class MetadataHelper
 {
     // The stealth info implementation of reforge was used as a reference for this file.
 
+    /// <summary>ExtraMeta key a backend's workflow trace record is stored under (the ComfyUI backend's WorkflowTrace writes it; image metadata copies and object passes read it).</summary>
+    public const string WorkflowTraceKey = "debug_trace";
+
+    /// <summary>Strings and byte arrays at least this long are hashed without copying them and have their hash cached in <see cref="LongHashes"/>.</summary>
+    public const int CachedHashMinLength = 4096;
+
+    /// <summary>SHA-256 hex of long strings and byte arrays, by reference, so base64 media, image bytes and workflow texts are hashed once however often a trace names them.
+    /// Keyed by reference: strings are immutable, and Swarm replaces a media file's RawData array rather than writing into it.</summary>
+    public static readonly ConditionalWeakTable<object, string> LongHashes = new();
+
+    /// <summary>Returns the SHA-256 hex of a string's UTF-8 bytes, the same as <c>Utilities.HashSHA256(text.EncodeUTF8())</c>. Long strings are encoded through a small buffer rather than copied, and their hash is cached.</summary>
+    public static string HashText(string text)
+    {
+        text ??= "";
+        if (text.Length < CachedHashMinLength)
+        {
+            return Utilities.HashSHA256(text.EncodeUTF8());
+        }
+        return LongHashes.GetValue(text, static t => HashWritten(writer => writer.Write((string)t)));
+    }
+
+    /// <summary>Returns the SHA-256 hex of some bytes, cached for long arrays.</summary>
+    public static string HashBytes(byte[] data)
+    {
+        data ??= [];
+        if (data.Length < CachedHashMinLength)
+        {
+            return Utilities.HashSHA256(data);
+        }
+        return LongHashes.GetValue(data, static d => Utilities.HashSHA256((byte[])d));
+    }
+
+    /// <summary>Returns the first 8 hex chars of the SHA-256 of some text, the short hash trace records name text by instead of writing it.</summary>
+    public static string Sha8(string text) => HashText(text)[..8];
+
+    /// <summary>Returns the first 8 hex chars of the SHA-256 of some bytes.</summary>
+    public static string Sha8(byte[] data) => HashBytes(data)[..8];
+
+    /// <summary>Returns the SHA-256 hex of the text a writer callback writes, as UTF-8 without a byte order mark (<see cref="StringConversionHelper.UTF8Encoding"/>, as <c>EncodeUTF8</c> uses), encoding through a small buffer instead of building the text or its bytes.</summary>
+    public static string HashWritten(Action<TextWriter> write)
+    {
+        using SHA256 sha = SHA256.Create();
+        using (CryptoStream crypto = new(Stream.Null, sha, CryptoStreamMode.Write))
+        using (StreamWriter writer = new(crypto, StringConversionHelper.UTF8Encoding, 4096))
+        {
+            write(writer);
+        }
+        return Utilities.BytesToHex(sha.Hash);
+    }
+
     /// <summary>Most characters of metadata text (as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for a JPEG image, whose metadata is a UTF-16 EXIF UserComment, two bytes per character.
     /// Within this limit the EXIF profile fits one JPEG APP1 segment; ImageSharp splits a larger one across several, and the ExifReader the web UI reads metadata with takes only the last Exif segment's data.</summary>
     public const int MaxJpegExifChars = 30_000;
 
-    /// <summary>Returns the notice form of a workflow trace record (the ExtraMeta value under <see cref="T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey"/>): its version, log key, full trace pointer, workflow identity and sampler count, with what was omitted and why.</summary>
+    /// <summary>Returns the notice form of a workflow trace record (the ExtraMeta value under <see cref="WorkflowTraceKey"/>): its version, log key, full trace pointer, workflow identity and sampler count, with what was omitted and why.</summary>
     /// <param name="record">A trace record, of any tier.</param>
     /// <param name="omitted">What the notice omits and why.</param>
     public static JObject TraceNotice(JObject record, string omitted)
@@ -47,7 +101,7 @@ public static class MetadataHelper
     /// otherwise with a workflow trace record (sui_extra_data.debug_trace) replaced by its notice (<see cref="TraceNotice"/>). Text without a record, or that is not JSON, is returned as it is.</summary>
     public static string FitTextToJpegExif(string metadataText)
     {
-        string key = T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey;
+        string key = WorkflowTraceKey;
         if (metadataText is null || metadataText.Length <= MaxJpegExifChars || !metadataText.Contains($"\"{key}\""))
         {
             return metadataText;

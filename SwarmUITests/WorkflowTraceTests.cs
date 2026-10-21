@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
@@ -36,13 +37,27 @@ public class WorkflowTraceTests : SwarmUITest
     /// <summary>Text unique to the test prompts, which must never appear raw in a trace.</summary>
     public const string PromptMarkerBase = "zqxbase man on a road", PromptMarkerSegment = "zqxseg green alien";
 
+    /// <summary>Text unique to the other prompt-view parameters the fitness variants set (<see cref="WithPromptParameterMarkers"/>), which must never appear raw in a trace either.</summary>
+    public const string PromptMarkerNegative = "zqxneg blurry hands", PromptMarkerStyle = "zqxstyle synthwave";
+
+    /// <summary>Gives a request a marker in the prompt-view parameters besides the prompt that every generation can read: the negative prompt and the Text2Audio style. The unsampler prompt, which adds an unsampler pass, is marked in <see cref="TestUnsamplerHasCallRecord"/>.</summary>
+    public static Request WithPromptParameterMarkers(Request request)
+    {
+        if (string.IsNullOrEmpty(request.NegativePrompt))
+        {
+            request.NegativePrompt = PromptMarkerNegative;
+        }
+        request.Setters.Add(i => i.Set(T2IParamTypes.Text2AudioStyle, PromptMarkerStyle));
+        return request;
+    }
+
     /// <summary>A named request variant.</summary>
     /// <param name="Name">Variant name.</param>
     /// <param name="Make">Builds the request for a given main model.</param>
     /// <param name="Feature">If true, the variant exists to reach one feature's generator step, which <see cref="TestFeatureVariantsReachTheirSteps"/> checks.</param>
     public record class Variant(string Name, Func<T2IModel, Request> Make, bool Feature = false);
 
-    /// <summary>The option variants every model class is built with.</summary>
+    /// <summary>The option variants every model class is built with, each with a marker in every prompt-view parameter (<see cref="WithPromptParameterMarkers"/>).</summary>
     public static List<Variant> Variants()
     {
         Lora("test_alien_lora");
@@ -52,7 +67,7 @@ public class WorkflowTraceTests : SwarmUITest
             input.Set(T2IParamTypes.RefinerMethod, "PostApply");
             input.Set(T2IParamTypes.RefinerControl, 0.4);
         }
-        return
+        List<Variant> variants =
         [
             new("plain", m => new() { Model = m, Prompt = PromptMarkerBase }),
             new("segment-lora", m => new() { Model = m, Prompt = segmentPrompt }),
@@ -68,8 +83,10 @@ public class WorkflowTraceTests : SwarmUITest
             new("clear+variationseed", m => new() { Model = m, Prompt = $"{PromptMarkerBase} <clear:background>", Setters = { i => i.Set(T2IParamTypes.VariationSeed, 5L), i => i.Set(T2IParamTypes.VariationSeedStrength, 0.3) } }, true),
             new("image2video", m => new() { Model = m, Prompt = PromptMarkerBase, Setters = { video } }, true),
             new("image2video+extend", m => new() { Model = m, Prompt = $"{PromptMarkerBase} <extend:17> zqxextend walking on", Setters = { video, i => i.Set(T2IParamTypes.VideoExtendModel, VideoTestModel) } }, true),
+            new("image2video+swap", m => new() { Model = m, Prompt = PromptMarkerBase, Setters = { video, i => i.Set(T2IParamTypes.VideoSwapModel, VideoSwapTestModel) } }, true),
             new("seedvr", m => new() { Model = m, Prompt = PromptMarkerBase, Setters = { i => i.Set(ComfyUIBackendExtension.SeedVRModel, SeedVRTestModel) } }, true)
         ];
+        return [.. variants.Select(v => v with { Make = m => WithPromptParameterMarkers(v.Make(m)) })];
         static void video(T2IParamInput input)
         {
             input.Set(T2IParamTypes.VideoModel, VideoTestModel);
@@ -82,6 +99,9 @@ public class WorkflowTraceTests : SwarmUITest
 
     /// <summary>Image-to-video model used by the video variants.</summary>
     public static T2IModel VideoTestModel => ModelFor(T2IModelClassSorter.ModelClasses["wan-2_1-image2video-14b"], true);
+
+    /// <summary>Video swap model used by the video swap variant: a different compat class from <see cref="VideoTestModel"/>, so the swap stage's records show whose class they carry.</summary>
+    public static T2IModel VideoSwapTestModel => ModelFor(T2IModelClassSorter.ModelClasses["wan-2_1-image2video-1_3b"], true);
 
     /// <summary>SeedVR2 model used by the SeedVR variant.</summary>
     public static T2IModel SeedVRTestModel => ModelFor(T2IModelClassSorter.ModelClasses["seedvr2"], true);
@@ -546,9 +566,9 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(modelChainText, Does.Contain("lora_name=test_alien_lora.safetensors"));
         string positiveChainText = RecordChain(summary, samplerEntry, "positive").ToString(Formatting.None);
         Assert.That(positiveChainText, Does.Contain($"{encId}:SwarmTextEncodeAdvanced"));
-        Assert.That(positiveChainText, Does.Contain($"prompt=@{stage}.pos#{WorkflowTrace.Sha8(part.Prompt.Trim())}"));
+        Assert.That(positiveChainText, Does.Contain($"prompt=@{stage}.pos#{MetadataHelper.Sha8(part.Prompt.Trim())}"));
         JObject segmentEntry = (JObject)((JArray)summary["segments"]).Single();
-        Assert.That($"{segmentEntry["prompt"]}", Is.EqualTo($"@{stage}.pos#{WorkflowTrace.Sha8($"{encNode["inputs"]["prompt"]}")}"), "the segment record names the text its encoder node gets");
+        Assert.That($"{segmentEntry["prompt"]}", Is.EqualTo($"@{stage}.pos#{MetadataHelper.Sha8($"{encNode["inputs"]["prompt"]}")}"), "the segment record names the text its encoder node gets");
         Assert.That(summary["prompts"][$"{segmentEntry["prompt"]}"]?.Value<int>(), Is.EqualTo($"{encNode["inputs"]["prompt"]}".Length), "the segment prompt is listed with its length");
         Assert.That(positiveChainText, Does.Contain($"{refPixelsId}:SwarmImageScaleForMP"));
         Assert.That(summary.ToString(Formatting.None), Does.Not.Contain("zqx"));
@@ -669,7 +689,7 @@ public class WorkflowTraceTests : SwarmUITest
                     }
                     List<string> encoded = [.. positiveWalk.SelectMany(n => ((JObject)n.Item2["inputs"]).Properties().Where(p => WorkflowTrace.PromptInputNames.Contains(p.Name) && p.Value.Type == JTokenType.String).Select(p => $"{p.Value}"))];
                     string segmentPrompt = $"{((JArray)summary["segments"]).Single()["prompt"]}";
-                    if (!encoded.Any(text => segmentPrompt == $"@{stage}.pos#{WorkflowTrace.Sha8(text)}"))
+                    if (!encoded.Any(text => segmentPrompt == $"@{stage}.pos#{MetadataHelper.Sha8(text)}"))
                     {
                         failures.Add($"{label}: the segment record names prompt {segmentPrompt}, which no encoder on sampler {samplerId}'s positive chain gets ({encoded.Count} prompt inputs found)");
                     }
@@ -967,7 +987,7 @@ public class WorkflowTraceTests : SwarmUITest
         };
         string text = WorkflowTrace.DescribeExternalWorkflow("custom", workflow.ToString()).ToString(Formatting.None);
         Assert.That(text, Does.Not.Contain("zqxfree"));
-        Assert.That(text, Does.Contain($"#{WorkflowTrace.Sha8("zqxfree a cat on a road")}(23)"));
+        Assert.That(text, Does.Contain($"#{MetadataHelper.Sha8("zqxfree a cat on a road")}(23)"));
         Assert.That(text, Does.Contain("test models/sdxl base.safetensors"));
         Assert.That(text, Does.Contain("sampler_name=euler"));
     }
@@ -976,7 +996,7 @@ public class WorkflowTraceTests : SwarmUITest
     [Test]
     public void TestHashTextMatchesUtf8Hash()
     {
-        foreach (int length in new[] { 0, 1, WorkflowTrace.CachedHashMinLength - 1, WorkflowTrace.CachedHashMinLength, WorkflowTrace.CachedHashMinLength + 1, 3 * 4096 + 7 })
+        foreach (int length in new[] { 0, 1, MetadataHelper.CachedHashMinLength - 1, MetadataHelper.CachedHashMinLength, MetadataHelper.CachedHashMinLength + 1, 3 * 4096 + 7 })
         {
             char[] chars = new char[length];
             for (int i = 0; i < length; i++)
@@ -997,14 +1017,14 @@ public class WorkflowTraceTests : SwarmUITest
                 chars[99] = 'é';
             }
             string text = new(chars);
-            Assert.That(WorkflowTrace.HashText(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())), $"length {length}");
-            Assert.That(WorkflowTrace.Sha8(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())[..8]), $"length {length}");
+            Assert.That(MetadataHelper.HashText(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())), $"length {length}");
+            Assert.That(MetadataHelper.Sha8(text), Is.EqualTo(Utilities.HashSHA256(text.EncodeUTF8())[..8]), $"length {length}");
         }
-        string longText = new('x', WorkflowTrace.CachedHashMinLength * 2);
-        string hash = WorkflowTrace.HashText(longText);
-        Assert.That(WorkflowTrace.LongHashes.TryGetValue(longText, out string cached) && cached == hash, Is.True, "a long text's hash is cached by reference");
+        string longText = new('x', MetadataHelper.CachedHashMinLength * 2);
+        string hash = MetadataHelper.HashText(longText);
+        Assert.That(MetadataHelper.LongHashes.TryGetValue(longText, out string cached) && cached == hash, Is.True, "a long text's hash is cached by reference");
         byte[] bytes = longText.EncodeUTF8();
-        Assert.That(WorkflowTrace.HashBytes(bytes), Is.EqualTo(Utilities.HashSHA256(bytes)));
+        Assert.That(MetadataHelper.HashBytes(bytes), Is.EqualTo(Utilities.HashSHA256(bytes)));
     }
 
     /// <summary>An ExtraMeta value that cannot be serialized, which makes the image metadata fail to build.</summary>
@@ -1038,6 +1058,53 @@ public class WorkflowTraceTests : SwarmUITest
         (Action<WorkflowGenerator> deconstructed, double priority) = step;
         Assert.That((deconstructed, priority, step.Name, step.Source), Is.EqualTo((action, 5.0, (string)null, (string)null)));
         Assert.That(WorkflowGenerator.Steps.All(s => !string.IsNullOrEmpty(s.Source)), Is.True, "every registered step records its source");
+    }
+
+    /// <summary>A stop is attributed to the top-level step that set SkipFurtherSteps, not to a model-generation step it ran (which comes after it in the step records).</summary>
+    [Test]
+    public void TestStopIsAttributedToTheTopLevelStep()
+    {
+        WorkflowGenerator generator = new() { UserInput = BuildInput(new() { Model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false), Prompt = PromptMarkerBase }), Workflow = [] };
+        WorkflowTrace trace = new(generator);
+        trace.BeginStep(new(_ => { }, 0) { Name = "Stopping step" }, false);
+        trace.BeginStep(new(_ => { }, 0) { Name = "Model generation inside it" }, true);
+        trace.EndStep();
+        trace.EndStep();
+        trace.SkippedFurtherSteps();
+        Assert.That(trace.StepRecords[^1].Name, Is.EqualTo("Model generation inside it"), "the last step record is the nested one");
+        Assert.That(trace.Events[^1], Is.EqualTo("step 'Stopping step' stopped further steps"));
+    }
+
+    /// <summary>The text of a prompt-view parameter is hashed under any input name: ACE-Step 1.5 writes the Text2Audio style to a "tags" input. A text that was not read from a prompt-view parameter, under an input name that is not a prompt name, is written as it is, which is the negative control.</summary>
+    [Test]
+    public void TestPromptViewParameterTextIsNeverRaw()
+    {
+        T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["ace-step-1_5"], false);
+        Build traced = Generate(WithPromptParameterMarkers(new() { Model = model, Prompt = PromptMarkerBase }), true);
+        List<JProperty> tagsNodes = [.. traced.Workflow.Properties().Where(p => $"{p.Value["inputs"]?["tags"]}" == PromptMarkerStyle)];
+        Assert.That(tagsNodes, Is.Not.Empty, "the graph carries the style text in a tags input");
+        JObject nodeLines = (JObject)((JObject)traced.Input.ExtraMeta[WorkflowTrace.MetadataKey])["nodes"];
+        foreach (JProperty tagsNode in tagsNodes)
+        {
+            Assert.That($"{nodeLines[tagsNode.Name]}", Does.Contain($"tags=@{T2IParamTypes.Text2AudioStyle.Type.ID}#{MetadataHelper.Sha8(PromptMarkerStyle)}"), $"node {tagsNode.Name}");
+        }
+        JProperty tagsNode0 = tagsNodes[0];
+        List<string> failures = [];
+        CheckTrace(traced, "ace-step style", failures);
+        Assert.That(failures, Is.Empty, string.Join("\n", failures));
+        Assert.That(traced.Trace.FormatString(tagsNode0.Name, "unlisted_input", "zqxunread text"), Is.EqualTo("zqxunread text"), "negative control: unread text under a non-prompt input name is written as it is");
+    }
+
+    /// <summary>Placeholders are found as the backend's fill finds them (QuickSimpleTagFiller without subtags): each once, a default value kept in the tag, and an unclosed tag ignored.</summary>
+    [Test]
+    public void TestPlaceholdersMatchTheBackendFill()
+    {
+        string text = "{\"a\": \"${initimage}\", \"b\": \"${promptimages.0}\", \"c\": \"${initimage}\", \"d\": \"${steps:20}\", \"e\": \"${unclosed\"";
+        List<string> found = WorkflowTrace.Placeholders(text);
+        List<string> filled = [];
+        StringConversionHelper.QuickSimpleTagFiller(text, "${", "}", tag => { filled.Add($"${{{tag}}}"); return null; }, false);
+        Assert.That(found, Is.EqualTo(filled.Distinct()), "the same tags the fill reads, each once");
+        Assert.That(found, Does.Contain("${steps:20}"));
     }
 
     /// <summary>Without ComfyUI object_info, the record says that link types, declared inputs and node classes were not checked, instead of listing no problems.</summary>
@@ -1480,6 +1547,10 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That($"{tiers[1]["nodes"][samplerId]}", Does.Not.Contain("=>"), "tier 1 nodes keep class, stage and provenance only");
         Assert.That(tiers[2]["nodes"], Is.Null);
         Assert.That(tiers[2]["decision_counts"], Is.Not.Null);
+        List<string> tier0Chain = [.. tiers[0]["samplers"][0]["inputs"]["model"].Select(v => $"{v}")], tier2Chain = [.. tiers[2]["samplers"][0]["inputs"]["model"].Select(v => $"{v}")];
+        Assert.That(tier0Chain.Where(id => !id.StartsWith("...")), Is.All.Matches<string>(id => tiers[0]["nodes"][id] is not null), "tier 0 chains name nodes of its node table");
+        Assert.That(tier2Chain, Has.Count.EqualTo(tier0Chain.Count));
+        Assert.That(tier2Chain.Zip(tier0Chain).Where(p => !p.Second.StartsWith("...")), Is.All.Matches<(string Tier2, string Tier0)>(p => p.Tier2 == $"{p.Tier0}:{traced.Workflow[p.Tier0]["class_type"]}"), "tier 2 has no node table, so its chains name each node as id:Class");
         Assert.That(tiers.Skip(1).All(t => $"{t["omitted"]}".Contains(logReference)), Is.True, "lower tiers say what was omitted and where the full trace is");
         Assert.That(tiers.Select(WorkflowTrace.RecordMetadataChars), Is.Ordered.Descending, "each tier is smaller than the one before");
         int tier0 = WorkflowTrace.RecordMetadataChars(tiers[0]);
@@ -1518,6 +1589,10 @@ public class WorkflowTraceTests : SwarmUITest
             ["clear+variationseed"] = t => byStep(t, "Segment Clears") && t.ParamReads.Values.Any(r => r.Type == T2IParamTypes.VariationSeed.Type && $"{r.LastValue}" == "5"),
             ["image2video"] = t => t.Nodes.Values.Any(n => n.Stage == "video") && t.Loads.Any(l => l.Stage == "video"),
             ["image2video+extend"] = t => t.Nodes.Values.Any(n => n.Stage.StartsWith("extend")) && byStep(t, "Extend Video"),
+            ["image2video+swap"] = t => t.Loads.Any(l => l.Stage == "videoswap" && l.Compat == VideoSwapTestModel.ModelClass.CompatClass.ID)
+                && t.Gen.FinalLoadedModel?.ModelClass?.CompatClass?.ID != VideoSwapTestModel.ModelClass.CompatClass.ID
+                && t.Nodes.Values.Count(n => n.Stage == "videoswap" && n.Load < 0) > 0
+                && t.Nodes.Values.Where(n => n.Stage == "videoswap" && n.Load < 0).All(n => n.Compat == VideoSwapTestModel.ModelClass.CompatClass.ID),
             ["seedvr"] = t => t.Nodes.Values.Any(n => n.Stage == "seedvr") && t.Loads.Any(l => l.Type == "SeedVR2")
         };
         List<Variant> features = [.. Variants().Where(v => v.Feature)];
