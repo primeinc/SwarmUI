@@ -65,6 +65,44 @@ public class WorkflowTraceTypingTests : SwarmUITest
         }
         """;
 
+    /// <summary>ComfyUI object_info entries, in the shape of comfy_api _io.py get_v1_info(), for the V3 nodes with dynamic inputs that the generator uses for image work: ResizeImageMaskNode (WorkflowGeneratorSteps.cs, ControlNet images to a multiple of 8)
+    /// and BatchImagesNode (WorkflowGenerator.cs, video end frames). Transcribed from ComfyUI 7ef81780 comfy_extras/nodes_post_processing.py lines 417-494 and 573-589, keeping what validation reads: types, templates, options, limits and defaults, without tooltips and display text.</summary>
+    public const string DynamicObjectInfo = """
+        {
+            "ResizeImageMaskNode": {
+                "input": { "required": {
+                    "input": ["COMFY_MATCHTYPE_V3", { "template": { "template_id": "input_type", "allowed_types": "IMAGE,MASK" } }],
+                    "resize_type": ["COMFY_DYNAMICCOMBO_V3", { "options": [
+                        { "key": "scale dimensions", "inputs": { "required": { "width": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }], "height": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }], "crop": ["COMBO", { "multiselect": false, "options": ["disabled", "center"], "default": "center" }] } } },
+                        { "key": "scale by multiplier", "inputs": { "required": { "multiplier": ["FLOAT", { "default": 1.0, "min": 0.01, "max": 8.0, "step": 0.01 }] } } },
+                        { "key": "scale longer dimension", "inputs": { "required": { "longer_size": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }] } } },
+                        { "key": "scale shorter dimension", "inputs": { "required": { "shorter_size": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }] } } },
+                        { "key": "scale width", "inputs": { "required": { "width": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }] } } },
+                        { "key": "scale height", "inputs": { "required": { "height": ["INT", { "default": 512, "min": 0, "max": 16384, "step": 1 }] } } },
+                        { "key": "scale total pixels", "inputs": { "required": { "megapixels": ["FLOAT", { "default": 1.0, "min": 0.01, "max": 16.0, "step": 0.01 }] } } },
+                        { "key": "match size", "inputs": { "required": { "match": ["IMAGE,MASK", {}], "crop": ["COMBO", { "multiselect": false, "options": ["disabled", "center"], "default": "center" }] } } },
+                        { "key": "scale to multiple", "inputs": { "required": { "multiple": ["INT", { "default": 8, "min": 1, "max": 16384, "step": 1 }] } } }
+                    ] }],
+                    "scale_method": ["COMBO", { "multiselect": false, "options": ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"], "default": "area" }]
+                } },
+                "output": ["COMFY_MATCHTYPE_V3"], "output_matchtypes": ["input_type"], "output_name": ["resized"], "output_node": false, "python_module": "comfy_extras.nodes_post_processing"
+            },
+            "BatchImagesNode": {
+                "input": { "required": {
+                    "images": ["COMFY_AUTOGROW_V3", { "template": { "input": { "required": { "image": ["IMAGE", {}] } }, "prefix": "image", "min": 1, "max": 50 } }]
+                } },
+                "output": ["IMAGE"], "output_matchtypes": null, "output_name": ["IMAGE"], "output_node": false, "python_module": "comfy_extras.nodes_post_processing"
+            }
+        }
+        """;
+
+    /// <summary>Prompt inputs for each <see cref="DynamicObjectInfo"/> class as the generator sends them, with links to the SDXL workflow's VAEDecode (8).</summary>
+    public static readonly (string Class, string Inputs)[] DynamicSamples =
+    [
+        ("ResizeImageMaskNode", """{ "input": ["8", 0], "resize_type": "scale to multiple", "resize_type.multiple": 8, "scale_method": "lanczos" }"""),
+        ("BatchImagesNode", """{ "images.image0": ["100", 0], "images.image1": ["8", 0] }""")
+    ];
+
     /// <summary>Builds the SDXL checkpoint text-to-image workflow, traced with the fixture object_info.</summary>
     public static (JObject Workflow, WorkflowTrace Trace) BuildTypedSdxl()
     {
@@ -87,7 +125,7 @@ public class WorkflowTraceTypingTests : SwarmUITest
         {
             foreach (JProperty input in ((JObject)node.Value["inputs"]).Properties().Where(i => WorkflowTrace.IsLink(i.Value)))
             {
-                if (trace.ComfyInputType($"{node.Value["class_type"]}", input.Name) is null)
+                if (trace.ComfyInputType($"{node.Value["class_type"]}", (JObject)node.Value["inputs"], input.Name) is null)
                 {
                     untypedLinks.Add($"{node.Name}:{node.Value["class_type"]}.{input.Name}");
                 }
@@ -114,6 +152,39 @@ public class WorkflowTraceTypingTests : SwarmUITest
         workflow["8"]["inputs"]["vae"] = new JArray("4", 1);
         JObject summary = trace.Build();
         Assert.That(((JArray)summary["type_errors"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "8:VAEDecode.vae expects VAE, gets CLIP from 4:1:CheckpointLoaderSimple" }));
+    }
+
+    /// <summary>V3 dynamic inputs are declared under the prefixed names the generator sends and are type-checked, as ComfyUI expands them; a match-type output links into an IMAGE input.
+    /// Without the V3 marker the expansion does not apply and the same inputs read as undeclared, so the expansion is what declares them.</summary>
+    [Test]
+    public void TestDynamicInputsAreDeclaredAndTyped()
+    {
+        (JObject workflow, WorkflowTrace trace) = BuildTypedSdxl();
+        foreach (JProperty entry in JObject.Parse(DynamicObjectInfo).Properties())
+        {
+            trace.ObjectInfo[entry.Name] = entry.Value;
+        }
+        workflow["100"] = new JObject() { ["class_type"] = DynamicSamples[0].Class, ["inputs"] = JObject.Parse(DynamicSamples[0].Inputs) };
+        workflow["101"] = new JObject() { ["class_type"] = DynamicSamples[1].Class, ["inputs"] = JObject.Parse(DynamicSamples[1].Inputs) };
+        workflow["102"] = JObject.Parse("""{ "class_type": "SwarmSaveImageWS", "inputs": { "images": ["101", 0] } }""");
+        JObject summary = trace.Build();
+        Assert.That(summary["type_errors"], Is.Empty, summary["type_errors"].ToString(Formatting.None));
+        Assert.That(summary["input_errors"], Is.Empty, summary["input_errors"].ToString(Formatting.None));
+        Assert.That(((JArray)summary["undeclared_inputs"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "10:SwarmKSampler.control_after_generate" }));
+        foreach ((string id, string input) in new[] { ("100", "input"), ("101", "images.image0"), ("101", "images.image1") })
+        {
+            Assert.That(trace.ComfyInputType($"{workflow[id]["class_type"]}", (JObject)workflow[id]["inputs"], input), Is.Not.Null, $"{id}.{input} is type-checked");
+        }
+        workflow["101"]["inputs"]["images.image1"] = new JArray("10", 0);
+        Assert.That(((JArray)trace.Build()["type_errors"]).Select(t => $"{t}"), Is.EqualTo(new[] { "101:BatchImagesNode.images.image1 expects IMAGE, gets LATENT from 10:0:SwarmKSampler" }));
+        ((JObject)workflow["101"]["inputs"]).Remove("images.image0");
+        Assert.That(((JArray)trace.Build()["input_errors"]).Select(t => $"{t}"), Is.EqualTo(new[] { "101:BatchImagesNode.images.image0 is required and missing" }));
+        workflow["101"]["inputs"] = JObject.Parse(DynamicSamples[1].Inputs);
+        foreach (string dynamicClass in new[] { "ResizeImageMaskNode", "BatchImagesNode" })
+        {
+            ((JObject)trace.ObjectInfo[dynamicClass]).Remove("output_matchtypes");
+        }
+        Assert.That(((JArray)trace.Build()["undeclared_inputs"]).Select(t => $"{t}"), Is.SupersetOf(new[] { "100:ResizeImageMaskNode.resize_type.multiple", "101:BatchImagesNode.images.image0", "101:BatchImagesNode.images.image1" }));
     }
 
     /// <summary>A node class ComfyUI does not have is reported as missing, and its inputs are not reported as undeclared.</summary>

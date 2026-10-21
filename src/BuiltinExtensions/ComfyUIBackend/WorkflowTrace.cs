@@ -36,7 +36,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
 
-    /// <summary>Optional ComfyUI object_info data, used to add Comfy output types and to check link types.</summary>
+    /// <summary>Optional ComfyUI object_info data, used to add Comfy output types and to check links and inputs the way ComfyUI validates them (<see cref="ComfyInputValidation"/>).</summary>
     public JObject ObjectInfo;
 
     /// <summary>If true, string inputs that could be prompt text (any whitespace, or longer than 64 characters) are hashed whatever their input name, except model file names. Set for workflows that did not come from the generator, which has no prompt labels for them.</summary>
@@ -1405,31 +1405,38 @@ public class WorkflowTrace(WorkflowGenerator gen)
         return info["output"] as JArray;
     }
 
-    /// <summary>Returns the Comfy declared type of an input of a node class, from <see cref="ObjectInfo"/>, or null if unknown or a choice list.</summary>
-    public string ComfyInputType(string classType, string input)
+    /// <summary>Returns a prompt node's inputs as ComfyUI validates them, from <see cref="ObjectInfo"/> and the node's own inputs (<see cref="ComfyInputValidation.FinalizedInputs"/>), or null if <see cref="ObjectInfo"/> does not list the class.
+    /// Throws where ComfyUI fails to expand the node's dynamic inputs.</summary>
+    public JObject ComfyInputs(string classType, JObject liveInputs)
     {
-        if (ObjectInfo is null || !ObjectInfo.TryGetValue(classType, out JToken info) || info["input"] is not JObject inputs)
+        if (ObjectInfo is null || ObjectInfo[classType] is not JObject info)
+        {
+            return null;
+        }
+        return ComfyInputValidation.FinalizedInputs(info, liveInputs ?? []);
+    }
+
+    /// <summary>Returns ComfyUI's declared type of a prompt node's required or optional input: a type name, or a V1 node's choice list.
+    /// Null if <see cref="ObjectInfo"/> does not list the class, the inputs cannot be expanded, or the input is not required or optional among them.</summary>
+    public JToken ComfyInputType(string classType, JObject liveInputs, string input)
+    {
+        JObject comfyInputs;
+        try
+        {
+            comfyInputs = ComfyInputs(classType, liveInputs);
+        }
+        catch (Exception)
         {
             return null;
         }
         foreach (string group in new[] { "required", "optional" })
         {
-            if (inputs[group] is JObject set && set.TryGetValue(input, out JToken decl) && decl is JArray declArr && declArr.Count > 0 && declArr[0].Type == JTokenType.String)
+            if (comfyInputs?[group] is JObject set && set[input] is JArray declaration && declaration.Count > 0)
             {
-                return $"{declArr[0]}";
+                return declaration[0];
             }
         }
         return null;
-    }
-
-    /// <summary>Returns true if <see cref="ObjectInfo"/> lists the node class and it declares the input as required, optional or hidden. Returns null if the class is not listed.</summary>
-    public bool? ComfyDeclaresInput(string classType, string input)
-    {
-        if (ObjectInfo is null || !ObjectInfo.TryGetValue(classType, out JToken info) || info["input"] is not JObject inputs)
-        {
-            return null;
-        }
-        return new[] { "required", "optional", "hidden" }.Any(group => inputs[group] is JObject set && set.ContainsKey(input));
     }
 
     /// <summary>Returns true if the value is a link to another node, ie ["id", slot].</summary>
@@ -1685,7 +1692,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
         for (int slot = 0; slot < slotCount; slot++)
         {
             string swarmType = SlotTypes.TryGetValue($"{id}:{slot}", out SlotType slotType) ? slotType.ToString() : null;
-            string comfyType = comfyTypes is not null && slot < comfyTypes.Count ? $"{comfyTypes[slot]}" : null;
+            string comfyType = comfyTypes is not null && slot < comfyTypes.Count ? ComfyInputValidation.TypeText(comfyTypes[slot]) : null;
             if (swarmType is not null || comfyType is not null)
             {
                 outputs.Add($"{slot}:{(comfyType is not null && swarmType is not null ? $"{comfyType}={swarmType}" : swarmType ?? comfyType)}");
@@ -2072,44 +2079,75 @@ public class WorkflowTrace(WorkflowGenerator gen)
         if (ObjectInfo is not null)
         {
             JArray typeErrors = [];
+            JArray inputErrors = [];
             JArray undeclared = [];
             JArray unknownClasses = [];
             foreach (JProperty property in workflow.Properties())
             {
                 string classType = $"{property.Value["class_type"]}";
-                if (!ObjectInfo.ContainsKey(classType))
+                JObject inputs = property.Value["inputs"] as JObject ?? [];
+                JObject comfyInputs;
+                try
+                {
+                    comfyInputs = ComfyInputs(classType, inputs);
+                }
+                catch (ComfyInputValidation.DynamicInputError ex)
+                {
+                    inputErrors.Add($"{property.Name}:{classType}.{ex.InputName} is an invalid dynamic input: {ex.Message}");
+                    continue;
+                }
+                catch (Exception ex)
+                {
+                    inputErrors.Add($"{property.Name}:{classType} declares dynamic inputs ComfyUI cannot expand: {ex.Message}");
+                    continue;
+                }
+                if (comfyInputs is null)
                 {
                     unknownClasses.Add($"{property.Name}:{classType}");
-                }
-                if (property.Value["inputs"] is not JObject inputs)
-                {
                     continue;
+                }
+                HashSet<string> checkedInputs = [];
+                foreach (string category in new[] { "required", "optional" })
+                {
+                    if (comfyInputs[category] is not JObject declared)
+                    {
+                        continue;
+                    }
+                    foreach (JProperty declaration in declared.Properties())
+                    {
+                        if (!checkedInputs.Add(declaration.Name))
+                        {
+                            continue;
+                        }
+                        if (!inputs.TryGetValue(declaration.Name, out JToken value))
+                        {
+                            if (category == "required")
+                            {
+                                inputErrors.Add($"{property.Name}:{classType}.{declaration.Name} is required and missing");
+                            }
+                            continue;
+                        }
+                        if (value is not JArray link || (IsLink(link) && !workflow.ContainsKey($"{link[0]}")))
+                        {
+                            continue;
+                        }
+                        string problem = ComfyInputValidation.CheckLink(link, (declaration.Value as JArray)?.FirstOrDefault(), workflow, ObjectInfo, out bool typeMismatch);
+                        if (problem is not null)
+                        {
+                            (typeMismatch ? typeErrors : inputErrors).Add($"{property.Name}:{classType}.{declaration.Name} {problem}");
+                        }
+                    }
                 }
                 foreach (JProperty input in inputs.Properties())
                 {
-                    if (ComfyDeclaresInput(classType, input.Name) == false)
+                    if (!new[] { "required", "optional", "hidden" }.Any(group => comfyInputs[group] is JObject set && set.ContainsKey(input.Name)))
                     {
                         undeclared.Add($"{property.Name}:{classType}.{input.Name}");
-                    }
-                    if (!IsLink(input.Value) || workflow[$"{input.Value[0]}"] is not JObject source)
-                    {
-                        continue;
-                    }
-                    string expected = ComfyInputType(classType, input.Name);
-                    JArray sourceTypes = ComfyOutputTypes($"{source["class_type"]}");
-                    int slot = input.Value[1].Value<int>();
-                    if (expected is null || sourceTypes is null || slot >= sourceTypes.Count)
-                    {
-                        continue;
-                    }
-                    string actual = $"{sourceTypes[slot]}";
-                    if (expected != "*" && actual != "*" && !expected.SplitFast(',').Contains(actual) && !actual.SplitFast(',').Contains(expected))
-                    {
-                        typeErrors.Add($"{property.Name}:{classType}.{input.Name} expects {expected}, gets {actual} from {input.Value[0]}:{slot}:{source["class_type"]}");
                     }
                 }
             }
             result["type_errors"] = typeErrors;
+            result["input_errors"] = inputErrors;
             result["undeclared_inputs"] = undeclared;
             result["classes_missing_from_object_info"] = unknownClasses;
         }

@@ -286,6 +286,7 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(segmentRecord["threshold"].Value<double>(), Is.EqualTo(maskNode["inputs"]["threshold"].Value<double>()));
         Assert.That(samplerInputs["start_at_step"].Value<int>(), Is.EqualTo((int)Math.Round(samplerInputs["steps"].Value<int>() * (1 - segmentRecord["creativity"].Value<double>()))));
         Assert.That(trace["type_errors"], Is.Empty, $"live object_info types every link: {trace["type_errors"]}");
+        Assert.That(trace["input_errors"], Is.Empty, $"{trace["input_errors"]}");
         Assert.That(trace["classes_missing_from_object_info"], Is.Empty, $"{trace["classes_missing_from_object_info"]}");
         Assert.That(((JArray)trace["undeclared_inputs"]).Select(t => $"{t}".After(':')).Distinct(), Is.EquivalentTo(KnownUndeclaredInputs), $"the only inputs the live ComfyUI does not declare are the known ones: {trace["undeclared_inputs"]}");
         TestContext.Out.WriteLine($"outputs: {string.Join(", ", job.Outputs.Select(o => $"node {o.BackendInternalHint} real={o.IsReal} {o.File.Type.MimeType} {o.File.RawData.Length} bytes"))}");
@@ -349,7 +350,8 @@ public class ComfyLiveTests : SwarmUITest
     }
 
     /// <summary>The offline typing fixture (<see cref="WorkflowTraceTypingTests.SdxlObjectInfo"/>) matches the live ComfyUI's object_info: for every fixture class, the same required and optional input names,
-    /// the same type for every input that is not a choice list, a choice list wherever the fixture has one, and the same output types and output-node flag.</summary>
+    /// the same type for every input that is not a choice list, a choice list wherever the fixture has one, and the same output types and output-node flag.
+    /// The dynamic-input fixture (<see cref="WorkflowTraceTypingTests.DynamicObjectInfo"/>) expands to the same declarations as the live entries for the generator's inputs (<see cref="WorkflowTraceTypingTests.DynamicSamples"/>), with the same outputs.</summary>
     [Test]
     public async Task TestTypingFixtureMatchesLiveObjectInfo()
     {
@@ -385,6 +387,29 @@ public class ComfyLiveTests : SwarmUITest
                 if (!JToken.DeepEquals(fixture[key], live[key]))
                 {
                     mismatches.Add($"{fixtureClass.Name} {key}: fixture {fixture[key]?.ToString(Formatting.None)}, live {live[key]?.ToString(Formatting.None)}");
+                }
+            }
+        }
+        JObject dynamicFixture = JObject.Parse(WorkflowTraceTypingTests.DynamicObjectInfo);
+        static string declarations(JObject finalized) => new[] { "required", "optional" }.Select(group => $"{group}: " + (finalized[group] as JObject ?? []).Properties().Select(p => $"{p.Name}={ComfyInputValidation.TypeText(p.Value[0])}").Order().JoinString(", ")).JoinString("; ");
+        foreach ((string dynamicClass, string inputs) in WorkflowTraceTypingTests.DynamicSamples)
+        {
+            if (backend.RawObjectInfo[dynamicClass] is not JObject live)
+            {
+                mismatches.Add($"{dynamicClass}: not in the live object_info");
+                continue;
+            }
+            JObject fixture = (JObject)dynamicFixture[dynamicClass];
+            string fixtureDeclared = declarations(ComfyInputValidation.FinalizedInputs(fixture, JObject.Parse(inputs))), liveDeclared = declarations(ComfyInputValidation.FinalizedInputs(live, JObject.Parse(inputs)));
+            if (fixtureDeclared != liveDeclared)
+            {
+                mismatches.Add($"{dynamicClass} declarations: fixture [{fixtureDeclared}], live [{liveDeclared}]");
+            }
+            foreach (string key in new[] { "output", "output_matchtypes", "output_node" })
+            {
+                if (!JToken.DeepEquals(fixture[key], live[key]))
+                {
+                    mismatches.Add($"{dynamicClass} {key}: fixture {fixture[key]?.ToString(Formatting.None)}, live {live[key]?.ToString(Formatting.None)}");
                 }
             }
         }
