@@ -23,18 +23,18 @@ public class WorkflowTrace(WorkflowGenerator gen)
     /// <summary>ExtraMeta key the trace summary is stored under.</summary>
     public const string MetadataKey = T2IMultiStepObjectBuilder.WorkflowTraceMetadataKey;
 
-    /// <summary>Node classes treated as samplers for chain analysis.</summary>
+    /// <summary>Node classes treated as samplers for chain analysis. An extension with its own sampler node adds the class here when it loads.</summary>
     public static HashSet<string> SamplerClasses = ["KSampler", "KSamplerAdvanced", "SwarmKSampler", "SamplerCustom", "SamplerCustomAdvanced", "SwarmUnsampler"];
 
-    /// <summary>Node input names that carry prompt text. Text in these inputs is never written raw.</summary>
+    /// <summary>Node input names that carry prompt text. Text in these inputs is never written raw. An extension with its own text encoder node adds the input name here when it loads.</summary>
     public static HashSet<string> PromptInputNames = ["text", "prompt", "text_g", "text_l", "lyrics", "caption", "match_text", "style"];
 
     /// <summary>Maximum number of nodes listed per sampler input chain.</summary>
-    public static int MaxChainNodes = 48;
+    public const int MaxChainNodes = 48;
 
     /// <summary>Most characters of image metadata text (parameters, extra data and the trace record together, as <see cref="T2IParamInput.MetadataToString(JObject)"/> writes it) for formats that keep metadata in EXIF (every format but PNG).
     /// EXIF metadata is a UTF-16 UserComment, two bytes per character; within this limit it fits one 64 KiB JPEG APP1 segment (ImageSharp splits a larger profile across several, which most readers do not join), and the margin covers fields Swarm adds when it saves the image.</summary>
-    public static int MaxExifMetadataChars = 30_000;
+    public const int MaxExifMetadataChars = 30_000;
 
     /// <summary>The generator being traced.</summary>
     public WorkflowGenerator Gen = gen;
@@ -194,7 +194,7 @@ public class WorkflowTrace(WorkflowGenerator gen)
     }
 
     /// <summary>Most distinct values kept per parameter read record.</summary>
-    public static int MaxDistinctParamValues = 8;
+    public const int MaxDistinctParamValues = 8;
 
     /// <summary>A media input embedded into a node.</summary>
     /// <param name="Param">Source parameter name, eg 'initimage' or 'promptimages.0'.</param>

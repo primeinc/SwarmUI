@@ -996,20 +996,22 @@ public class WorkflowTraceTests : SwarmUITest
         Assert.That(read, Does.StartWith("11 (section) then 13 (section)").And.Contain("3 distinct values over 4 reads: 11 | 12 | 13"));
     }
 
-    /// <summary>The graph sent and the graph a backend posts are recorded in the record the image metadata carries, for a PNG image (tier 0) and for a JPEG image over the metadata limit (the last tier), and in the full summary; an input without a trace gets nothing.</summary>
+    /// <summary>The graph sent and the graph a backend posts are recorded in the record the image metadata carries, for a PNG image (tier 0) and for a JPEG image whose other metadata already fills the limit (the last tier), and in the full summary; an input without a trace gets nothing.</summary>
     [Test]
     public void TestSentAndPostedAreRecordedInTheStoredRecord()
     {
         T2IModel model = ModelFor(T2IModelClassSorter.ModelClasses["stable-diffusion-xl-v1-base"], false);
         bool priorDebug = Program.ServerSettings.AddDebugData;
-        int priorLimit = WorkflowTrace.MaxExifMetadataChars;
         try
         {
             Program.ServerSettings.AddDebugData = true;
-            foreach ((string format, int limit, bool notice) in new[] { ("PNG", priorLimit, false), ("JPG", 10, true) })
+            foreach ((string format, bool notice) in new[] { ("PNG", false), ("JPG", true) })
             {
-                WorkflowTrace.MaxExifMetadataChars = limit;
                 T2IParamInput input = BuildInput(new() { Model = model, Prompt = PromptMarkerBase, Params = new() { ["imageformat"] = format } });
+                if (notice)
+                {
+                    input.ExtraMeta["trace_test_padding"] = new string('x', WorkflowTrace.MaxExifMetadataChars);
+                }
                 string workflow = ComfyUIAPIAbstractBackend.CreateWorkflow(input, w => w, null, [.. FullFeatures]);
                 JObject stored = (JObject)input.ExtraMeta[WorkflowTrace.MetadataKey];
                 Assert.That(stored["omitted"] is not null, Is.EqualTo(notice), format);
@@ -1032,7 +1034,6 @@ public class WorkflowTraceTests : SwarmUITest
         finally
         {
             Program.ServerSettings.AddDebugData = priorDebug;
-            WorkflowTrace.MaxExifMetadataChars = priorLimit;
         }
     }
 
