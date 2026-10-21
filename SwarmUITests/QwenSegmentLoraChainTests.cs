@@ -177,6 +177,35 @@ public class QwenSegmentLoraChainTests : SwarmUITest
     }
 
     [Test]
+    public static void NonQwenSegmentOverrideMustNotAcquireQwenMissingLoRAError()
+    {
+        T2IModelClass sdClass = new()
+        {
+            ID = T2IModelClassSorter.CompatSdv1.ID,
+            CompatClass = T2IModelClassSorter.CompatSdv1,
+            Name = "SDv1"
+        };
+        T2IModel sdModel = new(null, "/models/Stable-Diffusion",
+            "/models/Stable-Diffusion/test.safetensors", "test.safetensors")
+        {
+            ModelClass = sdClass
+        };
+        T2IParamInput input = new(null);
+        input.Set(T2IParamTypes.Model, QwenPromptModel());
+        input.Set(T2IParamTypes.SegmentModel, sdModel);
+        T2IPromptHandling.PromptTagContext context = new()
+        {
+            Input = input,
+            SectionID = 11,
+            Loras = ["installed/real.safetensors"]
+        };
+        Assert.DoesNotThrow(() =>
+            T2IPromptHandling.PromptTagPostProcessors["lora"]("missing/sdv1", context));
+        Assert.That(input.ExtraMeta.ContainsKey("parser_warnings"), Is.True,
+            "A non-Qwen segment override must retain its existing warning contract.");
+    }
+
+    [Test]
     public static void UnrelatedGlobalUnresolvedLoRAStillUsesLegacyWarningPath()
     {
         T2IParamInput input = new(null);
