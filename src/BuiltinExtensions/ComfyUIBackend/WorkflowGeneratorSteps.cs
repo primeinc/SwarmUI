@@ -240,6 +240,23 @@ public class WorkflowGeneratorSteps
             : baseIsQwen21;
     }
 
+    /// <summary>
+    /// Native Qwen Image 2.1 uses CFG 1 for T2I and editing. Ordinary Swarm's
+    /// global CFG default is 7. Honor a deliberate global/base override
+    /// while using the native value when no CFG was supplied (API clients).
+    /// Browser UI defaults are separately made visible on model selection.
+    /// </summary>
+    public static double Qwen21BaseSamplerCFG(T2IParamInput input, bool isQwenImage21)
+    {
+        if (!isQwenImage21)
+        {
+            return input.Get(T2IParamTypes.CFGScale);
+        }
+        return input.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_BaseOnly, false)
+            ?? input.GetNullable(T2IParamTypes.CFGScale)
+            ?? 1.0;
+    }
+
     /// <summary>Replicated original-image batches need distinct sampler noise.
     /// Offset the selected section seed for each batch item without mutating
     /// the user's input state or other sections' seed selections.
@@ -1656,7 +1673,7 @@ public class WorkflowGeneratorSteps
                 endStep = 10000;
                 g.MainSamplerAddNoise = true;
             }
-            double cfg = g.UserInput.Get(T2IParamTypes.CFGScale);
+            double cfg = Qwen21BaseSamplerCFG(g.UserInput, g.IsQwenImage21());
             if (!noSkip && (steps == 0 || endStep <= startStep))
             {
                 g.CreateNode("SwarmJustLoadTheModelPlease", new JObject()
