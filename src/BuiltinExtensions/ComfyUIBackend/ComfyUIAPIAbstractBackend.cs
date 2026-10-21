@@ -1158,7 +1158,59 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// substitutes their values; the same inert-null preprocessing is used by
     /// TryIsValid when deciding whether a custom workflow fits a backend.
     /// </summary>
-    public static void PreflightRawQwenSegmentNodes(string rawWorkflow, IReadOnlySet<string> availableNodeTypes, JObject backendObjectInfo = null)
+    /// <summary>
+    /// Resolve ONLY class_type placeholders before CreateWorkflow performs
+    /// image uploads. A dynamic selector can name Qwen even when no other
+    /// Qwen node is statically visible. No user prompt or workflow is changed.
+    /// </summary>
+    private static string ExpandRawClassTypesForPreflight(string rawWorkflow, T2IParamInput input)
+    {
+        const string selectorPattern = @"(?<prefix>""class_type""\s*:\s*"")(?<value>(?:\\.|[^""\\])*)(?<suffix>"")";
+        return System.Text.RegularExpressions.Regex.Replace(rawWorkflow, selectorPattern, match =>
+        {
+            string selector = match.Groups["value"].Value;
+            if (!selector.Contains("${", StringComparison.Ordinal))
+            {
+                return match.Value;
+            }
+            string resolved = StringConversionHelper.QuickSimpleTagFiller(selector, "${", "}", tag =>
+            {
+                string fixedTag = Utilities.UnescapeJsonString(tag);
+                string paramName = fixedTag.BeforeAndAfter(':', out string defaultValue);
+                string paramBasic = paramName.BeforeAndAfter('+', out _);
+                T2IParamType paramType = T2IParamTypes.GetType(paramBasic, input);
+                object selectedValue = null;
+                if (paramType is not null && input.TryGetRaw(paramType, out object configured))
+                {
+                    selectedValue = configured;
+                }
+                selectedValue ??= defaultValue;
+                if (selectedValue is null || (paramType is null && string.IsNullOrWhiteSpace(defaultValue)))
+                {
+                    throw new SwarmUserErrorException(
+                        $"Unknown raw workflow class_type parameter '{paramBasic}' before image upload.");
+                }
+                if (selectedValue is T2IModel model)
+                {
+                    selectedValue = model.ToString();
+                }
+                if (selectedValue is List<string> list)
+                {
+                    selectedValue = list.JoinString(",");
+                }
+                if (selectedValue is bool value)
+                {
+                    selectedValue = value ? "true" : "false";
+                }
+                return Utilities.EscapeJsonString(selectedValue.ToString());
+            }, false);
+            return match.Groups["prefix"].Value + resolved + match.Groups["suffix"].Value;
+        });
+    }
+
+    public static void PreflightRawQwenSegmentNodes(
+        string rawWorkflow, IReadOnlySet<string> availableNodeTypes,
+        JObject backendObjectInfo = null, T2IParamInput userInput = null)
     {
         // Use an unmistakable JSON-number sentinel for raw macros, including
         // ones EMBEDDED inside a quoted class_type (eg "Inpaint${kind}").
@@ -1166,6 +1218,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         // entirely a macro; "Inpaint${kind}" becomes "Inpaintnull" and can
         // bypass preflight before an irreversible external image upload.
         const string unresolvedClassMacro = "-9223372036854775000";
+        if (userInput is not null)
+        {
+            rawWorkflow = ExpandRawClassTypesForPreflight(rawWorkflow, userInput);
+        }
         string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
             rawWorkflow, "${", "}", _ => unresolvedClassMacro);
         JObject inventory = JObject.Parse(structuralGraph);
@@ -1299,7 +1355,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 // replacing placeholders with inert JSON nulls for parsing.
                 // The expanded graph is validated again after generation.
                 string rawGraph = GetRawWorkflowFrom(user_input);
-                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes, RawObjectInfo);
+                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes, RawObjectInfo, user_input);
                 workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
                 JObject expandedRawGraph = JObject.Parse(workflow);
                 ValidateNativeQwenSegmentNodes(expandedRawGraph, NodeTypes);
