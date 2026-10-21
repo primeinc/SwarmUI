@@ -82,7 +82,9 @@ public class Qwen21EmptyLatentTests : SwarmUITest
         T2IModel model = new(null, "/models/diffusion_models",
             "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
         {
-            ModelClass = cls, StandardWidth = 1024, StandardHeight = 1024
+            ModelClass = cls,
+            StandardWidth = 1024,
+            StandardHeight = 1024
         };
         using var pixels1 = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(80, 96);
         using var pixels2 = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(96, 80);
@@ -147,7 +149,9 @@ public class Qwen21EmptyLatentTests : SwarmUITest
         T2IModel model = new(null, "/models/diffusion_models",
             "/models/diffusion_models/qwen-test.safetensors", "qwen-test.safetensors")
         {
-            ModelClass = cls, StandardWidth = 1024, StandardHeight = 1024
+            ModelClass = cls,
+            StandardWidth = 1024,
+            StandardHeight = 1024
         };
         WorkflowGenerator gen = new()
         {
