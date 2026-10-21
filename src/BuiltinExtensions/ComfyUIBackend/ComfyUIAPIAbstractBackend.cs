@@ -41,6 +41,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     /// external API-by-URL Comfy instance with no bundled nodes installed.
     /// Ordinary/non-Qwen generation is not affected.
     /// </summary>
+    /// <summary>Recognize a numeric image_N reference even when its index
+    /// exceeds the 16 inputs supported by Qwen's native Swarm encoder.
+    /// Otherwise invalid raw image_17 inputs evade Qwen preflight entirely.</summary>
+    private static bool IsQwen21NumericImageSocket(string name)
+    {
+        if (!name.StartsWith("image_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        string suffix = name["image_".Length..];
+        return suffix.Length > 0 && suffix.All(c => c >= '0' && c <= '9');
+    }
+
     private static bool HasQwen21AdvancedEncoderInputs(JObject workflow)
     {
         // A saved/raw Qwen image-edit workflow can supply its own VAE latent
@@ -60,9 +73,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return inputs.Properties().Any(input =>
                 input.Value.Type != JTokenType.Null
-                && input.Name.StartsWith("image_", StringComparison.Ordinal)
-                && int.TryParse(input.Name.AsSpan("image_".Length), out int index)
-                && index >= 1 && index <= 16);
+                && IsQwen21NumericImageSocket(input.Name));
         });
     }
 
@@ -182,9 +193,16 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 {
                     continue;
                 }
-                bool isImageSlot = input.Name.StartsWith("image_", StringComparison.Ordinal)
-                    && int.TryParse(input.Name.AsSpan("image_".Length), out int index)
-                    && index >= 1 && index <= 16;
+                bool isImageSlot = IsQwen21NumericImageSocket(input.Name);
+                if (isImageSlot
+                    && (!int.TryParse(input.Name.AsSpan("image_".Length), out int index)
+                        || index < 1 || index > 16))
+                {
+                    throw new SwarmUserErrorException(
+                        $"The requested Qwen reference socket '{input.Name}' is outside the native " +
+                        "image_1 through image_16 range. Refusing to drop an unsupported image " +
+                        "reference before sending the workflow to ComfyUI.");
+                }
                 bool isNativeEmptyTextOption = input.Name == "qwen21_prevent_empty_text";
                 if (!isImageSlot && !isNativeEmptyTextOption)
                 {
