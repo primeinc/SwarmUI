@@ -71,6 +71,10 @@ public class QwenSegmentLoraChainTests : SwarmUITest
         Assert.That(T2IPromptHandling.MatchPromptLoraName("subjects/portrait", catalog),
             Is.EqualTo("subjects/Portrait.safetensors"),
             "Existing case-insensitive input remains accepted when unambiguous.");
+        Assert.That(T2IPromptHandling.MatchPromptLoraName(
+            @"subjects\\portrait.SAFETENSORS", catalog),
+            Is.EqualTo("subjects/Portrait.safetensors"),
+            "Doubly escaped Windows separator and case-insensitive suffix remain unambiguous.");
         Assert.That(T2IPromptHandling.MatchPromptLoraName("Portrait", catalog),
             Is.EqualTo("subjects/Portrait.safetensors"),
             "Legacy shorthand selection remains supported.");
