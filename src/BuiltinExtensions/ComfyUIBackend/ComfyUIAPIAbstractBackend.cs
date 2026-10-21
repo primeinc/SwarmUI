@@ -1183,7 +1183,9 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             property.Value?["class_type"] is null
             || property.Value["class_type"].Type != JTokenType.String
             || property.Value["class_type"].ToString().Contains(
-                unresolvedClassMacro, StringComparison.Ordinal)))
+                unresolvedClassMacro, StringComparison.Ordinal)
+            || property.Value["class_type"].ToString().Contains(
+                "${", StringComparison.Ordinal)))
         {
             throw new SwarmUserErrorException(
                 "Raw Comfy workflow class_type must be statically specified before image upload. " +
