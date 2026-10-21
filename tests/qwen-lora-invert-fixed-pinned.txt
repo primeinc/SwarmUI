@@ -1,0 +1,1 @@
+Pinned regression validation for PR#16 source 0c28a3426968ea44235f28ac19ed67ed13c94868: Qwen inverse segment native threshold before inverse, and case-sensitive LoRA matching with escaped Windows paths. Tests must pass; does not establish model-backed rendering.
