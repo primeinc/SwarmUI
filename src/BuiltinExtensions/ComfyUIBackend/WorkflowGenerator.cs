@@ -82,11 +82,8 @@ public partial class WorkflowGenerator
     /// <summary>The output workflow object.</summary>
     public JObject Workflow;
 
-    /// <summary>Debug trace of how this workflow was built, or null when not tracing. Set automatically by <see cref="Generate"/> when <see cref="Settings.AddDebugData"/> is enabled.</summary>
+    /// <summary>Debug trace of how this workflow was built, or null when not tracing. <see cref="ComfyUIAPIAbstractBackend.CreateWorkflow"/> sets it when <see cref="Settings.AddDebugData"/> is enabled; other callers may set one before <see cref="Generate"/>.</summary>
     public WorkflowTrace Trace;
-
-    /// <summary>Marks nodes created inside the returned scope as belonging to the given stage in the debug trace. Returns null when not tracing.</summary>
-    public IDisposable TraceStage(string stage) => Trace?.EnterStage(stage);
 
     /// <summary>Current node data trackers for core data that passes throughout the workflow.</summary>
     public WGNodeData CurrentModel, CurrentTextEnc, CurrentVae, CurrentAudioVae, CurrentMedia, BasicInputImage;
@@ -3110,7 +3107,7 @@ public partial class WorkflowGenerator
     /// <summary>Creates a SeedVR2 restoration stage: converts to a SeedVR2-space latent and samples the restored image from it.</summary>
     public WGNodeData CreateSeedVR2Restore(T2IModel seedVrModel, WGNodeData media, WGNodeData decodeVae, long seed, bool isRefiner = false)
     {
-        using IDisposable traceStage = isRefiner ? null : TraceStage("seedvr");
+        using IDisposable traceStage = isRefiner ? null : Trace?.EnterStage("seedvr");
         WGNodeData raw = media.AsRawImage(decodeVae);
         JArray resized = raw.Path;
         string preprocessed = CreateNode("SeedVR2Preprocess", new JObject()
@@ -3222,9 +3219,12 @@ public partial class WorkflowGenerator
         {
             return globalCond;
         }
-        foreach (PromptRegion.Part part in parts)
+        if (Trace is not null)
         {
-            Trace?.LabelPrompt(part.Prompt, $"{tracePromptLabel}.{$"{part.Type}".ToLowerFast()}{part.ContextID}");
+            foreach (PromptRegion.Part part in parts)
+            {
+                Trace.LabelPrompt(part.Prompt, $"{tracePromptLabel}.{$"{part.Type}".ToLowerFast()}{part.ContextID}");
+            }
         }
         string gligenModel = UserInput.Get(ComfyUIBackendExtension.GligenModel, "None");
         if (gligenModel != "None")

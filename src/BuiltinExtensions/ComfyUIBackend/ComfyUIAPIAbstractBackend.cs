@@ -1121,10 +1121,8 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             copyParam(T2IParamTypes.GptOssModel);
         }
         WorkflowGenerator wg = new() { UserInput = input, ModelFolderFormat = ModelFolderFormat, Features = [.. SupportedFeatures] };
-        string workflow = wg.Generate().ToString();
-        wg.Trace?.RecordSent(workflow, workflow);
-        WorkflowTrace.RecordPosted(input, workflow, $"{GetType().Name} (model preload)");
-        await AwaitJobLive(workflow, "0", _ => { }, new(null), Program.GlobalProgramCancel);
+        JObject workflow = wg.Generate();
+        await AwaitJobLive(workflow.ToString(), "0", _ => { }, new(null), Program.GlobalProgramCancel);
         CurrentModelName = model.Name;
         return true;
     }

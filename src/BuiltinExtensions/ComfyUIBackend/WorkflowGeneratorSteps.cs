@@ -1797,7 +1797,7 @@ public class WorkflowGeneratorSteps
             PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
-                using IDisposable segmentStage = g.TraceStage("segment");
+                using IDisposable segmentStage = g.Trace?.EnterStage("segment");
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
                 g.SaveOptionalIntermediate();
                 T2IModel t2iModel = g.FinalLoadedModel;
@@ -1819,7 +1819,7 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
-                    using IDisposable partStage = g.TraceStage($"seg{part.ContextID}");
+                    using IDisposable partStage = g.Trace?.EnterStage($"seg{part.ContextID}");
                     g.Trace?.SegmentPart(part, i);
                     g.Trace?.LabelPrompt(part.DataText, $"seg{part.ContextID}.mask");
                     string[] segmentSections = part.DataText.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -2202,7 +2202,7 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
-                    using IDisposable partStage = g.TraceStage($"extend{part.ContextID}");
+                    using IDisposable partStage = g.Trace?.EnterStage($"extend{part.ContextID}");
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.VideoCFG, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7);
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.VideoSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20);
                     seed++;
