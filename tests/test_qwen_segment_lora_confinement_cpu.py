@@ -6,7 +6,7 @@ metric used when real Qwen LoRA OFF/ON/OFF images are supplied.
 import unittest
 from PIL import Image, ImageDraw
 from integration.qwen_segment_lora_confinement import (
-    region_rms, assert_same_detector_mask, normalized_lora_path,
+    region_rms, assert_same_detector_mask, normalized_lora_path, same_lora_path,
 )
 
 
@@ -208,12 +208,25 @@ class QwenSegmentLoraConfinementCPUTests(unittest.TestCase):
         return base, mask
 
     def test_lora_paths_match_separators_but_not_filename_case(self):
-        self.assertEqual(normalized_lora_path("subjects\\portrait.safetensors"),
-                         "subjects/portrait")
+        self.assertEqual(normalized_lora_path("subjects\\\\portrait.safetensors"),
+                         "subjects/portrait.safetensors")
         self.assertEqual(normalized_lora_path("subjects/portrait.SAFETENSORS"),
-                         "subjects/portrait")
+                         "subjects/portrait.SAFETENSORS")
         self.assertNotEqual(normalized_lora_path("subjects/Portrait.safetensors"),
                             normalized_lora_path("subjects/portrait.safetensors"))
+        self.assertNotEqual(normalized_lora_path("subjects/portrait.SAFETENSORS"),
+                            normalized_lora_path("subjects/portrait.safetensors"),
+                            "Two full Linux LoRA filenames differing only in suffix case are distinct")
+        self.assertTrue(same_lora_path("subjects/portrait",
+                                       "subjects\\\\portrait.safetensors"))
+        self.assertTrue(same_lora_path("subjects/portrait.SAFETENSORS",
+                                       "subjects/portrait.SAFETENSORS"))
+        self.assertFalse(same_lora_path("subjects/portrait.SAFETENSORS",
+                                        "subjects/portrait.safetensors"))
+        self.assertFalse(same_lora_path(" subjects/portrait.safetensors",
+                                        "subjects/portrait.safetensors"))
+        self.assertFalse(same_lora_path("subjects/portrait .safetensors",
+                                        "subjects/portrait.safetensors"))
 
     def test_change_on_detected_subject_is_measured_inside_only(self):
         base, mask = self.sample()
