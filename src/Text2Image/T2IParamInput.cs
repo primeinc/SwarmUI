@@ -182,8 +182,19 @@ public class T2IParamInput
     /// <summary>If true, no parameters are ever "unused". Useful for special meta-handlers, eg Grid Image.</summary>
     public bool NoUnusedParams = false;
 
-    /// <summary>If non-null, called on every parameter read with (param, section ID, value returned, source of the value: "section", "base", or "default"). <see cref="Clone"/> does not copy it, so a clone never records into another generation's trace.</summary>
-    public Action<T2IParamType, int, object, string> ParamReadTracker = null;
+    /// <summary>Where the value a parameter read returned came from.</summary>
+    public enum ParamReadSource
+    {
+        /// <summary>The section's own override.</summary>
+        Section,
+        /// <summary>The input's base value.</summary>
+        Base,
+        /// <summary>The default: the input does not set the parameter.</summary>
+        Default
+    }
+
+    /// <summary>If non-null, called on every parameter read with (param, section ID, value returned, where the value came from). <see cref="Clone"/> does not copy it, so a clone never records into another generation's trace.</summary>
+    public Action<T2IParamType, int, object, ParamReadSource> ParamReadTracker = null;
 
     /// <summary>Gets the parameter overrides for a given section. Returns the main <see cref="InternalSet"/> if not in a sub-section currently.</summary>
     /// <param name="section">The section ID.</param>
@@ -501,9 +512,13 @@ public class T2IParamInput
     /// <summary>Aggressively safe JSON Serializer Settings for metadata encoding.</summary>
     public static JsonSerializerSettings SafeSerializer = new() { Formatting = Formatting.Indented, StringEscapeHandling = StringEscapeHandling.EscapeNonAscii };
 
-    /// <summary>Converts a metadata JSON object to a string.</summary>
+    /// <summary>Converts a metadata JSON object to a string. A workflow trace record in its extra data is written on one line (<see cref="MetadataHelper.MetadataJsonWriter"/>).</summary>
     public static string MetadataToString(JObject obj)
     {
+        if (obj["sui_extra_data"] is JObject extra && extra.ContainsKey(MetadataHelper.WorkflowTraceKey))
+        {
+            return MetadataHelper.SerializeWithCompactTrace(obj, SafeSerializer).Replace("\r\n", "\n");
+        }
         return JsonConvert.SerializeObject(obj, SafeSerializer).Replace("\r\n", "\n");
     }
 
@@ -607,7 +622,7 @@ public class T2IParamInput
     {
         ParamsQueried.Add(param.ID);
         object result = InternalSet.GetRaw(param);
-        ParamReadTracker?.Invoke(param, 0, result, result is null ? "default" : "base");
+        ParamReadTracker?.Invoke(param, 0, result, result is null ? ParamReadSource.Default : ParamReadSource.Base);
         return result;
     }
 
@@ -616,7 +631,7 @@ public class T2IParamInput
     {
         ParamsQueried.Add(param.Type.ID);
         T result = InternalSet.Get(param);
-        ParamReadTracker?.Invoke(param.Type, 0, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? "base" : "default");
+        ParamReadTracker?.Invoke(param.Type, 0, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? ParamReadSource.Base : ParamReadSource.Default);
         return result;
     }
 
@@ -626,20 +641,20 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out T subVal))
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, "section");
+            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, ParamReadSource.Section);
             return subVal;
         }
         if (sectionId != 0 && !includeBase)
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
+            ParamReadTracker?.Invoke(param.Type, sectionId, null, ParamReadSource.Default);
             return null;
         }
         if (InternalSet.TryGet(param, out T val))
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, val, "base");
+            ParamReadTracker?.Invoke(param.Type, sectionId, val, ParamReadSource.Base);
             return val;
         }
-        ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
+        ParamReadTracker?.Invoke(param.Type, sectionId, null, ParamReadSource.Default);
         return null;
     }
 
@@ -649,16 +664,16 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out T subVal))
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, "section");
+            ParamReadTracker?.Invoke(param.Type, sectionId, subVal, ParamReadSource.Section);
             return subVal;
         }
         if (sectionId != 0 && !includeBase)
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, defVal, "default");
+            ParamReadTracker?.Invoke(param.Type, sectionId, defVal, ParamReadSource.Default);
             return defVal;
         }
         T result = InternalSet.Get(param, defVal, autoFixDefault);
-        ParamReadTracker?.Invoke(param.Type, sectionId, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? "base" : "default");
+        ParamReadTracker?.Invoke(param.Type, sectionId, result, InternalSet.ValuesInput.ContainsKey(param.Type.ID) ? ParamReadSource.Base : ParamReadSource.Default);
         return result;
     }
 
@@ -667,7 +682,7 @@ public class T2IParamInput
     {
         ParamsQueried.Add(param.Type.ID);
         string result = InternalSet.GetString(param);
-        ParamReadTracker?.Invoke(param.Type, 0, result, result is null ? "default" : "base");
+        ParamReadTracker?.Invoke(param.Type, 0, result, result is null ? ParamReadSource.Default : ParamReadSource.Base);
         return result;
     }
 
@@ -677,17 +692,17 @@ public class T2IParamInput
         ParamsQueried.Add(param.Type.ID);
         if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.TryGet(param, out val))
         {
-            ParamReadTracker?.Invoke(param.Type, sectionId, val, "section");
+            ParamReadTracker?.Invoke(param.Type, sectionId, val, ParamReadSource.Section);
             return true;
         }
         if (sectionId != 0 && !includeBase)
         {
             val = default;
-            ParamReadTracker?.Invoke(param.Type, sectionId, null, "default");
+            ParamReadTracker?.Invoke(param.Type, sectionId, null, ParamReadSource.Default);
             return false;
         }
         bool found = InternalSet.TryGet(param, out val);
-        ParamReadTracker?.Invoke(param.Type, sectionId, found ? (object)val : null, found ? "base" : "default");
+        ParamReadTracker?.Invoke(param.Type, sectionId, found ? (object)val : null, found ? ParamReadSource.Base : ParamReadSource.Default);
         return found;
     }
 
@@ -696,7 +711,7 @@ public class T2IParamInput
     {
         ParamsQueried.Add(param.ID);
         bool found = InternalSet.TryGetRaw(param, out val);
-        ParamReadTracker?.Invoke(param, 0, found ? val : null, found ? "base" : "default");
+        ParamReadTracker?.Invoke(param, 0, found ? val : null, found ? ParamReadSource.Base : ParamReadSource.Default);
         return found;
     }
 

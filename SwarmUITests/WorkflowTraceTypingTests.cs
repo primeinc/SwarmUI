@@ -103,6 +103,12 @@ public class WorkflowTraceTypingTests : SwarmUITest
         ("BatchImagesNode", """{ "images.image0": ["100", 0], "images.image1": ["8", 0] }""")
     ];
 
+    /// <summary>Returns a record's list of node input problems ("type_errors" or "input_errors") as (node, input, problem).</summary>
+    public static List<(string Node, string Input, string Problem)> Problems(JToken list) => [.. ((JArray)list).Select(e => ($"{e["node"]}", e["input"]?.ToString(), $"{e["problem"]}"))];
+
+    /// <summary>Returns a record's "undeclared_inputs" as (node, input).</summary>
+    public static List<(string Node, string Input)> Undeclared(JObject summary) => [.. ((JArray)summary["undeclared_inputs"]).Select(e => ($"{e["node"]}", $"{e["input"]}"))];
+
     /// <summary>Builds the SDXL checkpoint text-to-image workflow, traced with the fixture object_info.</summary>
     public static (JObject Workflow, WorkflowTrace Trace) BuildTypedSdxl()
     {
@@ -134,11 +140,14 @@ public class WorkflowTraceTypingTests : SwarmUITest
         Assert.That(untypedLinks, Is.Empty, "every link must be type-checked");
         Assert.That(summary["type_errors"], Is.Empty, summary["type_errors"].ToString(Formatting.None));
         // SwarmKSampler.py INPUT_TYPES has no control_after_generate; the generator sends it (WorkflowGenerator.cs CreateKSampler) and ComfyUI ignores it.
-        Assert.That(((JArray)summary["undeclared_inputs"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "10:SwarmKSampler.control_after_generate" }));
-        string loader = ((JArray)summary["nodes"]["base"]).Select(t => $"{t}").Single(d => d.StartsWith("4:CheckpointLoaderSimple"));
-        Assert.That(loader, Does.Contain("0:MODEL=MODEL/stable-diffusion-xl-v1"));
-        Assert.That(loader, Does.Contain("1:CLIP=TEXTENC/stable-diffusion-xl-v1"));
-        Assert.That(loader, Does.Contain("2:VAE=VAE/stable-diffusion-xl-v1"));
+        Assert.That(Undeclared(summary), Is.EquivalentTo(new[] { ("10:SwarmKSampler", "control_after_generate") }));
+        JObject loader = (JObject)summary["nodes"]["4"];
+        Assert.That(($"{loader["class"]}", $"{loader["stage"]}"), Is.EqualTo(("CheckpointLoaderSimple", "base")));
+        foreach ((string slot, string comfy, string swarm) in new[] { ("0", "MODEL", "MODEL"), ("1", "CLIP", "TEXTENC"), ("2", "VAE", "VAE") })
+        {
+            JObject output = (JObject)loader["outputs"][slot];
+            Assert.That(($"{output["comfy"]}", output["types"].Select(t => $"{t}"), output["compat"].Select(t => $"{t}")), Is.EqualTo((comfy, new[] { swarm }, new[] { "stable-diffusion-xl-v1" })), $"slot {slot}: {output.ToString(Formatting.None)}");
+        }
         Assert.That(trace.IsOutputNode("SwarmSaveImageWS"), Is.True);
         Assert.That(trace.IsOutputNode("VAEDecode"), Is.False);
     }
@@ -151,7 +160,7 @@ public class WorkflowTraceTypingTests : SwarmUITest
         Assert.That(workflow["8"]["inputs"]["vae"].ToString(Formatting.None), Is.EqualTo("""["4",2]"""));
         workflow["8"]["inputs"]["vae"] = new JArray("4", 1);
         JObject summary = trace.Build();
-        Assert.That(((JArray)summary["type_errors"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "8:VAEDecode.vae expects VAE, gets CLIP from 4:1:CheckpointLoaderSimple" }));
+        Assert.That(Problems(summary["type_errors"]), Is.EquivalentTo(new[] { ("8:VAEDecode", "vae", "expects VAE, gets CLIP from 4:1:CheckpointLoaderSimple") }));
     }
 
     /// <summary>V3 dynamic inputs are declared under the prefixed names the generator sends and are type-checked, as ComfyUI expands them; a match-type output links into an IMAGE input.
@@ -170,21 +179,21 @@ public class WorkflowTraceTypingTests : SwarmUITest
         JObject summary = trace.Build();
         Assert.That(summary["type_errors"], Is.Empty, summary["type_errors"].ToString(Formatting.None));
         Assert.That(summary["input_errors"], Is.Empty, summary["input_errors"].ToString(Formatting.None));
-        Assert.That(((JArray)summary["undeclared_inputs"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "10:SwarmKSampler.control_after_generate" }));
+        Assert.That(Undeclared(summary), Is.EquivalentTo(new[] { ("10:SwarmKSampler", "control_after_generate") }));
         foreach ((string id, string input) in new[] { ("100", "input"), ("101", "images.image0"), ("101", "images.image1") })
         {
             Assert.That(trace.ComfyInputType($"{workflow[id]["class_type"]}", (JObject)workflow[id]["inputs"], input), Is.Not.Null, $"{id}.{input} is type-checked");
         }
         workflow["101"]["inputs"]["images.image1"] = new JArray("10", 0);
-        Assert.That(((JArray)trace.Build()["type_errors"]).Select(t => $"{t}"), Is.EqualTo(new[] { "101:BatchImagesNode.images.image1 expects IMAGE, gets LATENT from 10:0:SwarmKSampler" }));
+        Assert.That(Problems(trace.Build()["type_errors"]), Is.EqualTo(new[] { ("101:BatchImagesNode", "images.image1", "expects IMAGE, gets LATENT from 10:0:SwarmKSampler") }));
         ((JObject)workflow["101"]["inputs"]).Remove("images.image0");
-        Assert.That(((JArray)trace.Build()["input_errors"]).Select(t => $"{t}"), Is.EqualTo(new[] { "101:BatchImagesNode.images.image0 is required and missing" }));
+        Assert.That(Problems(trace.Build()["input_errors"]), Is.EqualTo(new[] { ("101:BatchImagesNode", "images.image0", "required and missing") }));
         workflow["101"]["inputs"] = JObject.Parse(DynamicSamples[1].Inputs);
         foreach (string dynamicClass in new[] { "ResizeImageMaskNode", "BatchImagesNode" })
         {
             ((JObject)trace.ObjectInfo[dynamicClass]).Remove("output_matchtypes");
         }
-        Assert.That(((JArray)trace.Build()["undeclared_inputs"]).Select(t => $"{t}"), Is.SupersetOf(new[] { "100:ResizeImageMaskNode.resize_type.multiple", "101:BatchImagesNode.images.image0", "101:BatchImagesNode.images.image1" }));
+        Assert.That(Undeclared(trace.Build()), Is.SupersetOf(new[] { ("100:ResizeImageMaskNode", "resize_type.multiple"), ("101:BatchImagesNode", "images.image0"), ("101:BatchImagesNode", "images.image1") }));
     }
 
     /// <summary>A node class ComfyUI does not have is reported as missing, and its inputs are not reported as undeclared.</summary>
@@ -195,6 +204,6 @@ public class WorkflowTraceTypingTests : SwarmUITest
         ((JObject)trace.ObjectInfo).Remove("VAEDecode");
         JObject summary = trace.Build();
         Assert.That(((JArray)summary["classes_missing_from_object_info"]).Select(t => $"{t}"), Is.EquivalentTo(new[] { "8:VAEDecode" }));
-        Assert.That(((JArray)summary["undeclared_inputs"]).Select(t => $"{t}"), Has.None.StartsWith("8:"));
+        Assert.That(Undeclared(summary).Select(u => u.Node), Has.None.StartsWith("8:"));
     }
 }

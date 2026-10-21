@@ -826,7 +826,7 @@ public partial class WorkflowGenerator
         string vaeFixed = vae.Replace('\\', '/').Replace("/", ModelFolderFormat ?? $"{Path.DirectorySeparatorChar}");
         if (NodeHelpers.TryGetValue($"vaeloader-{vaeFixed}", out string helper))
         {
-            Trace?.CacheHit($"vaeloader {vaeFixed}", helper);
+            Trace?.CacheHit("vaeloader", $"{helper}:0", vaeFixed);
             return [helper, 0];
         }
         string vaeLoader;
@@ -2559,7 +2559,7 @@ public partial class WorkflowGenerator
         string trackerId = $"__cond_direct____{clip[0]}_{clip[1]}_{isPositive}____{prompt}_{attachImages}_{steps}";
         if (id is null && NodeHelpers.TryGetValue(trackerId, out string nodeId))
         {
-            Trace?.CacheHit("conditioning", nodeId);
+            Trace?.CacheHit("conditioning", $"{nodeId}:0");
             return [nodeId, 0];
         }
         string node;

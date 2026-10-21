@@ -5,6 +5,7 @@ using Newtonsoft.Json.Linq;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SwarmUI.Text2Image;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
@@ -33,6 +34,141 @@ public static class MetadataHelper
             ["version"] = WorkflowTraceVersion,
             ["notice"] = $"no workflow trace: backend {backend} recorded none. Only this server's ComfyUI backends record how they built the workflow; a remote Swarm backend's server keeps its own trace, if it records one, in its own log."
         };
+    }
+
+    /// <summary>JSON writer that writes as <see cref="JsonTextWriter"/> does, but leaves out the line breaks and indentation of <see cref="Formatting.Indented"/> wherever <see cref="Compact"/> says, so that part reads as <see cref="Formatting.None"/> writes it.
+    /// It counts open containers itself (<see cref="OpenContainers"/>): <see cref="JsonWriter"/> pops a container before it writes the indent in front of the closing bracket, so its own depth has already dropped there.</summary>
+    /// <param name="textWriter">The text writer to write to.</param>
+    public abstract class CompactingJsonWriter(TextWriter textWriter) : JsonTextWriter(textWriter)
+    {
+        /// <summary>Number of objects, arrays and constructors started and not yet ended. The indent in front of a closing bracket is written while the container still counts.</summary>
+        public int OpenContainers;
+
+        /// <summary>True where indentation is left out.</summary>
+        public abstract bool Compact { get; }
+
+        /// <summary>Called after each property name is written.</summary>
+        public virtual void AfterPropertyName(string name)
+        {
+        }
+
+        /// <summary>Called before each property name is written, and after each container ends.</summary>
+        public virtual void AtBoundary()
+        {
+        }
+
+        /// <inheritdoc/>
+        public override void WritePropertyName(string name)
+        {
+            AtBoundary();
+            base.WritePropertyName(name);
+            AfterPropertyName(name);
+        }
+
+        /// <inheritdoc/>
+        public override void WritePropertyName(string name, bool escape)
+        {
+            AtBoundary();
+            base.WritePropertyName(name, escape);
+            AfterPropertyName(name);
+        }
+
+        /// <inheritdoc/>
+        public override void WriteStartObject()
+        {
+            base.WriteStartObject();
+            OpenContainers++;
+        }
+
+        /// <inheritdoc/>
+        public override void WriteStartArray()
+        {
+            base.WriteStartArray();
+            OpenContainers++;
+        }
+
+        /// <inheritdoc/>
+        public override void WriteStartConstructor(string name)
+        {
+            base.WriteStartConstructor(name);
+            OpenContainers++;
+        }
+
+        /// <inheritdoc/>
+        protected override void WriteEnd(JsonToken token)
+        {
+            base.WriteEnd(token);
+            OpenContainers--;
+            AtBoundary();
+        }
+
+        /// <inheritdoc/>
+        protected override void WriteIndent()
+        {
+            if (!Compact)
+            {
+                base.WriteIndent();
+            }
+        }
+
+        /// <inheritdoc/>
+        protected override void WriteIndentSpace()
+        {
+            if (!Compact)
+            {
+                base.WriteIndentSpace();
+            }
+        }
+    }
+
+    /// <summary>JSON writer for image metadata: writes the value of a workflow trace record ("sui_extra_data" &gt; <see cref="WorkflowTraceKey"/>) on one line and everything else as <see cref="JsonTextWriter"/> does.
+    /// A trace record is many small nested values, which indented metadata would give a line and an indent each.</summary>
+    /// <param name="textWriter">The text writer to write to.</param>
+    public class MetadataJsonWriter(TextWriter textWriter) : CompactingJsonWriter(textWriter)
+    {
+        /// <summary>Name of the top-level property being written.</summary>
+        public string TopProperty;
+
+        /// <summary><see cref="CompactingJsonWriter.OpenContainers"/> when the trace record's property name was written, until its value ends; otherwise -1.</summary>
+        public int CompactFrom = -1;
+
+        /// <summary>True while writing inside the trace record's value.</summary>
+        public override bool Compact => CompactFrom >= 0 && OpenContainers > CompactFrom;
+
+        /// <summary>Ends the compact value once the writer is back at the trace record's parent.</summary>
+        public override void AtBoundary()
+        {
+            if (CompactFrom >= 0 && OpenContainers <= CompactFrom)
+            {
+                CompactFrom = -1;
+            }
+        }
+
+        /// <summary>Notes a top-level name, or the trace record's name inside "sui_extra_data", whose value starts the compact value.</summary>
+        public override void AfterPropertyName(string name)
+        {
+            if (OpenContainers == 1)
+            {
+                TopProperty = name;
+            }
+            else if (OpenContainers == 2 && CompactFrom < 0 && name == WorkflowTraceKey && TopProperty == "sui_extra_data")
+            {
+                CompactFrom = OpenContainers;
+            }
+        }
+    }
+
+    /// <summary>Serializes metadata exactly as <see cref="JsonConvert.SerializeObject(object, JsonSerializerSettings)"/> does with the given settings, through a <see cref="MetadataJsonWriter"/>.</summary>
+    public static string SerializeWithCompactTrace(JObject metadata, JsonSerializerSettings settings)
+    {
+        JsonSerializer serializer = JsonSerializer.CreateDefault(settings);
+        StringWriter text = new(new StringBuilder(256), CultureInfo.InvariantCulture);
+        using (MetadataJsonWriter writer = new(text))
+        {
+            writer.Formatting = serializer.Formatting;
+            serializer.Serialize(writer, metadata, null);
+        }
+        return text.ToString();
     }
 
     /// <summary>Strings and byte arrays at least this long are hashed without copying them and have their hash cached in <see cref="LongHashes"/>.</summary>

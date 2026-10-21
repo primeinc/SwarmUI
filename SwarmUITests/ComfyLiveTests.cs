@@ -288,7 +288,7 @@ public class ComfyLiveTests : SwarmUITest
         Assert.That(trace["type_errors"], Is.Empty, $"live object_info types every link: {trace["type_errors"]}");
         Assert.That(trace["input_errors"], Is.Empty, $"{trace["input_errors"]}");
         Assert.That(trace["classes_missing_from_object_info"], Is.Empty, $"{trace["classes_missing_from_object_info"]}");
-        Assert.That(((JArray)trace["undeclared_inputs"]).Select(t => $"{t}".After(':')).Distinct(), Is.EquivalentTo(KnownUndeclaredInputs), $"the only inputs the live ComfyUI does not declare are the known ones: {trace["undeclared_inputs"]}");
+        Assert.That(((JArray)trace["undeclared_inputs"]).Select(t => $"{$"{t["node"]}".After(':')}.{t["input"]}").Distinct(), Is.EquivalentTo(KnownUndeclaredInputs), $"the only inputs the live ComfyUI does not declare are the known ones: {trace["undeclared_inputs"]}");
         TestContext.Out.WriteLine($"outputs: {string.Join(", ", job.Outputs.Select(o => $"node {o.BackendInternalHint} real={o.IsReal} {o.File.Type.MimeType} {o.File.RawData.Length} bytes"))}");
         T2IEngine.ImageOutput final = job.Outputs.Single(o => o.IsReal);
         Assert.That(final.BackendInternalHint, Is.EqualTo("9"), "the final image came from the final save node");
@@ -456,7 +456,7 @@ public class ComfyLiveTests : SwarmUITest
         (string scaleId, JObject scale) = WorkflowTraceTests.Source(workflow, composite["inputs"]["source"]);
         Assert.That($"{scale["class_type"]}", Is.EqualTo("ImageScale"), "the redraw is scaled back to the crop bounds");
         (string decodeId, JObject decode) = WorkflowTraceTests.Source(workflow, scale["inputs"]["image"]);
-        Assert.That($"{trace["nodes"][decodeId]}", Does.StartWith($"{decodeId}:{decode["class_type"]}@{segmentStage} "), $"{decodeId}:{decode["class_type"]} is the segment's decoded redraw, in the image record's node table");
+        Assert.That(($"{trace["nodes"][decodeId]?["class"]}", $"{trace["nodes"][decodeId]?["stage"]}"), Is.EqualTo(($"{decode["class_type"]}", segmentStage)), $"{decodeId}:{decode["class_type"]} is the segment's decoded redraw, in the image record's node table");
         (string thresholdId, JObject threshold) = WorkflowTraceTests.Source(workflow, composite["inputs"]["mask"]);
         Assert.That($"{threshold["class_type"]}", Is.EqualTo("ThresholdMask"));
         using SixLabors.ImageSharp.Image<Rgba32> crop = new(37, 53, CropColor);

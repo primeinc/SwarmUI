@@ -23,24 +23,27 @@ public class T2IMultiStepObjectBuilder
     /// <summary>Returns "#" plus the short hash of some text (<see cref="MetadataHelper.Sha8(string)"/>), so prompt text is never written raw into debug records.</summary>
     public static string TraceHash(string text) => $"#{MetadataHelper.Sha8(text)}";
 
-    /// <summary>Describes one object pass: the object's region, the crop of the base image that is inpainted, the inpaint size, and the mask inside it. The crop box is also where the result is pasted back, resized to the crop size.</summary>
+    /// <summary>Returns a box as "x", "y", "width" and "height".</summary>
+    public static JObject TraceBox(JToken x, JToken y, JToken width, JToken height) => new() { ["x"] = x, ["y"] = y, ["width"] = width, ["height"] = height };
+
+    /// <summary>Describes one object pass: the object's region as fractions of the image, its box in pixels, the crop of the base image that is inpainted, the inpaint size, and the mask's box inside the inpaint. The crop box is also where the result is pasted back, resized to the crop size.</summary>
     public static JObject TraceObjectPass(PromptRegion.Part part, int pixelX, int pixelY, int pixelWidth, int pixelHeight, int extraX, int extraY, int extraWidth, int extraHeight, int fixedWidth, int fixedHeight, double scaleWidth, double scaleHeight)
     {
         return new JObject()
         {
             ["pass"] = $"object{part.ContextID}",
             ["prompt"] = $"@object{part.ContextID}{TraceHash(part.Prompt)}",
-            ["region"] = $"{part.X},{part.Y} {part.Width}x{part.Height}",
-            ["object_px"] = $"{pixelX},{pixelY} {pixelWidth}x{pixelHeight}",
-            ["crop_px"] = $"{extraX},{extraY} {extraWidth}x{extraHeight}",
-            ["inpaint_size"] = $"{fixedWidth}x{fixedHeight}",
-            ["mask_px"] = $"{(int)((pixelX - extraX) * scaleWidth)},{(int)((pixelY - extraY) * scaleHeight)} {(int)(pixelWidth * scaleWidth)}x{(int)(pixelHeight * scaleHeight)}",
+            ["region"] = TraceBox(part.X, part.Y, part.Width, part.Height),
+            ["object_px"] = TraceBox(pixelX, pixelY, pixelWidth, pixelHeight),
+            ["crop_px"] = TraceBox(extraX, extraY, extraWidth, extraHeight),
+            ["inpaint_size"] = new JObject() { ["width"] = fixedWidth, ["height"] = fixedHeight },
+            ["mask_px"] = TraceBox((int)((pixelX - extraX) * scaleWidth), (int)((pixelY - extraY) * scaleHeight), (int)(pixelWidth * scaleWidth), (int)(pixelHeight * scaleHeight)),
             ["creativity"] = part.Strength2
         };
     }
 
-    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the result image's size and hash.
-    /// The size comes from the image's decode (<see cref="ImageFile.ToIS"/>), which composing the image uses next, so the record adds no image parsing.</summary>
+    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the "result": the image's "width", "height", "raw_sha8" hash and "mime" type,
+    /// or an "error" saying why there is no image to measure. The size comes from the image's decode (<see cref="ImageFile.ToIS"/>), which composing the image uses next, so the record adds no image parsing.</summary>
     public static void TracePassResult(JObject passTrace, T2IParamInput passInput, MediaFile result)
     {
         passTrace["seed"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Seed.Type.ID) is long seed ? seed : null;
@@ -53,16 +56,16 @@ public class T2IMultiStepObjectBuilder
             try
             {
                 ISImage decoded = img.ToIS;
-                passTrace["result"] = $"{decoded.Width}x{decoded.Height} #{MetadataHelper.Sha8(img.RawData)} {img.Type.MimeType}";
+                passTrace["result"] = new JObject() { ["width"] = decoded.Width, ["height"] = decoded.Height, ["raw_sha8"] = MetadataHelper.Sha8(img.RawData), ["mime"] = img.Type.MimeType };
             }
             catch (Exception ex)
             {
-                passTrace["result"] = $"unreadable image ({ex.GetType().Name}) #{MetadataHelper.Sha8(img.RawData ?? [])} {img.Type?.MimeType}";
+                passTrace["result"] = new JObject() { ["error"] = $"unreadable image ({ex.GetType().Name})", ["raw_sha8"] = MetadataHelper.Sha8(img.RawData ?? []), ["mime"] = img.Type?.MimeType };
             }
         }
         else
         {
-            passTrace["result"] = result is null ? "no output" : $"not an image ({result.Type?.MimeType})";
+            passTrace["result"] = result is null ? new JObject() { ["error"] = "no output" } : new JObject() { ["error"] = "not an image", ["mime"] = result.Type?.MimeType };
         }
     }
 

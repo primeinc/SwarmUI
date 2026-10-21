@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 using SixLabors.ImageSharp.Memory;
@@ -177,14 +176,14 @@ public class WorkflowTraceBudgetTests : SwarmUITest
             }
         });
         JObject summary = trace.Build();
-        List<JObject> tiers = trace.RecordTiers(summary, trace.LogKey);
+        List<JObject> tiers = trace.RecordTiers(summary);
         Dictionary<string, Cost> phases = new()
         {
             ["Build"] = Measure(() => trace.Build()),
             ["BuildDetail"] = Measure(() => trace.BuildDetail()),
             ["workflow hash"] = Measure(() => WorkflowTrace.HashIndentedJson(last.Workflow)),
-            ["log text"] = Measure(() => _ = summary.ToString(Formatting.Indented) + trace.BuildDetail().ToString(Formatting.Indented)),
-            ["RecordTiers"] = Measure(() => trace.RecordTiers(summary, trace.LogKey)),
+            ["log text"] = Measure(() => _ = WorkflowTrace.LogJson(summary) + WorkflowTrace.LogJson(trace.BuildDetail())),
+            ["RecordTiers"] = Measure(() => trace.RecordTiers(summary)),
             ["OtherMetadataChars"] = Measure(() => WorkflowTrace.OtherMetadataChars(input)),
             ["JPEG refit at save"] = Measure(() => WorkflowTrace.ForImageMetadata(tiers, "JPG", WorkflowTrace.SavedMetadataChars(input))),
             ["Finish"] = Measure(trace.Finish),
