@@ -271,6 +271,60 @@ public class QwenSegmentNativePromptTests : SwarmUITest
             p.Value?["class_type"]?.ToString() == "LanPaint_ImageEncode"), Is.False);
     }
     [Test]
+    public static void AuthoredSegmentLoRATagIsActuallyConfinedBySwarmPromptProcessor()
+    {
+        // Do not merely inject a pre-resolved //hook=0 or fake confinement.
+        // Run the same Swarm preprocessing used for the real user's authored
+        // <segment>...<lora:...> prompt before any Qwen workflow is built.
+        bool hadHandler = SwarmUI.Core.Program.T2IModelSets.TryGetValue(
+            "LoRA", out T2IModelHandler previousHandler);
+        try
+        {
+            T2IModelHandler handler = new() { ModelType = "LoRA" };
+            handler.Models["Audit/HannahLynn.safetensors"] = new T2IModel(
+                handler, "/models/loras",
+                "/models/loras/Audit/HannahLynn.safetensors",
+                "Audit/HannahLynn.safetensors");
+            SwarmUI.Core.Program.T2IModelSets["LoRA"] = handler;
+
+            const string authored = "<segment:girl,0.8,0.1> Replace the girl with HannahLynn <lora:Audit/HannahLynn:0.8>";
+            T2IParamInput input = new(null);
+            var context = new T2IPromptHandling.PromptTagContext
+            {
+                Input = input,
+                Param = "prompt",
+                Loras = ["Audit/HannahLynn"]
+            };
+            string parsed = T2IPromptHandling.ProcessPromptLike(authored, context, true);
+            PromptRegion.Part part = new PromptRegion(parsed).Parts.Single(
+                p => p.Type == PromptRegion.PartType.Segment);
+            Assert.That(part.ContextID, Is.EqualTo(11));
+            Assert.That(part.Prompt, Does.Contain("Replace the girl with HannahLynn"));
+            Assert.That(part.Prompt, Does.Not.Contain("<lora:"));
+            Assert.That(input.Get(T2IParamTypes.Loras),
+                Is.EqualTo(new System.Collections.Generic.List<string> { "Audit/HannahLynn" }));
+            Assert.That(input.Get(T2IParamTypes.LoraSectionConfinement),
+                Is.EqualTo(new System.Collections.Generic.List<string> { "11" }),
+                "A LoRA inside a real segment prompt must not leak to the global model");
+            Assert.That(double.Parse(input.Get(T2IParamTypes.LoraWeights)[0],
+                System.Globalization.CultureInfo.InvariantCulture), Is.EqualTo(0.8).Within(0.00001));
+            Assert.That(input.DynamicLoraIndices, Is.Empty,
+                "An unscheduled authored regional LoRA must be applied on its confined sampler model");
+        }
+        finally
+        {
+            if (hadHandler)
+            {
+                SwarmUI.Core.Program.T2IModelSets["LoRA"] = previousHandler;
+            }
+            else
+            {
+                SwarmUI.Core.Program.T2IModelSets.Remove("LoRA");
+            }
+        }
+    }
+
+    [Test]
     public static void DynamicLoRAHookReachesBothNativeSwarmQwenConditioners()
     {
         // The parser CPU test proves the //hook marker survives. This real
