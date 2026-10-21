@@ -185,6 +185,35 @@ class MaskGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nearly the entire source canvas"):
             self.node.validate(detected, minimum_confidence=0.0, maximum_coverage=0.99)
 
+    def test_inverse_segment_can_intentionally_edit_more_than_99_percent(self):
+        original = torch.zeros((1, 100, 100), dtype=torch.float32)
+        original[0, 0, 0] = 0.9  # explicit small subject selected by author
+        self.assertIs(self.node.validate(
+            original, minimum_confidence=0.0, maximum_coverage=1.0)[0], original)
+        complement = 1.0 - original
+        self.assertGreater(float((complement > 0).float().mean()), 0.99)
+        # Old hardcoded positive-only cap wrongly rejected this valid inverse.
+        with self.assertRaises(ValueError):
+            self.node.validate(
+                complement, minimum_confidence=0.0, maximum_coverage=0.99)
+        self.assertIs(self.node.validate(
+            complement, minimum_confidence=0.0, maximum_coverage=1.0)[0], complement)
+
+    def test_inverse_segment_rejects_empty_detector_before_inverting(self):
+        absent = torch.zeros((1, 64, 64), dtype=torch.float32)
+        with self.assertRaisesRegex(ValueError, "no subject detected"):
+            self.node.validate(absent, minimum_confidence=0.0, maximum_coverage=1.0)
+        # A naive complement would be 100% opaque and wrongly edit the frame.
+        inverted_empty = 1.0 - absent
+        self.assertEqual(float(inverted_empty.min()), 1.0)
+        # A detector that selected literally every pixel instead has an EMPTY
+        # inverse target; its post-invert guard must reject rather than crop all.
+        fully_detected = torch.ones((1, 64, 64), dtype=torch.float32)
+        self.node.validate(fully_detected, minimum_confidence=0.0, maximum_coverage=1.0)
+        with self.assertRaisesRegex(ValueError, "no subject detected"):
+            self.node.validate(1.0 - fully_detected,
+                               minimum_confidence=0.0, maximum_coverage=1.0)
+
     def test_rejects_all_zero_batch(self):
         with self.assertRaises(ValueError):
             self.node.validate(torch.zeros((2, 32, 32), dtype=torch.float32))
