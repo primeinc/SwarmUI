@@ -16,6 +16,7 @@ from io import BytesIO
 import json
 import math
 import os
+import re
 from pathlib import Path
 import time
 from urllib.parse import urlencode, urlsplit
@@ -288,12 +289,72 @@ def validate_qwen_subject_mask_chain(graph, crop_id):
     return threshold_ref
 
 
+
+def validate_dynamic_hook_on_sampler(graph, sampler_id, hook_node_id):
+    """Check the REAL positive/negative conditioning hook path before inference.
+
+    A CreateHookLora is NOT a MODEL-chain LoraLoader. The shipped Swarm text
+    encoder selects it by its //hook=N prompt marker and lora_hooks HOOKS
+    connection. Checking only the sampler's MODEL path misses this entire
+    supported scheduled/alternate LoRA class.
+    """
+    sampler = graph.get(str(sampler_id))
+    if not sampler or sampler["class_type"] not in _SAMPLERS:
+        raise AssertionError(f"Dynamic LoRA sampler {sampler_id!r} is missing")
+    marker_seen = False
+    for direction in ("positive", "negative"):
+        link = sampler["inputs"].get(direction)
+        visited_cond = set()
+        while isinstance(link, list) and len(link) == 2 and str(link[0]) in graph:
+            node_id = str(link[0])
+            if node_id in visited_cond:
+                raise AssertionError(f"{direction} conditioning cycle before dynamic LoRA")
+            visited_cond.add(node_id)
+            item = graph[node_id]
+            kind = item["class_type"]
+            if kind == "SwarmTextEncodeAdvanced":
+                break
+            if kind not in ("ReferenceLatent", "ConditioningMultiply", "ConditioningZeroOut"):
+                raise AssertionError(f"Unexpected dynamic {direction} conditioning node {kind}")
+            link = item["inputs"].get("conditioning")
+        else:
+            raise AssertionError(f"{direction} has no active SwarmTextEncodeAdvanced")
+
+        chain, visited_hooks = [], set()
+        link = item["inputs"].get("lora_hooks")
+        while link is not None:
+            if not (isinstance(link, list) and len(link) == 2
+                    and link[1] == 0 and str(link[0]) in graph):
+                raise AssertionError(f"{direction} has a broken dynamic HOOKS connection")
+            current_id = str(link[0])
+            if current_id in visited_hooks:
+                raise AssertionError("Dynamic LoRA hook chain contains a cycle")
+            visited_hooks.add(current_id)
+            hook = graph[current_id]
+            if hook["class_type"] != "CreateHookLora":
+                raise AssertionError(f"Expected CreateHookLora in {direction} HOOKS chain")
+            chain.append(current_id)
+            link = hook["inputs"].get("prev_hooks")
+        chain.reverse()
+        if str(hook_node_id) not in chain:
+            raise AssertionError(f"{direction} HOOKS chain does not include selected adapter {hook_node_id}")
+        index = chain.index(str(hook_node_id))
+        markers = [int(n) for n in re.findall(
+            r"//hook=(\\d+)", item["inputs"].get("prompt", ""))]
+        marker_seen = marker_seen or index in markers
+    if not marker_seen:
+        raise AssertionError("Selected dynamic LoRA has no matching //hook=N marker on sampler conditioning")
+
+
 def graph_variant(original, case, stage, strength):
     graph = copy.deepcopy(original)
     node_id = case[f"{stage}_lora_node"]
     node = graph.get(node_id)
-    if not node or node["class_type"] not in _LORAS:
-        raise AssertionError(f"{stage}: {node_id} is not an actual Comfy LoRA loader")
+    if not node or node["class_type"] not in (_LORAS | {"CreateHookLora"}):
+        raise AssertionError(f"{stage}: {node_id} is not a static or dynamic Comfy LoRA loader")
+    dynamic = node["class_type"] == "CreateHookLora"
+    if dynamic and stage != "segment":
+        raise AssertionError("Dynamic hook LoRA case must identify a Qwen segment stage")
     # The LoRA's full relative path is its identity. Comparing only the
     # basename could silently test a different adapter with the same filename
     # in another folder, falsely passing a rendered ON/OFF comparison.
@@ -301,7 +362,9 @@ def graph_variant(original, case, stage, strength):
     expected = normalized_lora_path(case["lora_name"])
     if not same_lora_path(actual, expected):
         raise AssertionError(f"{stage}: requested adapter {expected!r} but graph uses {actual!r}")
-    if node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
+    if dynamic:
+        validate_dynamic_hook_on_sampler(graph, case[f"{stage}_sampler_node"], node_id)
+    elif node_id not in model_chain(graph, case[f"{stage}_sampler_node"]):
         raise AssertionError(f"{stage}: LoRA {node_id} is not on the REAL SAMPLER'S model path")
     node["inputs"]["strength_model"] = strength
     if "strength_clip" in node["inputs"]:
