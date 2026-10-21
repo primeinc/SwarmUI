@@ -170,5 +170,21 @@ public class Qwen21EmptyLatentTests : SwarmUITest
             "Qwen must see the explicit edit source through vision, not only an unseen ReferenceLatent");
         Assert.That(encoder["inputs"]?["prompt"]?.ToString(), Is.EqualTo("Edit the image."));
     }
+    [Test]
+    public void Qwen21BaseSamplerCfgDefaultsToOneOnlyWhenNotSpecified()
+    {
+        T2IParamInput input = new(null);
+        Assert.That(WorkflowGeneratorSteps.Qwen21BaseSamplerCFG(input, true),
+            Is.EqualTo(1.0), "Native Qwen T2I must not inherit generic CFG 7");
+        Assert.That(WorkflowGeneratorSteps.Qwen21BaseSamplerCFG(input, false),
+            Is.EqualTo(7.0), "Do not change other model families");
+        input.Set(T2IParamTypes.CFGScale, 3.5);
+        Assert.That(WorkflowGeneratorSteps.Qwen21BaseSamplerCFG(input, true),
+            Is.EqualTo(3.5), "Explicit global CFG must not be overridden");
+        input.Set(T2IParamTypes.CFGScale, 5.0, sectionId: T2IParamInput.SectionID_BaseOnly);
+        Assert.That(WorkflowGeneratorSteps.Qwen21BaseSamplerCFG(input, true),
+            Is.EqualTo(5.0), "Explicit base-only CFG must override the global CFG");
+    }
+
 
 }
