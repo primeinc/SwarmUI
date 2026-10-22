@@ -130,6 +130,21 @@ test:
     uv pip sync --python "$PYTHON" --require-hashes --torch-backend cpu --check "$REPO/SwarmUITests/ComfyLive/requirements.lock.txt"
     SWARMUI_TEST_COMFY_URL="http://127.0.0.1:$PORT" SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=ComfyLive" --logger "console;verbosity=normal"
 
+# Print the whole Swarm metadata JSON of a saved image: the PNG `parameters` text chunk, or the JPG Exif UserComment.
+[script]
+metadata image:
+    "$PYTHON" -I - "$1" <<'EOF'
+    import io, json, sys
+    from PIL import Image
+    image = Image.open(sys.argv[1])
+    if image.format == "PNG":
+        text = image.info["parameters"]
+    else:
+        comment = image.getexif().get_ifd(0x8769)[0x9286]
+        text = next(t for t in (comment[8:].decode(e).strip("\0") for e in ("utf-16-be", "utf-16-le", "utf-8")) if t.startswith("{"))
+    print(json.dumps(json.loads(text), indent=2))
+    EOF
+
 # Run the real SwarmUI server from this tree against the running ComfyUI and the test models (after `just test` has written them), generate through its HTTP API and read the trace back from the saved images.
 # Twice: AddDebugData on (PNG and JPG outputs: the record matches the graph ComfyUI ran, the JPG record fits one EXIF segment) and off (no record in the metadata). Each server gets a fresh data folder under $APP_WORK.
 [script]
@@ -146,7 +161,8 @@ app:
     comfy = "http://127.0.0.1:" + os.environ["PORT"]
     base = "http://127.0.0.1:" + os.environ["APP_PORT"]
     dll = repo / "src/bin/Debug/net8.0/SwarmUI.dll"
-    size = 256
+    size = 1024
+    rect = tuple(v * size // 256 for v in (48, 64, 112, 160))
     failures = []
 
     def check(condition, message):
@@ -180,7 +196,7 @@ app:
         for x in range(size):
             pixels[x, y] = (x * 60 // (size - 1), 190 + y * 60 // (size - 1), 30, 255)
     mask = Image.new("RGBA", (size, size), (0, 0, 0, 255))
-    mask.paste((255, 255, 255, 255), (48, 64, 112, 160))
+    mask.paste((255, 255, 255, 255), rect)
 
     def png_metadata(raw):
         return json.loads(Image.open(io.BytesIO(raw)).info["parameters"])
@@ -219,9 +235,10 @@ app:
                     log.flush()
                     lines.put(line.decode(errors="replace"))
             lines.put(None)
-        threading.Thread(target=pump, daemon=True).start()
+        pump_thread = threading.Thread(target=pump, daemon=True)
+        pump_thread.start()
         wait_for(server, lines, " is now running.", 180)
-        return server, lines
+        return server, lines, pump_thread
 
     def wait_for(server, lines, needle, seconds):
         deadline = time.monotonic() + seconds
@@ -244,14 +261,16 @@ app:
         final_image = Image.open(io.BytesIO(final_raw)).convert("RGB")
         check(mask_image.size == final_image.size == (size, size), f"{label}: mask and final are {size}x{size} ({mask_image.size}, {final_image.size})")
         wrong_outside = wrong_inside = outside = inside = 0
+        left, top, right, bottom = rect
+        mask_pixels, final_pixels = mask_image.load(), final_image.load()
         for y in range(size):
             for x in range(size):
-                covered = mask_image.getpixel((x, y))[0]
-                near_edge = min(abs(x - 48), abs(x - 112), abs(y - 64), abs(y - 160)) <= 1
+                covered = mask_pixels[x, y][0]
+                near_edge = min(abs(x - left), abs(x - right), abs(y - top), abs(y - bottom)) <= 1
                 if covered >= 2 or near_edge:
                     continue
-                static = 48 <= x < 112 and 64 <= y < 160
-                difference = max(abs(a - b) for a, b in zip(final_image.getpixel((x, y)), pixels[x, y][:3]))
+                static = left <= x < right and top <= y < bottom
+                difference = max(abs(a - b) for a, b in zip(final_pixels[x, y], pixels[x, y][:3]))
                 if static:
                     inside += 1
                     wrong_inside += difference < 20
@@ -266,7 +285,7 @@ app:
         data = work / f"data-{label}"
         shutil.rmtree(data, ignore_errors=True)
         failures_before = len(failures)
-        server, lines = start(data, debug)
+        server, lines, pump_thread = start(data, debug)
         try:
             print(f"== {label}: SwarmUI serving at {base}, log {data / 'swarm.log'}")
             sid = json.loads(call(f"{base}/API/GetNewSession", {}))["session_id"]
@@ -289,8 +308,8 @@ app:
                 raise SystemExit("models are not where SwarmUI looks; stopping before a generation could try to download them")
             request = {"images": 1, "prompt": "a cat on a road <lora:qwen21-null:1> <segment:cat,1,0.5> a cat face", "model": dits[0], "width": size, "height": size, "steps": 2, "cfgscale": 1.0, "seed": 1,
                 "initimage": data_url(init), "initimagecreativity": 1.0, "maskimage": data_url(mask), "maskshrinkgrow": 8, "segmentmaskblur": 0, "segmentmaskgrow": 0, "savesegmentmask": True}
-            check(not debug or "imageformat" in ids, f"{label}: an imageformat parameter exists to request JPG")
-            formats = [("PNG", {})] + ([("JPG", {"imageformat": "JPG"})] if debug and "imageformat" in ids else [])
+            check("imageformat" in ids, f"{label}: an imageformat parameter exists to request JPG")
+            formats = [("PNG", {})] + ([("JPG", {"imageformat": "JPG"})] if "imageformat" in ids else [])
             for format, extra in formats:
                 reply = api("GenerateText2Image", sid, **request, **extra)
                 print(f"== {label} {format}: images {reply['images']}, backends {json.dumps(api('ListBackends', sid))}")
@@ -309,9 +328,11 @@ app:
                     meta = jpeg_metadata(raw)
                 extra_data = meta.get("sui_extra_data", {})
                 check(meta["sui_image_params"].get("model") in (dits[0], dits[0].removesuffix(".safetensors")), f"{label} {format}: metadata names the model {meta['sui_image_params'].get('model')}")
+                debug_keys = sorted(k for k in extra_data if k.startswith("debug"))
                 if not debug:
-                    check("debug_trace" not in extra_data, f"{label} {format}: no debug_trace in the metadata (keys {sorted(extra_data)})")
+                    check(not debug_keys, f"{label} {format}: no debug metadata (extra data keys {sorted(extra_data)})")
                     continue
+                check({"debug_trace", "debug_backend"} <= set(debug_keys), f"{label} {format}: debug metadata present {debug_keys}")
                 trace = extra_data.get("debug_trace")
                 check(isinstance(trace, dict), f"{label} {format}: debug_trace is in the saved image's metadata")
                 if not isinstance(trace, dict):
@@ -338,9 +359,13 @@ app:
                 server.wait(30)
             except subprocess.TimeoutExpired:
                 server.kill()
+            pump_thread.join(30)
 
     for debug in (True, False):
         run(debug)
+    logs = {label: (work / f"data-{label}/swarm.log").read_text(errors="replace") for label in ("debug", "plain")}
+    check("[WorkflowTrace " in logs["debug"], "the debug server logged its traces")
+    check("[WorkflowTrace " not in logs["plain"], "the plain server logged no trace")
     same = {name: Image.open(work / f"data-debug/debug-{name}.png").convert("RGBA").tobytes() == Image.open(work / f"data-plain/plain-{name}.png").convert("RGBA").tobytes() for name in ("final", "segment-mask")}
     check(all(same.values()), f"AddDebugData on and off give the same pixels: {same}")
     print(f"{len(failures)} failures")
