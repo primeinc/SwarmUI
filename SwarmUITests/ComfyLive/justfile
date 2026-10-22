@@ -1,6 +1,6 @@
 # Real ComfyUI on CPU for SwarmUITests ComfyLiveTests: the pinned ComfyUI, SwarmUI's Python dependencies and ExtraNodes,
 # the swarm_null_models hook in ./nodes, and a model folder the tests fill with zero-weight models.
-# `just setup` once, `just clipseg` once, `just start` in its own terminal, then `just test`.
+# `just setup` once, `just clipseg` once, `just start` in its own terminal, then `just test`; `just app` then drives the real SwarmUI server against the same ComfyUI and models.
 
 [windows]
 set shell := ['sh', '-cu']
@@ -15,6 +15,8 @@ export COMFY_COMMIT := '7ef81780f814dc25b4108163e70b22c011e968be'
 export CLIPSEG_REPO := 'mcmonkey/clipseg-rd64-refined-fp16'
 export CLIPSEG_COMMIT := '5de7a14cdcc31b84fa9ebea216e54fa880322812'
 export PORT := env('SWARMUI_COMFY_LIVE_PORT', '8189')
+export APP_PORT := env('SWARMUI_APP_LIVE_PORT', '7811')
+export APP_WORK := WORK / 'app'
 export PYTHON := WORK / if os_family() == 'windows' { 'venv/Scripts/python.exe' } else { 'venv/bin/python' }
 
 # Clone ComfyUI and check out the pinned commit.
@@ -127,3 +129,220 @@ test:
     echo "ComfyUI $(git -C "$WORK/ComfyUI" rev-parse HEAD)"
     uv pip sync --python "$PYTHON" --require-hashes --torch-backend cpu --check "$REPO/SwarmUITests/ComfyLive/requirements.lock.txt"
     SWARMUI_TEST_COMFY_URL="http://127.0.0.1:$PORT" SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=ComfyLive" --logger "console;verbosity=normal"
+
+# Run the real SwarmUI server from this tree against the running ComfyUI and the test models (after `just test` has written them), generate through its HTTP API and read the trace back from the saved images.
+# Twice: AddDebugData on (PNG and JPG outputs: the record matches the graph ComfyUI ran, the JPG record fits one EXIF segment) and off (no record in the metadata). Each server gets a fresh data folder under $APP_WORK.
+[script]
+app:
+    cd "$REPO"
+    dotnet build src/SwarmUI.csproj --configuration Debug
+    "$PYTHON" -I - <<'EOF'
+    import base64, io, json, os, pathlib, queue, shutil, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+    from PIL import Image
+
+    repo = pathlib.Path(os.environ["REPO"])
+    work = pathlib.Path(os.environ["APP_WORK"])
+    models = pathlib.Path(os.environ["WORK"]) / "models"
+    comfy = "http://127.0.0.1:" + os.environ["PORT"]
+    base = "http://127.0.0.1:" + os.environ["APP_PORT"]
+    dll = repo / "src/bin/Debug/net8.0/SwarmUI.dll"
+    size = 256
+    failures = []
+
+    def check(condition, message):
+        print(("ok   " if condition else "FAIL ") + message)
+        if not condition:
+            failures.append(message)
+
+    def call(url, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="GET" if body is None else "POST")
+        try:
+            with urllib.request.urlopen(request, timeout=900) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            raise SystemExit(f"{url}: HTTP {error.code}: {error.read().decode(errors='replace')}")
+
+    def api(route, sid, **body):
+        reply = json.loads(call(f"{base}/API/{route}", {"session_id": sid, **body}))
+        if "error" in reply:
+            raise SystemExit(f"{route}: {reply}")
+        return reply
+
+    def data_url(image):
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    init = Image.new("RGBA", (size, size))
+    pixels = init.load()
+    for y in range(size):
+        for x in range(size):
+            pixels[x, y] = (x * 60 // (size - 1), 190 + y * 60 // (size - 1), 30, 255)
+    mask = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    mask.paste((255, 255, 255, 255), (48, 64, 112, 160))
+
+    def png_metadata(raw):
+        return json.loads(Image.open(io.BytesIO(raw)).info["parameters"])
+
+    def jpeg_exif_segments(raw):
+        found, position = [], 2
+        while position < len(raw) and raw[position + 1] != 0xDA:
+            length = struct.unpack(">H", raw[position + 2:position + 4])[0]
+            if raw[position + 1] == 0xE1 and raw[position + 4:position + 10] == b"Exif\0\0":
+                found.append(length + 2)
+            position += 2 + length
+        return found
+
+    def jpeg_metadata(raw):
+        comment = Image.open(io.BytesIO(raw)).getexif().get_ifd(0x8769)[0x9286]
+        for encoding in ("utf-16-be", "utf-16-le", "utf-8"):
+            try:
+                return json.loads(comment[8:].decode(encoding).strip("\0"))
+            except ValueError:
+                pass
+        raise SystemExit(f"UserComment is not JSON in utf-16 or utf-8: {comment[:64]!r}")
+
+    def start(data, debug):
+        data.mkdir(parents=True)
+        (data / "Settings.fds").write_text("\n".join([
+            "IsInstalled: true", "InstallDate: 2026-10-22", "InstallVersion: live", "LaunchMode: none", f"AddDebugData: {str(debug).lower()}",
+            "Maintenance:", "    CheckForUpdates: false",
+            "Paths:", f"    ModelRoot: {models.as_posix()}", "    SDLoraFolder: loras", f"    OutputPath: {(data / 'Output').as_posix()}", ""]))
+        server = subprocess.Popen(["dotnet", str(dll), "--data_dir", str(data), "--settings_file", str(data / "Settings.fds"), "--backends_file", str(data / "Backends.fds"),
+            "--host", "127.0.0.1", "--port", os.environ["APP_PORT"], "--launch_mode", "none", "--loglevel", "Verbose"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        lines = queue.Queue()
+        def pump():
+            with open(data / "swarm.log", "wb") as log:
+                for line in server.stdout:
+                    log.write(line)
+                    log.flush()
+                    lines.put(line.decode(errors="replace"))
+            lines.put(None)
+        threading.Thread(target=pump, daemon=True).start()
+        wait_for(server, lines, " is now running.", 180)
+        return server, lines
+
+    def wait_for(server, lines, needle, seconds):
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                line = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                server.kill()
+                raise SystemExit(f"SwarmUI logged no line containing {needle!r} within {seconds} s")
+            if line is None:
+                raise SystemExit(f"SwarmUI exited with {server.wait()} before logging {needle!r}")
+            if "was taken, using" in line:
+                server.kill()
+                raise SystemExit(f"port {os.environ['APP_PORT']} is taken: {line.strip()}")
+            if needle in line:
+                return line
+
+    def pixel_oracle(label, mask_raw, final_raw):
+        mask_image = Image.open(io.BytesIO(mask_raw)).convert("RGB")
+        final_image = Image.open(io.BytesIO(final_raw)).convert("RGB")
+        check(mask_image.size == final_image.size == (size, size), f"{label}: mask and final are {size}x{size} ({mask_image.size}, {final_image.size})")
+        wrong_outside = wrong_inside = outside = inside = 0
+        for y in range(size):
+            for x in range(size):
+                covered = mask_image.getpixel((x, y))[0]
+                near_edge = min(abs(x - 48), abs(x - 112), abs(y - 64), abs(y - 160)) <= 1
+                if covered >= 2 or near_edge:
+                    continue
+                static = 48 <= x < 112 and 64 <= y < 160
+                difference = max(abs(a - b) for a, b in zip(final_image.getpixel((x, y)), pixels[x, y][:3]))
+                if static:
+                    inside += 1
+                    wrong_inside += difference < 20
+                else:
+                    outside += 1
+                    wrong_outside += difference > 2
+        check(outside > 1000 and wrong_outside == 0, f"{label}: {outside} pixels outside both masks equal the init image, {wrong_outside} wrong")
+        check(inside > 100 and wrong_inside == 0, f"{label}: {inside} pixels inside the static mask and outside the segment mask were redrawn, {wrong_inside} wrong")
+
+    def run(debug):
+        label = "debug" if debug else "plain"
+        data = work / f"data-{label}"
+        shutil.rmtree(data, ignore_errors=True)
+        failures_before = len(failures)
+        server, lines = start(data, debug)
+        try:
+            print(f"== {label}: SwarmUI serving at {base}, log {data / 'swarm.log'}")
+            sid = json.loads(call(f"{base}/API/GetNewSession", {}))["session_id"]
+            check(any(t["id"] == "comfyui_api" for t in api("ListBackendTypes", sid)["list"]), f"{label}: backend type comfyui_api exists")
+            backend = api("AddNewBackend", sid, type_id="comfyui_api")
+            api("EditBackend", sid, backend_id=int(backend["id"]), title="live comfy", settings={"Address": comfy})
+            print("   " + wait_for(server, lines, f"Comfy backend {backend['id']} loaded value set and parsed.", 120).strip())
+            params = api("ListT2IParams", sid)
+            ids = {p["id"] for p in params["list"]}
+            needed = ["prompt", "model", "width", "height", "steps", "cfgscale", "seed", "images", "initimage", "initimagecreativity", "maskimage", "maskshrinkgrow", "segmentmaskblur", "segmentmaskgrow", "savesegmentmask"]
+            if [n for n in needed if n not in ids]:
+                raise SystemExit(f"parameters missing from ListT2IParams: {[n for n in needed if n not in ids]}; format-like ids: {sorted(i for i in ids if 'format' in i)}")
+            names = {kind: [m[0] if isinstance(m, list) else m["name"] for m in entries] for kind, entries in params["models"].items()}
+            dits = [m for m in names["Stable-Diffusion"] if m.startswith("test/dm/")]
+            check(len(dits) == 1, f"{label}: one test diffusion model {dits}")
+            check(any(m.startswith("qwen3vl_8b_int8_convrot") for m in names["Clip"]), f"{label}: null text encoder is in the Clip set {names['Clip']}")
+            check(any(m.startswith("QwenImage/qwen_image_2.1_vae_bf16") for m in names["VAE"]), f"{label}: null VAE is in the VAE set {names['VAE']}")
+            check(any(m.startswith("qwen21-null") for m in names["LoRA"]), f"{label}: null LoRA is in the LoRA set {names['LoRA']}")
+            if len(failures) > failures_before:
+                raise SystemExit("models are not where SwarmUI looks; stopping before a generation could try to download them")
+            request = {"images": 1, "prompt": "a cat on a road <lora:qwen21-null:1> <segment:cat,1,0.5> a cat face", "model": dits[0], "width": size, "height": size, "steps": 2, "cfgscale": 1.0, "seed": 1,
+                "initimage": data_url(init), "initimagecreativity": 1.0, "maskimage": data_url(mask), "maskshrinkgrow": 8, "segmentmaskblur": 0, "segmentmaskgrow": 0, "savesegmentmask": True}
+            check(not debug or "imageformat" in ids, f"{label}: an imageformat parameter exists to request JPG")
+            formats = [("PNG", {})] + ([("JPG", {"imageformat": "JPG"})] if debug and "imageformat" in ids else [])
+            for format, extra in formats:
+                reply = api("GenerateText2Image", sid, **request, **extra)
+                print(f"== {label} {format}: images {reply['images']}, backends {json.dumps(api('ListBackends', sid))}")
+                check(len(reply["images"]) == 2, f"{label} {format}: the final image and the saved segment mask came back")
+                fetched = [call(f"{base}/{urllib.parse.quote(path)}") for path in reply["images"]]
+                mask_raw, raw = fetched[0], fetched[-1]
+                if format == "PNG":
+                    pixel_oracle(f"{label} {format}", mask_raw, raw)
+                    for name, content in (("segment-mask", mask_raw), ("final", raw)):
+                        (data / f"{label}-{name}.png").write_bytes(content)
+                if format == "PNG":
+                    meta = png_metadata(raw)
+                else:
+                    segments = jpeg_exif_segments(raw)
+                    check(len(segments) == 1 and segments[0] <= 65535, f"{label} {format}: one Exif APP1 segment, sizes {segments}")
+                    meta = jpeg_metadata(raw)
+                extra_data = meta.get("sui_extra_data", {})
+                check(meta["sui_image_params"].get("model") in (dits[0], dits[0].removesuffix(".safetensors")), f"{label} {format}: metadata names the model {meta['sui_image_params'].get('model')}")
+                if not debug:
+                    check("debug_trace" not in extra_data, f"{label} {format}: no debug_trace in the metadata (keys {sorted(extra_data)})")
+                    continue
+                trace = extra_data.get("debug_trace")
+                check(isinstance(trace, dict), f"{label} {format}: debug_trace is in the saved image's metadata")
+                if not isinstance(trace, dict):
+                    continue
+                print(f"   trace keys {sorted(trace)}")
+                check(bool(trace.get("log_key")), f"{label} {format}: log_key {trace.get('log_key')}")
+                print(f"   full_trace {json.dumps(trace.get('full_trace'))}")
+                if format == "JPG":
+                    print(f"   JPG record: {json.dumps({k: v for k, v in trace.items() if k != 'workflow'})[:600]}")
+                workflow = trace.get("workflow", {})
+                posted = workflow.get("posted") or {}
+                check(bool(workflow.get("sent_sha256")), f"{label} {format}: sent_sha256 {workflow.get('sent_sha256')}")
+                check(posted.get("matches_sent") is True and posted.get("sha256") == workflow.get("sent_sha256") and posted.get("backend") == "ComfyUIAPIBackend", f"{label} {format}: posted graph is the sent graph {posted}")
+                if format == "PNG":
+                    for key in ("type_errors", "input_errors", "classes_missing_from_object_info"):
+                        check(trace.get(key) == [], f"{label} {format}: {key} is empty {trace.get(key)}")
+                    nodes = trace["nodes"]
+                    nodes = set(nodes) if isinstance(nodes, dict) else {str(n["id"]) for n in nodes}
+                    check(len(trace["segments"]) == 1 and len(trace["samplers"]) >= 2, f"{label} {format}: {len(trace['segments'])} segment record, {len(trace['samplers'])} samplers")
+                    check(len(nodes) == 43, f"{label} {format}: the node table holds {len(nodes)} nodes, as many as the graph ComfyLiveTests sends for this request")
+        finally:
+            server.terminate()
+            try:
+                server.wait(30)
+            except subprocess.TimeoutExpired:
+                server.kill()
+
+    for debug in (True, False):
+        run(debug)
+    same = {name: Image.open(work / f"data-debug/debug-{name}.png").convert("RGBA").tobytes() == Image.open(work / f"data-plain/plain-{name}.png").convert("RGBA").tobytes() for name in ("final", "segment-mask")}
+    check(all(same.values()), f"AddDebugData on and off give the same pixels: {same}")
+    print(f"{len(failures)} failures")
+    sys.exit(1 if failures else 0)
+    EOF
