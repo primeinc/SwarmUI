@@ -27,3 +27,4 @@ av>=18.1.0
 transformers>=4.57.3
 pyopengl>=3.1.8
 ultralytics==8.3.197
+pip>=25.0
