@@ -30,8 +30,8 @@ public class ComfyLiveTests : SwarmUITest
     /// <summary>The ComfyUI model folder (extra_model_paths base_path) the null models are written into.</summary>
     public static string ModelRoot => Environment.GetEnvironmentVariable("SWARMUI_TEST_COMFY_MODELS")?.Replace('\\', '/');
 
-    /// <summary>Image width and height.</summary>
-    public const int Size = 256;
+    /// <summary>Image width and height: Qwen Image 2.1's class standard size, a multiple of its resolution precision of 32. The model is built for 2048 (a scale-16 VAE) and docs/Model Support.md calls 1024 comfortable for quick generations.</summary>
+    public const int Size = 1024;
 
     /// <summary>Name of the null LoRA.</summary>
     public const string LoraName = "qwen21-null";
@@ -39,8 +39,8 @@ public class ComfyLiveTests : SwarmUITest
     /// <summary>Longest a live job may take.</summary>
     public static readonly TimeSpan JobDeadline = TimeSpan.FromMinutes(20);
 
-    /// <summary>The static inpaint mask rectangle, in pixels.</summary>
-    public static readonly (int X, int Y, int Width, int Height) MaskRect = (48, 64, 64, 96);
+    /// <summary>The static inpaint mask rectangle, in pixels: edges on multiples of 16, the VAE's downscale, so the latent noise mask covers exactly these pixels.</summary>
+    public static readonly (int X, int Y, int Width, int Height) MaskRect = (Size * 3 / 16, Size / 4, Size / 4, Size * 3 / 8);
 
     /// <summary>Init image pixel: red rises 0-60 left to right, green 190-250 top to bottom, blue 30, so no pixel is near the mid-gray a zero-weight VAE decodes to.</summary>
     public static Rgba32 InitPixel(int x, int y) => new((byte)(x * 60 / (Size - 1)), (byte)(190 + (y * 60 / (Size - 1))), 30, 255);
@@ -439,7 +439,7 @@ public class ComfyLiveTests : SwarmUITest
     };
 
     /// <summary>The known segment mask of <see cref="TestSegmentPasteBackOfASyntheticCrop"/>: off-centre and not square, so a swapped axis, a centred paste or a paste at the mask's own corner instead of the crop bounds' corner each land the color elsewhere.</summary>
-    public static readonly (int X, int Y, int Width, int Height) KnownSegmentRect = (160, 40, 72, 40);
+    public static readonly (int X, int Y, int Width, int Height) KnownSegmentRect = (Size * 5 / 8, Size * 5 / 32, Size * 9 / 32, Size * 5 / 32);
 
     /// <summary>Returns true if a pixel is inside <see cref="KnownSegmentRect"/>.</summary>
     public static bool InKnownSegment(int x, int y) => x >= KnownSegmentRect.X && x < KnownSegmentRect.X + KnownSegmentRect.Width && y >= KnownSegmentRect.Y && y < KnownSegmentRect.Y + KnownSegmentRect.Height;
