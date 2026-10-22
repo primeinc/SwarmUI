@@ -15,7 +15,6 @@ using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using static SwarmUITests.NullModels;
 
 namespace SwarmUITests;
 
@@ -34,7 +33,7 @@ public class ComfyLiveTests : SwarmUITest
     public const int Size = 1024;
 
     /// <summary>Name of the null LoRA.</summary>
-    public const string LoraName = "qwen21-null";
+    public const string LoraName = NullModelFiles.LoraName;
 
     /// <summary>Longest a live job may take.</summary>
     public static readonly TimeSpan JobDeadline = TimeSpan.FromMinutes(20);
@@ -86,11 +85,7 @@ public class ComfyLiveTests : SwarmUITest
         Program.ServerSettings.AddDebugData = true;
         InitImage = MakeImage(InitPixel);
         MaskImage = MakeImage((x, y) => InMaskRect(x, y) ? new Rgba32(255, 255, 255, 255) : new Rgba32(0, 0, 0, 255));
-        T2IModel model = Qwen21Model();
-        WriteQwen21DiT($"{ModelRoot}/diffusion_models/{model.Name}", Qwen21Dims.Micro);
-        WriteQwen21Lora($"{ModelRoot}/loras/{LoraName}.safetensors", Qwen21Dims.Micro, 4);
-        WriteQwen3VLTextEncoder($"{ModelRoot}/text_encoders/qwen3vl_8b_int8_convrot.safetensors", Qwen3VLDims.Null);
-        WriteQwen21Vae($"{ModelRoot}/vae/QwenImage/qwen_image_2.1_vae_bf16.safetensors", Qwen21VaeDims.Null);
+        NullModelFiles.WriteQwen21LiveSet(ModelRoot, Qwen21Model().Name);
         Assert.That(File.Exists($"{ModelRoot}/clipseg/clipseg-rd64-refined-fp16-safetensors/model.safetensors"), "CLIPSeg model present (run 'just clipseg' in SwarmUITests/ComfyLive)");
     }
 

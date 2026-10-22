@@ -25,6 +25,13 @@ public class NullModelTests : SwarmUITest
     /// <summary>Family folder of the committed Qwen Image 2.1 headers.</summary>
     public const string Family = "qwen-image-2.1";
 
+    /// <summary>The name <see cref="NullModelFiles.DiffusionModelName"/> writes the zero-weight diffusion model under is the name Swarm gives the harness's qwen-image-2.1 model.</summary>
+    [Test]
+    public void TestLiveDiffusionModelNameIsTheHarnessModel()
+    {
+        Assert.That(WorkflowGeneratorHarness.ModelFor(T2IModelClassSorter.ModelClasses["qwen-image-2.1"], true).Name, Is.EqualTo(NullModelFiles.DiffusionModelName));
+    }
+
     /// <summary>Returns the keys whose rule-derived shape differs from the real shape.</summary>
     public static List<string> Mismatches(List<Tensor> tensors, Func<Tensor, long[]> rule)
     {
