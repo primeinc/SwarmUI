@@ -109,6 +109,8 @@ public class GeneratorIdentity : SwarmUITest
     /// Returns one line per case: label, the bytes a counted run allocated on this thread, and the least milliseconds a measured run took.
     /// No GC runs in the region, so no gen2 GC trims the pools (.NET 8 SharedArrayPool.Trim runs after each gen2 GC and, under high memory pressure, drops every thread's arrays) and every rent in a measured run finds an array.
     /// Throws if a GC ran in a region, a pool allocated or dropped an array on this thread in a measured run (<see cref="PoolRefills.Events"/>), or counted runs allocated different byte counts: each is a measurement that does not hold for the code alone.
+    /// With AddDebugData on, counted runs may differ by one run: a traced run adds its new texts to the trace's process-wide hash caches (ConditionalWeakTable, keyed by reference), whose dead entries no GC clears inside the region,
+    /// and the run that fills one allocates its rebuilt container (a 256-entry container is 5,224 bytes, the extra one of three traced runs allocated); the count at least two runs agree on is reported, and the runs are printed.
     /// Counts repeat only with tiered compilation off (DOTNET_TieredCompilation=0, as the justfile runs it): a method tiering up between runs changes what they allocate.
     /// A run is the dump's work for the case: build the input, generate, build the input again, create the workflow text to send, and write the saved metadata text.</summary>
     public static List<string> MeasureCosts(List<(string Label, Func<T2IParamInput> Make)> cases, IEnumerable<int> sample, string[] features)
@@ -183,7 +185,13 @@ public class GeneratorIdentity : SwarmUITest
                 }
                 if (bytes.Distinct().Count() != 1)
                 {
-                    throw new InvalidOperationException($"Cost of {cases[i].Label} is not repeatable: runs with full-length prefixes allocated {bytes.JoinString(", ")} bytes.");
+                    long[] agreed = [.. bytes.GroupBy(b => b).Where(g => g.Count() >= 2).Select(g => g.Key)];
+                    if (!Program.ServerSettings.AddDebugData || agreed.Length != 1)
+                    {
+                        throw new InvalidOperationException($"Cost of {cases[i].Label} is not repeatable: runs with full-length prefixes allocated {bytes.JoinString(", ")} bytes.");
+                    }
+                    TestContext.Out.WriteLine($"COST {cases[i].Label}: traced runs allocated {bytes.JoinString(", ")} bytes; reporting {agreed[0]}, the count at least two runs agree on");
+                    bytes = [agreed[0]];
                 }
                 result.Add($"{cases[i].Label}\t{bytes[0]}\t{ticks * 1000.0 / Stopwatch.Frequency:0.000}");
             }
