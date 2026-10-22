@@ -1,6 +1,6 @@
-# Real ComfyUI on CPU for SwarmUITests ComfyLiveTests: the pinned ComfyUI, SwarmUI's Python dependencies and ExtraNodes,
-# the swarm_null_models hook in ./nodes, and a model folder the tests fill with zero-weight models.
-# `just setup` once, `just clipseg` once, `just start` in its own terminal, then `just test`; `just app` then drives the real SwarmUI server against the same ComfyUI and models.
+# Real ComfyUI on CPU for SwarmUITests: the pinned ComfyUI with its hash-locked Python environment in ./venv inside its folder (where SwarmUI's self-start backend looks), SwarmUI's ExtraNodes,
+# the swarm_null_models hook in ./nodes, and a model folder of zero-weight models.
+# `just app` starts only SwarmUI, which launches ComfyUI itself through its self-start backend. `just start` then `just test` run the ComfyLive tests against a ComfyUI started by hand.
 
 [windows]
 set shell := ['sh', '-cu']
@@ -17,7 +17,7 @@ export CLIPSEG_COMMIT := '5de7a14cdcc31b84fa9ebea216e54fa880322812'
 export PORT := env('SWARMUI_COMFY_LIVE_PORT', '8189')
 export APP_PORT := env('SWARMUI_APP_LIVE_PORT', '7811')
 export APP_WORK := WORK / 'app'
-export PYTHON := WORK / if os_family() == 'windows' { 'venv/Scripts/python.exe' } else { 'venv/bin/python' }
+export PYTHON := WORK / if os_family() == 'windows' { 'ComfyUI/venv/Scripts/python.exe' } else { 'ComfyUI/venv/bin/python' }
 
 # Clone ComfyUI and check out the pinned commit.
 [script]
@@ -35,11 +35,18 @@ comfy:
 lock: comfy
     uv pip compile requirements.in "$WORK/ComfyUI/requirements.txt" --generate-hashes --no-annotate --python-version 3.13 --python-platform x86_64-pc-windows-msvc --torch-backend cpu --custom-compile-command "just lock" -o requirements.lock.txt
 
-# Create the venv and make it exactly requirements.lock.txt, every file checked against its hash.
+# Create the venv in ComfyUI's folder, where SwarmUI's self-start backend looks for its Python, and make it exactly requirements.lock.txt, every file checked against its hash.
 [script]
 setup: comfy
-    uv venv --quiet --allow-existing --python 3.13 "$WORK/venv"
+    uv venv --quiet --allow-existing --python 3.13 "$WORK/ComfyUI/venv"
     uv pip sync --python "$PYTHON" --require-hashes --torch-backend cpu requirements.lock.txt
+
+# Write the zero-weight Qwen Image 2.1 files (micro DiT, LoRA, null text encoder, null VAE) into the test model folder; no server runs.
+[script]
+models:
+    mkdir -p "$WORK/models"
+    cd "$REPO"
+    SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=NullModelFiles" --logger "console;verbosity=normal"
 
 # Write the extra_model_paths YAML: the test model folder (with the clipseg folder ComfyUISelfStartBackend forwards), SwarmUI's ExtraNodes and the null-model hook.
 [script]
@@ -145,20 +152,31 @@ metadata image:
     print(json.dumps(json.loads(text), indent=2))
     EOF
 
-# Run the real SwarmUI server from this tree against the running ComfyUI and the test models (after `just test` has written them), generate through its HTTP API and read the trace back from the saved images.
-# Twice: AddDebugData on (PNG and JPG outputs: the record matches the graph ComfyUI ran, the JPG record fits one EXIF segment) and off (no record in the metadata). Each server gets a fresh data folder under $APP_WORK.
+# Serve the data folder of one `just app` run (debug or plain) in the foreground at the server's default log level, to look at its images in the web UI.
 [script]
-app:
+view run='debug':
+    cd "$REPO"
+    data="$APP_WORK/data-$1"
+    exec dotnet src/bin/Debug/net8.0/SwarmUI.dll --data_dir "$data" --settings_file "$data/Settings.fds" --backends_file "$data/Backends.fds" --host 127.0.0.1 --port "$APP_PORT" --launch_mode none
+
+# Run the real SwarmUI server from this tree and nothing else: it launches the pinned ComfyUI itself through its self-start backend, on the test models. Generate through its HTTP API and read the trace back from the saved images.
+# Twice: AddDebugData on (PNG and JPG outputs: the record matches the request and the graph that was posted, the JPG record fits one EXIF segment) and off (no debug metadata, no trace in the log). Each server gets a fresh data folder under $APP_WORK,
+# runs at log level Verbose with SaveLogToFile on (the defaults, Info and off, keep Debug lines such as the trace's only in memory), must find every Python package it requires already installed, and is shut down through /API/ShutdownServer,
+# which must take its ComfyUI down with it and leave the trace lines in Swarm's log file.
+[script]
+app: setup models clipseg
+    mkdir -p "$WORK/ComfyUI/custom_nodes"
+    cp -R "$NODES/swarm_null_models" "$WORK/ComfyUI/custom_nodes/"
     cd "$REPO"
     dotnet build src/SwarmUI.csproj --configuration Debug
     "$PYTHON" -I - <<'EOF'
-    import base64, io, json, os, pathlib, queue, shutil, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+    import base64, io, json, os, pathlib, queue, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
     from PIL import Image
 
     repo = pathlib.Path(os.environ["REPO"])
     work = pathlib.Path(os.environ["APP_WORK"])
     models = pathlib.Path(os.environ["WORK"]) / "models"
-    comfy = "http://127.0.0.1:" + os.environ["PORT"]
+    comfy_dir = pathlib.Path(os.environ["WORK"]) / "ComfyUI"
     base = "http://127.0.0.1:" + os.environ["APP_PORT"]
     dll = repo / "src/bin/Debug/net8.0/SwarmUI.dll"
     size = 1024
@@ -224,6 +242,8 @@ app:
         (data / "Settings.fds").write_text("\n".join([
             "IsInstalled: true", "InstallDate: 2026-10-22", "InstallVersion: live", "LaunchMode: none", f"AddDebugData: {str(debug).lower()}",
             "Maintenance:", "    CheckForUpdates: false",
+            "Logs:", "    SaveLogToFile: true",
+            "Performance:", "    AllowGpuSpecificOptimizations: false",
             "Paths:", f"    ModelRoot: {models.as_posix()}", "    SDLoraFolder: loras", f"    OutputPath: {(data / 'Output').as_posix()}", ""]))
         server = subprocess.Popen(["dotnet", str(dll), "--data_dir", str(data), "--settings_file", str(data / "Settings.fds"), "--backends_file", str(data / "Backends.fds"),
             "--host", "127.0.0.1", "--port", os.environ["APP_PORT"], "--launch_mode", "none", "--loglevel", "Verbose"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -256,6 +276,13 @@ app:
             if needle in line:
                 return line
 
+    def port_open(port):
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+            return True
+        except OSError:
+            return False
+
     def pixel_oracle(label, mask_raw, final_raw):
         mask_image = Image.open(io.BytesIO(mask_raw)).convert("RGB")
         final_image = Image.open(io.BytesIO(final_raw)).convert("RGB")
@@ -286,13 +313,18 @@ app:
         shutil.rmtree(data, ignore_errors=True)
         failures_before = len(failures)
         server, lines, pump_thread = start(data, debug)
+        sid = comfy_port = None
+        log_keys = []
         try:
             print(f"== {label}: SwarmUI serving at {base}, log {data / 'swarm.log'}")
             sid = json.loads(call(f"{base}/API/GetNewSession", {}))["session_id"]
-            check(any(t["id"] == "comfyui_api" for t in api("ListBackendTypes", sid)["list"]), f"{label}: backend type comfyui_api exists")
-            backend = api("AddNewBackend", sid, type_id="comfyui_api")
-            api("EditBackend", sid, backend_id=int(backend["id"]), title="live comfy", settings={"Address": comfy})
-            print("   " + wait_for(server, lines, f"Comfy backend {backend['id']} loaded value set and parsed.", 120).strip())
+            check(any(t["id"] == "comfyui_selfstart" for t in api("ListBackendTypes", sid)["list"]), f"{label}: backend type comfyui_selfstart exists")
+            backend = api("AddNewBackend", sid, type_id="comfyui_selfstart")
+            api("EditBackend", sid, backend_id=int(backend["id"]), title="live comfy", settings={"StartScript": (comfy_dir / "main.py").as_posix(), "ExtraArgs": "--cpu --cache-none --disable-auto-launch", "FrontendVersion": "None", "EnablePreviews": "false", "AutoRestart": False})
+            launched = wait_for(server, lines, f"Self-Start ComfyUI-{backend['id']} on port ", 300)
+            comfy_port = int(launched.split(" on port ")[1].split(" ")[0])
+            print("   " + launched.strip())
+            print("   " + wait_for(server, lines, f"Comfy backend {backend['id']} loaded value set and parsed.", 600).strip())
             params = api("ListT2IParams", sid)
             ids = {p["id"] for p in params["list"]}
             needed = ["prompt", "model", "width", "height", "steps", "cfgscale", "seed", "images", "initimage", "initimagecreativity", "maskimage", "maskshrinkgrow", "segmentmaskblur", "segmentmaskgrow", "savesegmentmask"]
@@ -340,12 +372,27 @@ app:
                 print(f"   trace keys {sorted(trace)}")
                 check(bool(trace.get("log_key")), f"{label} {format}: log_key {trace.get('log_key')}")
                 print(f"   full_trace {json.dumps(trace.get('full_trace'))}")
+                check(str(trace.get("full_trace")).endswith("printed to the console and saved to the log file"), f"{label} {format}: full_trace says a Verbose server with SaveLogToFile prints and saves the trace's log line")
+                log_keys.append(trace.get("log_key"))
+                leaks = [text for text in ("a cat on a road", "a cat face", "<segment:", "<lora:") if text in json.dumps(trace)]
+                check(not leaks, f"{label} {format}: no prompt text in debug_trace {leaks}")
                 if format == "JPG":
                     print(f"   JPG record: {json.dumps({k: v for k, v in trace.items() if k != 'workflow'})[:600]}")
+                if format == "PNG":
+                    stored = [line for line in Image.open(io.BytesIO(raw)).info["parameters"].split("\n") if '"debug_trace":' in line]
+                    check(len(stored) == 1 and json.loads(stored[0].split('"debug_trace":', 1)[1].strip().rstrip(",")) == trace, f"{label} {format}: debug_trace is stored on one line of the PNG text, {len(stored)} line(s) hold it")
+                    check(trace["model"]["name"] == dits[0].removesuffix(".safetensors") and trace["model"]["class"] == "qwen-image-2.1", f"{label} {format}: trace model {trace['model']}")
+                    check([(lora["lora"], lora["weight"], lora["kind"]) for lora in trace["loras"]] == [("qwen21-null", 1.0, "loader")], f"{label} {format}: trace LoRAs {trace['loras']}")
+                    base_call = trace["samplers"][0]["call"]
+                    check((base_call["stage"], base_call["steps"], base_call["seed"], base_call["cfg"]) == ("base", request["steps"], request["seed"], request["cfgscale"]), f"{label} {format}: base sampler call {base_call}")
+                    segment = trace["segments"][0]
+                    segment_calls = [s["call"] for s in trace["samplers"] if s.get("call", {}).get("stage") == segment["stage"]]
+                    check((segment["threshold"], segment["creativity"]) == (0.5, 1.0) and bool(segment["crop"]["pasted_by"]) and [c["steps"] for c in segment_calls] == [request["steps"]], f"{label} {format}: segment record {json.dumps({k: segment[k] for k in ('stage', 'threshold', 'creativity')})}, its sampler calls {segment_calls}")
+                    check(sorted(m["param"] for m in trace["media"].values()) == ["initimage", "maskimage"], f"{label} {format}: trace media {trace['media']}")
                 workflow = trace.get("workflow", {})
                 posted = workflow.get("posted") or {}
                 check(bool(workflow.get("sent_sha256")), f"{label} {format}: sent_sha256 {workflow.get('sent_sha256')}")
-                check(posted.get("matches_sent") is True and posted.get("sha256") == workflow.get("sent_sha256") and posted.get("backend") == "ComfyUIAPIBackend", f"{label} {format}: posted graph is the sent graph {posted}")
+                check(posted.get("matches_sent") is True and posted.get("sha256") == workflow.get("sent_sha256") and posted.get("backend") == "ComfyUISelfStartBackend", f"{label} {format}: posted graph is the sent graph {posted}")
                 if format == "PNG":
                     for key in ("type_errors", "input_errors", "classes_missing_from_object_info"):
                         check(trace.get(key) == [], f"{label} {format}: {key} is empty {trace.get(key)}")
@@ -354,18 +401,33 @@ app:
                     check(len(trace["segments"]) == 1 and len(trace["samplers"]) >= 2, f"{label} {format}: {len(trace['segments'])} segment record, {len(trace['samplers'])} samplers")
                     check(len(nodes) == 43, f"{label} {format}: the node table holds {len(nodes)} nodes, as many as the graph ComfyLiveTests sends for this request")
         finally:
-            server.terminate()
+            if sid is not None:
+                try:
+                    api("ShutdownServer", sid)
+                except (OSError, SystemExit):
+                    pass
             try:
-                server.wait(30)
+                server.wait(120)
             except subprocess.TimeoutExpired:
                 server.kill()
             pump_thread.join(30)
+        if comfy_port is not None:
+            check(not port_open(comfy_port), f"{label}: ComfyUI on port {comfy_port} is gone after SwarmUI shut down")
+        log_files = sorted((data / "Logs").rglob("*.log"))
+        saved = "".join(path.read_text(errors="replace") for path in log_files)
+        if debug:
+            check(bool(log_keys) and all(f"[WorkflowTrace {key}]" in saved for key in log_keys), f"{label}: SwarmUI's log file {[p.relative_to(data).as_posix() for p in log_files]} holds the trace line of every image's log_key {log_keys}")
+        else:
+            check(bool(saved) and "[WorkflowTrace " not in saved, f"{label}: SwarmUI's log file {[p.relative_to(data).as_posix() for p in log_files]} holds no trace line")
 
     for debug in (True, False):
         run(debug)
     logs = {label: (work / f"data-{label}/swarm.log").read_text(errors="replace") for label in ("debug", "plain")}
     check("[WorkflowTrace " in logs["debug"], "the debug server logged its traces")
     check("[WorkflowTrace " not in logs["plain"], "the plain server logged no trace")
+    for label, log in logs.items():
+        installs = [line.strip() for line in log.splitlines() if "appears to not contain pip" in line or ("[Load " in line and line.rstrip().endswith(" for ComfyUI..."))]
+        check(not installs, f"{label}: SwarmUI found every package it requires in the locked environment and ran no pip install {installs}")
     same = {name: Image.open(work / f"data-debug/debug-{name}.png").convert("RGBA").tobytes() == Image.open(work / f"data-plain/plain-{name}.png").convert("RGBA").tobytes() for name in ("final", "segment-mask")}
     check(all(same.values()), f"AddDebugData on and off give the same pixels: {same}")
     print(f"{len(failures)} failures")
