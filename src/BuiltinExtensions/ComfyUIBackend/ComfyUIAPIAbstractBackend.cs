@@ -323,6 +323,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         }
         try
         {
+            WorkflowTrace.RecordPosted(user_input, workflow, GetType().Name);
             workflow = $"{{\"prompt\": {workflow}, \"client_id\": \"{id}\"}}";
             if (Logs.MinimumLevel <= Logs.LogLevel.Verbose)
             {
@@ -818,7 +819,37 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
-    public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null)
+    /// <summary>Returns the ComfyUI workflow JSON text for an input: its custom or raw workflow with the "${...}" tags filled, or a workflow built by <see cref="WorkflowGenerator"/>.
+    /// With <see cref="Settings.AddDebugData"/> enabled, the input's ExtraMeta gets the <see cref="WorkflowTrace"/> record of how the workflow was built and what is sent, with every parameter read made here:
+    /// a generated workflow's record lists the reads before and during generation under "params_read" and those made while preparing the text to send under "workflow"."params_read"; a custom or raw workflow's record lists the reads that filled it.</summary>
+    /// <param name="user_input">The input to generate for.</param>
+    /// <param name="initImageFixer">Applied to the workflow text before it is returned, eg to upload images a backend cannot take inline.</param>
+    /// <param name="ModelFolderFormat">Folder separator format for model names, or null for the system default.</param>
+    /// <param name="features">Backend feature flags for the generator.</param>
+    /// <param name="objectInfo">Optional ComfyUI object_info, used by the trace to check link types and declared inputs.</param>
+    public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null, JObject objectInfo = null)
+    {
+        WorkflowTrace trace = null;
+        if (Program.ServerSettings.AddDebugData)
+        {
+            trace = new(null) { ObjectInfo = objectInfo };
+            user_input.ParamReadTracker = trace.OnParamRead;
+        }
+        try
+        {
+            return CreateWorkflowInner(user_input, initImageFixer, ModelFolderFormat, features, trace);
+        }
+        finally
+        {
+            if (trace is not null)
+            {
+                user_input.ParamReadTracker = null;
+            }
+        }
+    }
+
+    /// <summary>Implements <see cref="CreateWorkflow"/>, recording into the trace when it is non-null.</summary>
+    private static string CreateWorkflowInner(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat, HashSet<string> features, WorkflowTrace trace)
     {
         // note: gently break any standard embed with a space, *require* swarm format embeds, as comfy's raw syntax has unwanted behaviors
         user_input.ProcessPromptEmbeds(x => $"<embed:{x}>", p => p.Replace("embedding:", "embedding :", StringComparison.OrdinalIgnoreCase));
@@ -911,11 +942,26 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 return Utilities.EscapeJsonString(filled);
             }, false);
             Logs.Verbose("Workflow filled.");
+            if (trace is not null)
+            {
+                WorkflowTrace.RecordExternalWorkflow(user_input, user_input.InternalSet.ValuesInput.ContainsKey(ComfyUIBackendExtension.CustomWorkflowParam.Type.ID) ? "custom" : "raw", workflow, trace.ParamReads);
+            }
         }
         else
         {
-            workflow = new WorkflowGenerator() { UserInput = user_input, ModelFolderFormat = ModelFolderFormat, Features = features ?? [] }.Generate().ToString();
-            workflow = initImageFixer(workflow);
+            WorkflowGenerator generator = new() { UserInput = user_input, ModelFolderFormat = ModelFolderFormat, Features = features ?? [] };
+            if (trace is not null)
+            {
+                trace.Gen = generator;
+                generator.Trace = trace;
+            }
+            string generated = generator.Generate().ToString();
+            if (trace is not null)
+            {
+                user_input.ParamReadTracker = trace.OnSendParamRead;
+            }
+            workflow = initImageFixer(generated);
+            trace?.RecordSent(workflow, generated);
         }
         return workflow;
     }
@@ -993,7 +1039,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return workflow;
         }
-        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures], RawObjectInfo);
         try
         {
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);

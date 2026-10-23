@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
 using SwarmUI.Accounts;
+using SwarmUI.Core;
 using SwarmUI.Utils;
 using ISImage = SixLabors.ImageSharp.Image;
 using Image = SwarmUI.Utils.Image;
@@ -16,6 +17,58 @@ namespace SwarmUI.Text2Image;
 /// Called by <see cref="T2IEngine"/>, should not be called directly.</summary>
 public class T2IMultiStepObjectBuilder
 {
+    /// <summary>ExtraMeta key for the debug record of how an object prompt's image was composed. Set when <see cref="Settings.AddDebugData"/> is enabled.</summary>
+    public const string TraceMetadataKey = "debug_trace_objects";
+
+    /// <summary>Returns "#" plus the short hash of some text (<see cref="MetadataHelper.Sha8(string)"/>), so prompt text is never written raw into debug records.</summary>
+    public static string TraceHash(string text) => $"#{MetadataHelper.Sha8(text)}";
+
+    /// <summary>Returns a box as "x", "y", "width" and "height".</summary>
+    public static JObject TraceBox(JToken x, JToken y, JToken width, JToken height) => new() { ["x"] = x, ["y"] = y, ["width"] = width, ["height"] = height };
+
+    /// <summary>Describes one object pass, named by the object's 1-based position among the prompt's objects (the parts carry no context ID here, the user's prompt has none): the object's region as fractions of the image, its box in pixels, the crop of the base image that is inpainted, the inpaint size, and the mask's box inside the inpaint. The crop box is also where the result is pasted back, resized to the crop size.</summary>
+    public static JObject TraceObjectPass(int objectNumber, PromptRegion.Part part, int pixelX, int pixelY, int pixelWidth, int pixelHeight, int extraX, int extraY, int extraWidth, int extraHeight, int fixedWidth, int fixedHeight, double scaleWidth, double scaleHeight)
+    {
+        return new JObject()
+        {
+            ["pass"] = $"object{objectNumber}",
+            ["prompt"] = $"@object{objectNumber}{TraceHash(part.Prompt)}",
+            ["region"] = TraceBox(part.X, part.Y, part.Width, part.Height),
+            ["object_px"] = TraceBox(pixelX, pixelY, pixelWidth, pixelHeight),
+            ["crop_px"] = TraceBox(extraX, extraY, extraWidth, extraHeight),
+            ["inpaint_size"] = new JObject() { ["width"] = fixedWidth, ["height"] = fixedHeight },
+            ["mask_px"] = TraceBox((int)((pixelX - extraX) * scaleWidth), (int)((pixelY - extraY) * scaleHeight), (int)(pixelWidth * scaleWidth), (int)(pixelHeight * scaleHeight)),
+            ["creativity"] = part.Strength2
+        };
+    }
+
+    /// <summary>Adds the outcome of a finished pass to its debug record: the seed and model used, the pass's own workflow trace identity and log key if its backend recorded one, and the "result": the image's "width", "height", "raw_sha8" hash and "mime" type,
+    /// or an "error" saying why there is no image to measure. The size comes from the image's decode (<see cref="ImageFile.ToIS"/>), which composing the image uses next, so the record adds no image parsing.</summary>
+    public static void TracePassResult(JObject passTrace, T2IParamInput passInput, MediaFile result)
+    {
+        passTrace["seed"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Seed.Type.ID) is long seed ? seed : null;
+        passTrace["model"] = passInput.InternalSet.ValuesInput.GetValueOrDefault(T2IParamTypes.Model.Type.ID) is T2IModel model ? T2IParamTypes.CleanModelName(model.Name) : null;
+        JObject passRecord = passInput.ExtraMeta.GetValueOrDefault(MetadataHelper.WorkflowTraceKey) as JObject;
+        passTrace["workflow"] = passRecord?["workflow"]?.DeepClone();
+        passTrace["log_key"] = passRecord?["log_key"]?.DeepClone();
+        if (result is ImageFile img)
+        {
+            try
+            {
+                ISImage decoded = img.ToIS;
+                passTrace["result"] = new JObject() { ["width"] = decoded.Width, ["height"] = decoded.Height, ["raw_sha8"] = MetadataHelper.Sha8(img.RawData), ["mime"] = img.Type.MimeType };
+            }
+            catch (Exception ex)
+            {
+                passTrace["result"] = new JObject() { ["error"] = $"unreadable image ({ex.GetType().Name})", ["raw_sha8"] = MetadataHelper.Sha8(img.RawData ?? []), ["mime"] = img.Type?.MimeType };
+            }
+        }
+        else
+        {
+            passTrace["result"] = result is null ? new JObject() { ["error"] = "no output" } : new JObject() { ["error"] = "not an image", ["mime"] = result.Type?.MimeType };
+        }
+    }
+
     public static async Task<Image> CreateFullImage(string prompt, T2IParamInput user_input, string batchId, Session.GenClaim claim, Action<JObject> output, Action<string> setError, bool isWS, float backendTimeoutMin)
     {
         int obj = 0;
@@ -35,7 +88,20 @@ public class T2IMultiStepObjectBuilder
         {
             return null;
         }
+        T2IParamInput outerInput = user_input;
         user_input = user_input.Clone();
+        JArray tracePasses = null;
+        if (Program.ServerSettings.AddDebugData)
+        {
+            tracePasses = [];
+            outerInput.ExtraMeta[TraceMetadataKey] = new JObject()
+            {
+                ["version"] = 1,
+                ["source"] = "multistep-objects",
+                ["note"] = "the base image is generated, then each object's crop is inpainted by its own generation and pasted back by Swarm; each pass's own workflow trace is in the server log under its log_key",
+                ["passes"] = tracePasses
+            };
+        }
         if (user_input.TryGet(T2IParamTypes.AltResolutionHeightMult, out _))
         {
             user_input.Set(T2IParamTypes.Height, user_input.GetImageHeight());
@@ -55,6 +121,12 @@ public class T2IMultiStepObjectBuilder
             basicInput.Remove(controlnet.Strength);
         }
         MediaFile file = await createImageDirect(basicInput);
+        if (tracePasses is not null)
+        {
+            JObject baseTrace = new() { ["pass"] = "base", ["removed_params"] = "refinermodel, refinerupscale, refinermethod, controlnet models and strengths" };
+            TracePassResult(baseTrace, basicInput, file);
+            tracePasses.Add(baseTrace);
+        }
         if (file is not ImageFile img)
         {
             return null;
@@ -103,6 +175,12 @@ public class T2IMultiStepObjectBuilder
             objInput.Set(T2IParamTypes.Width, fixedWidth);
             objInput.Set(T2IParamTypes.Height, fixedHeight);
             MediaFile objFile = await createImageDirect(objInput);
+            if (tracePasses is not null)
+            {
+                JObject passTrace = TraceObjectPass(Array.IndexOf(objects, part) + 1, part, pixelX, pixelY, pixelWidth, pixelHeight, extraX, extraY, extraWidth, extraHeight, fixedWidth, fixedHeight, scaleWidth, scaleHeight);
+                TracePassResult(passTrace, objInput, objFile);
+                tracePasses.Add(passTrace);
+            }
             if (objFile is not ImageFile objImg)
             {
                 return null;
@@ -115,6 +193,11 @@ public class T2IMultiStepObjectBuilder
                 output(new JObject() { ["image"] = "data:image/png;base64," + new Image(liveImg).AsBase64, ["batch_index"] = $"{batchId}{obj++}", ["request_id"] = $"{user_input.UserRequestId}", ["metadata"] = null });
             }
         }
-        return new(liveImg);
+        Image composite = new(liveImg);
+        if (tracePasses is not null && outerInput.ExtraMeta.GetValueOrDefault(TraceMetadataKey) is JObject objectsTrace)
+        {
+            objectsTrace["composite"] = $"{liveImg.Width}x{liveImg.Height} #{MetadataHelper.Sha8(composite.RawData)} {composite.Type.MimeType}";
+        }
+        return composite;
     }
 }

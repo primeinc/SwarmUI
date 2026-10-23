@@ -945,8 +945,10 @@ public partial class WorkflowGenerator
             WGNodeData modelNode = new(LoadingModel, this, WGNodeData.DT_MODEL, CurrentCompat());
             WGNodeData tencNode = LoadingClip is null ? null : new WGNodeData(LoadingClip, this, WGNodeData.DT_TEXTENC, CurrentCompat());
             WGNodeData vaeNode = LoadingVAE is null ? null : new WGNodeData(LoadingVAE, this, WGNodeData.DT_VAE, CurrentCompat());
+            Trace?.ModelLoadCached(model, type, sectionId, LoadingModel, LoadingClip, LoadingVAE);
             return (model, modelNode, tencNode, vaeNode);
         }
+        Trace?.BeginModelLoad(model, type, id, sectionId);
         IsDifferentialDiffusion = false;
         LoadingModelType = type;
         if (!noCascadeFix && model.ModelClass?.ID == "stable-cascade-v1-stage-b" && model.Name.Contains("stage_b") && Program.MainSDModels.Models.TryGetValue(model.Name.Replace("stage_b", "stage_c"), out T2IModel altCascadeModel))
@@ -956,7 +958,9 @@ public partial class WorkflowGenerator
         LoadingModel = null;
         foreach (WorkflowGenStep step in ModelGenSteps.Where(s => s.Priority <= -100))
         {
+            Trace?.BeginStep(step, true);
             step.Action(this);
+            Trace?.EndStep();
         }
         if (LoadingModel is not null)
         {
@@ -1682,7 +1686,9 @@ public partial class WorkflowGenerator
         UserInput.TargetResolutionPrecision = model?.ModelClass?.CompatClass?.ResolutionPrecision ?? 16;
         foreach (WorkflowGenStep step in ModelGenSteps.Where(s => s.Priority > -100))
         {
+            Trace?.BeginStep(step, true);
             step.Action(this);
+            Trace?.EndStep();
         }
         if (LoadingClip is null && type != "SeedVR2")
         {
@@ -1696,6 +1702,7 @@ public partial class WorkflowGenerator
         WGNodeData modelNodeData = new(LoadingModel, this, WGNodeData.DT_MODEL, CurrentCompat());
         WGNodeData tencNodeData = LoadingClip is null ? null : new WGNodeData(LoadingClip, this, WGNodeData.DT_TEXTENC, CurrentCompat());
         WGNodeData vaeNodeData = LoadingVAE is null ? null : new WGNodeData(LoadingVAE, this, WGNodeData.DT_VAE, CurrentCompat());
+        Trace?.EndModelLoad(model, LoadingModel, LoadingClip, LoadingVAE);
         return (model, modelNodeData, tencNodeData, vaeNodeData);
     }
 }

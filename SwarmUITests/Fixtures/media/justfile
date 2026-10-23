@@ -1,0 +1,21 @@
+# Small audio and video files for the WorkflowTrace media tests, made with ffmpeg's own generators and bit-exact flags so a rebuild is byte-identical with the same ffmpeg.
+# `just build` writes them next to this file; the tests read the committed copies.
+
+[windows]
+set shell := ['sh', '-cu']
+set script-interpreter := ['sh', '-eu']
+
+export DIR := replace(justfile_directory(), '\', '/')
+
+# A 0.5 s, 8 kHz, mono, 16-bit PCM sine tone.
+[script]
+wav:
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=440:sample_rate=8000:duration=0.5" -ac 1 -c:a pcm_s16le -fflags +bitexact -flags:a +bitexact -map_metadata -1 "$DIR/tone-0.5s-8khz-mono.wav"
+
+# A 1 s, 64x48, 8 fps H.264 test pattern without audio.
+[script]
+mp4:
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc=size=64x48:rate=8:duration=1" -c:v libx264 -pix_fmt yuv420p -threads 1 -fflags +bitexact -flags:v +bitexact -map_metadata -1 "$DIR/pattern-1s-64x48-8fps.mp4"
+
+# Every fixture.
+build: wav mp4

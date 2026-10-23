@@ -1,0 +1,30 @@
+# What the live ComfyUI needs beyond the pinned ComfyUI's requirements.txt: CPU PyTorch, and the packages SwarmUI's ComfyUISelfStartBackend installs
+# (RequiredPythonPackages, RequiredVersionPythonPackages, the opencv pin from its lib fixes). `just lock` resolves both into requirements.lock.txt.
+torch
+torchvision
+torchaudio
+kornia
+sentencepiece
+spandrel>=0.4.1
+pydantic
+pydantic-settings
+alembic
+simpleeval
+blake3
+filelock
+comfy-angle
+rembg
+onnxruntime
+matplotlib
+opencv-python-headless==4.11.0.86
+imageio-ffmpeg
+dill
+omegaconf
+diffusers>=0.36.0
+aiohttp>=3.11.8
+yarl>=1.18.0
+av>=18.1.0
+transformers>=4.57.3
+pyopengl>=3.1.8
+ultralytics==8.3.197
+pip>=25.0

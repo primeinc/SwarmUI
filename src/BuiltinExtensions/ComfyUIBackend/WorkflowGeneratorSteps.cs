@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
@@ -13,15 +14,15 @@ namespace SwarmUI.Builtin_ComfyUIBackend;
 public class WorkflowGeneratorSteps
 {
     /// <summary>Register a new step to the workflow generator.</summary>
-    public static void AddStep(Action<WorkflowGenerator> step, double priority)
+    public static void AddStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        WorkflowGenerator.AddStep(step, priority);
+        WorkflowGenerator.AddStep(step, priority, name, callerFile, callerLine);
     }
 
     /// <summary>Register a new step to the workflow generator.</summary>
-    public static void AddModelGenStep(Action<WorkflowGenerator> step, double priority)
+    public static void AddModelGenStep(Action<WorkflowGenerator> step, double priority, string name = null, [CallerFilePath] string callerFile = "", [CallerLineNumber] int callerLine = 0)
     {
-        WorkflowGenerator.AddModelGenStep(step, priority);
+        WorkflowGenerator.AddModelGenStep(step, priority, name, callerFile, callerLine);
     }
 
     /* ========= RESERVED NODES ID MAP =========
@@ -62,7 +63,7 @@ public class WorkflowGeneratorSteps
             }
             g.FinalLoadedModelList = [g.FinalLoadedModel];
             (g.FinalLoadedModel, g.CurrentModel, g.CurrentTextEnc, g.CurrentVae) = g.CreateModelLoader(g.FinalLoadedModel, "Base", "4", sectionId: T2IParamInput.SectionID_BaseOnly);
-        }, -15);
+        }, -15, "Model Loader");
         AddModelGenStep(g =>
         {
             if (g.IsRefinerStage && g.UserInput.TryGet(T2IParamTypes.RefinerVAE, out T2IModel rvae))
@@ -99,7 +100,7 @@ public class WorkflowGeneratorSteps
                     }
                 }
             }
-        }, -14);
+        }, -14, "VAE Override");
         AddModelGenStep(g =>
         {
             if (g.LoadingModelType == "negative" && !g.UserInput.Get(T2IParamTypes.NegativeModelIncludeLoras, true))
@@ -128,7 +129,7 @@ public class WorkflowGeneratorSteps
             {
                 (g.LoadingModel, g.LoadingClip) = g.LoadLorasForConfinement(T2IParamInput.SectionID_BaseOnly, g.LoadingModel, g.LoadingClip);
             }
-        }, -10);
+        }, -10, "LoRAs");
         AddModelGenStep(g =>
         {
             if (g.LoadingClip is not null && g.UserInput.TryGet(ComfyUIBackendExtension.SetClipDevice, out string device) && g.Features.Contains("set_clip_device"))
@@ -140,7 +141,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.LoadingClip = [clipDeviceNode, 0];
             }
-        }, -9);
+        }, -9, "CLIP Device");
         AddModelGenStep(g =>
         {
             string applyTo = g.UserInput.Get(T2IParamTypes.FreeUApplyTo, null);
@@ -160,7 +161,7 @@ public class WorkflowGeneratorSteps
                     g.LoadingModel = [freeU, 0];
                 }
             }
-        }, -8);
+        }, -8, "FreeU");
         AddModelGenStep(g =>
         {
             if (g.UserInput.TryGet(ComfyUIBackendExtension.SelfAttentionGuidanceScale, out double sagScale))
@@ -228,7 +229,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.LoadingModel = [patched, 0];
             }
-        }, -7);
+        }, -7, "Guidance Patches");
         AddModelGenStep(g =>
         {
             if (g.LoadingClip is not null && g.UserInput.TryGet(T2IParamTypes.ClipStopAtLayer, out int layer))
@@ -240,7 +241,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.LoadingClip = [clipSkip, 0];
             }
-        }, -6);
+        }, -6, "CLIP Skip");
         AddModelGenStep(g =>
         {
             if (g.UserInput.TryGet(T2IParamTypes.SeamlessTileable, out string tileable) && tileable != "false")
@@ -261,7 +262,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.LoadingVAE = [tilingVae, 0];
             }
-        }, -5);
+        }, -5, "Seamless Tiling");
         AddModelGenStep(g =>
         {
             if (g.UserInput.TryGet(ComfyUIBackendExtension.TeaCacheMode, out string teaCacheMode) && teaCacheMode != "disabled")
@@ -367,7 +368,7 @@ public class WorkflowGeneratorSteps
                     g.LoadingModel = [teaCacheNode, 0];
                 }
             }
-        }, -4);
+        }, -4, "Step Caching");
         AddModelGenStep(g =>
         {
             if (g.Features.Contains("aitemplate") && g.UserInput.Get(ComfyUIBackendExtension.AITemplateParam))
@@ -424,7 +425,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.LoadingModel = [torchCompile, 0];
             }
-        }, -3);
+        }, -3, "Attention And Compile");
         #endregion
         #region Base Image
         AddStep(g =>
@@ -528,6 +529,7 @@ public class WorkflowGeneratorSteps
                         ["start_at_step"] = startStep,
                         ["previews"] = g.UserInput.Get(T2IParamTypes.NoPreviews) ? "none" : "default"
                     });
+                    g.Trace?.SamplerCall(unsampler, new JObject() { ["kind"] = "unsampler", ["section"] = 0, ["steps"] = steps, ["start_step"] = startStep });
                     g.CurrentMedia = g.CurrentMedia.WithPath([unsampler, 0]);
                     g.MainSamplerAddNoise = false;
                 }
@@ -614,13 +616,13 @@ public class WorkflowGeneratorSteps
                 }
                 g.CurrentMedia.AttachedAudio = new WGNodeData([audioNode, 0], g, WGNodeData.DT_AUDIO, g.CurrentCompat());
             }
-        }, -9);
+        }, -9, "Base Image");
         #endregion
         #region Positive Prompt
         AddStep(g =>
         {
             g.FinalPrompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.Prompt), g.CurrentTextEnc.Path, g.UserInput.Get(T2IParamTypes.Model), true, "6");
-        }, -8);
+        }, -8, "Positive Prompt");
         #endregion
         #region ReVision/UnCLIP/IPAdapter
         AddStep(g =>
@@ -1016,13 +1018,13 @@ public class WorkflowGeneratorSteps
                     }
                 }
             }
-        }, -7);
+        }, -7, "Image Prompting");
         #endregion
         #region Negative Prompt
         AddStep(g =>
         {
             g.FinalNegativePrompt = g.CreateConditioning(g.UserInput.Get(T2IParamTypes.NegativePrompt, ""), g.CurrentTextEnc.Path, g.UserInput.Get(T2IParamTypes.Model), false, "7");
-        }, -7);
+        }, -7, "Negative Prompt");
         #endregion
         #region ControlNet
         AddStep(g =>
@@ -1317,7 +1319,7 @@ public class WorkflowGeneratorSteps
                 g.FinalPrompt = [refNode, 1];
                 g.FinalNegativePrompt = [refNode, 2];
             }
-        }, -6);
+        }, -6, "ControlNet");
         #region SAM2 Masking
         AddStep(g =>
         {
@@ -1360,7 +1362,7 @@ public class WorkflowGeneratorSteps
             });
             new WGNodeData([maskNode, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat()).SaveOutput(null, null, "9");
             g.SkipFurtherSteps = true;
-        }, -5.8);
+        }, -5.8, "SAM2 Points");
         AddStep(g =>
         {
             if (!g.UserInput.TryGet(ComfyUIBackendExtension.Sam2BBox, out string bboxJson) || string.IsNullOrWhiteSpace(bboxJson))
@@ -1397,7 +1399,7 @@ public class WorkflowGeneratorSteps
             });
             new WGNodeData([maskNode, 0], g, WGNodeData.DT_IMAGE, g.CurrentCompat()).SaveOutput(null, null, "9");
             g.SkipFurtherSteps = true;
-        }, -5.7);
+        }, -5.7, "SAM2 BBox");
         #endregion
         #endregion
         #region Sampler
@@ -1488,7 +1490,7 @@ public class WorkflowGeneratorSteps
                 g.CurrentMedia = g.CurrentMedia.WithPath([trimmed, 0]);
                 g.FinalTrimLatent = null;
             }
-        }, -5);
+        }, -5, "Sampler");
         JArray doMaskShrinkApply(WorkflowGenerator g, JArray imgIn)
         {
             (string boundsNode, string croppedMask, string masked, string scaledImage) = g.MaskShrunkInfo;
@@ -1771,7 +1773,7 @@ public class WorkflowGeneratorSteps
                 g.CurrentMedia = g.CurrentMedia.WithPath(["23", 0], mayHaveAlpha: model.Compat?.SupportsAlpha ?? false);
                 g.IsRefinerStage = false;
             }
-        }, -4);
+        }, -4, "Refiner");
         #endregion
         #region VAEDecode
         AddStep(g =>
@@ -1787,7 +1789,7 @@ public class WorkflowGeneratorSteps
             g.CurrentMedia = g.CurrentMedia.DecodeLatents(g.CurrentVae, null, "8");
             JArray maskShrinkApply = doMaskShrinkApply(g, g.CurrentMedia.Path);
             g.CurrentMedia = g.CurrentMedia.WithPath(maskShrinkApply);
-        }, 1);
+        }, 1, "VAEDecode");
         #endregion
         #region Segmentation Processing
         void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner)
@@ -1795,6 +1797,7 @@ public class WorkflowGeneratorSteps
             PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
             {
+                using IDisposable segmentStage = g.Trace?.EnterStage("segment");
                 g.CurrentMedia = g.CurrentMedia.AsRawImage(g.CurrentVae);
                 g.SaveOptionalIntermediate();
                 T2IModel t2iModel = g.FinalLoadedModel;
@@ -1816,6 +1819,9 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
+                    using IDisposable partStage = g.Trace?.EnterStage($"seg{part.ContextID}");
+                    g.Trace?.SegmentPart(part, i);
+                    g.Trace?.LabelPrompt(part.DataText, $"seg{part.ContextID}.mask");
                     string[] segmentSections = part.DataText.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     string segmentNode = null;
                     if (segmentSections.Length == 0)
@@ -1926,6 +1932,7 @@ public class WorkflowGeneratorSteps
                     int oversize = g.UserInput.Get(T2IParamTypes.SegmentMaskOversize, 16);
                     ImageMaskCropData priorMaskShrunkInfo = g.MaskShrunkInfo;
                     g.MaskShrunkInfo = g.CreateImageMaskCrop([segmentNode, 0], g.CurrentMedia.Path, oversize, vae.Path, g.FinalLoadedModel, thresholdMax: g.UserInput.Get(T2IParamTypes.SegmentThresholdMax, 1));
+                    g.Trace?.SegmentCrop(g.MaskShrunkInfo, oversize);
                     g.EnableDifferential();
                     if (part.ContextID > 0)
                     {
@@ -1962,7 +1969,7 @@ public class WorkflowGeneratorSteps
                 return;
             }
             RunSegmentationProcessing(g, isBeforeRefiner: true);
-        }, -4.5);
+        }, -4.5, "Segments Before Refiner");
         AddStep(g =>
         {
             if (g.UserInput.Get(T2IParamTypes.SegmentApplyAfter, "Refiner") != "Refiner")
@@ -1970,7 +1977,7 @@ public class WorkflowGeneratorSteps
                 return;
             }
             RunSegmentationProcessing(g, isBeforeRefiner: false);
-        }, 5);
+        }, 5, "Segments");
         #endregion
         #region Segment Clears
         AddStep(g =>
@@ -2012,7 +2019,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.CurrentMedia = g.CurrentMedia.WithPath([joined, 0], mayHaveAlpha: true);
             }
-        }, 7);
+        }, 7, "Segment Clears");
         #endregion
         #region Save Image Before Video
         AddStep(g =>
@@ -2044,7 +2051,7 @@ public class WorkflowGeneratorSteps
             {
                 g.CurrentMedia.SaveOutput(g.CurrentVae, g.CurrentAudioVae, nodeId);
             }
-        }, 10);
+        }, 10, "Save Image Before Video");
         #endregion
         #region Image To Video
         AddStep(g =>
@@ -2132,7 +2139,7 @@ public class WorkflowGeneratorSteps
                     g.CurrentMedia.FPS = genInfo.VideoFPS.HasValue ? genInfo.VideoFPS.Value * mult : null;
                 }
             }
-        }, 11);
+        }, 11, "Image To Video");
         #endregion
         #region Extend Video
         AddStep(g =>
@@ -2195,6 +2202,7 @@ public class WorkflowGeneratorSteps
                 for (int i = 0; i < parts.Length; i++)
                 {
                     PromptRegion.Part part = parts[i];
+                    using IDisposable partStage = g.Trace?.EnterStage($"extend{part.ContextID}");
                     double cfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.VideoCFG, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.CFGScale, 7);
                     int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, part.ContextID, false) ?? g.UserInput.GetNullable(T2IParamTypes.VideoSteps, part.ContextID) ?? g.UserInput.Get(T2IParamTypes.Steps, 20);
                     seed++;
@@ -2279,7 +2287,7 @@ public class WorkflowGeneratorSteps
                     g.CurrentMedia.FPS = videoFps;
                 }
             }
-        }, 12);
+        }, 12, "Extend Video");
         #endregion
         #region SeedVR
         AddStep(g =>
@@ -2394,7 +2402,7 @@ public class WorkflowGeneratorSteps
                 }
             }
             g.CurrentMedia = g.CreateSeedVR2Restore(seedVrModel, media, vae, seed);
-        }, 40);
+        }, 40, "SeedVR");
         #endregion
         #region Final Cleanups
         AddStep(g =>
@@ -2433,7 +2441,7 @@ public class WorkflowGeneratorSteps
                 });
                 g.CurrentMedia = g.CurrentMedia.WithPath([removed, 0], mayHaveAlpha: true);
             }
-        }, 50);
+        }, 50, "Final Cleanups");
         #endregion
         #region True Final Save
         AddStep(g =>
@@ -2443,7 +2451,7 @@ public class WorkflowGeneratorSteps
                 return;
             }
             g.CurrentMedia.SaveOutput(g.CurrentVae, g.CurrentAudioVae, "9");
-        }, 100);
+        }, 100, "True Final Save");
         #endregion
         #region Post-Cleanup
         AddStep(g =>
@@ -2523,7 +2531,7 @@ public class WorkflowGeneratorSteps
             g.RunOnNodesOfClass("VAEEncode", fixEncode);
             g.RunOnNodesOfClass("VAEEncodeTiled", fixEncode);
             g.RemoveClassesIfUnused(AutoCleanupNodeTypes);
-        }, 200);
+        }, 200, "Post-Cleanup");
         #endregion
     }
 

@@ -1,0 +1,104 @@
+# Workflow byte-identity against the upstream commit this fork is based on: GeneratorIdentity.cs builds every main model class x option variant in this tree and in an upstream worktree,
+# with debug data off and on, and all four dumps must be identical. `just run` does every step; `just evidence` records HEAD, status and the exit code of every check.
+# The work folder (upstream worktree, dumps, logs) must be outside SwarmUITests, whose project compiles every .cs file under it.
+
+[windows]
+set shell := ['sh', '-cu']
+set script-interpreter := ['sh', '-eu']
+set positional-arguments
+
+export REPO := replace(parent_directory(parent_directory(justfile_directory())), '\', '/')
+export ID := replace(justfile_directory(), '\', '/')
+export WORK := replace(env('SWARMUI_IDENTITY_WORK', env('TMPDIR', env('TEMP', '/tmp')) / 'swarmui-identity-work'), '\', '/')
+export UPSTREAM := WORK / 'upstream'
+export UPSTREAM_COMMIT := '4e01badebca99ba6a2b4df335c8029e938182f37'
+export COST_BOUND := '32'
+
+# Create a detached worktree of the upstream commit.
+[script]
+worktree:
+    mkdir -p "$WORK"
+    if [ ! -d "$UPSTREAM" ]; then git -C "$REPO" worktree add --detach "$UPSTREAM" "$UPSTREAM_COMMIT"; fi
+    git -C "$UPSTREAM" log --oneline -1
+
+# Dump one tree (upstream or head) with debug data off (0) or on (1). The upstream tree gets a copy of GeneratorIdentity.cs for the run.
+# The previous dump is deleted first, and the step fails if the test wrote none (a skipped test passes), so the comparison never reads a stale dump.
+# Tiered compilation is off, so every method runs optimized code from its first call: quick-JIT code can allocate more (Microsoft Learn, runtime-config/compilation, Quick JIT), and a method tiering up between measured runs changed a run's allocation by 48 to 96 bytes.
+[script]
+dump tree debug:
+    if [ "$1" = upstream ]; then dir="$UPSTREAM"; cp "$ID/GeneratorIdentity.cs" "$dir/SwarmUITests/GeneratorIdentity.cs"; else dir="$REPO"; fi
+    out="$WORK/$1-debug$2.tsv"
+    cost="$WORK/$1-debug$2-cost.tsv"
+    rm -f "$out" "$cost"
+    changes="$(git -C "$dir" status --short --untracked-files=no -- src SwarmUITests | wc -l)"
+    echo "== $1 debug=$2 at $(git -C "$dir" rev-parse HEAD), $changes uncommitted tracked files under src and SwarmUITests"
+    status=0
+    IDENTITY_OUT="$out" IDENTITY_COST_OUT="$cost" IDENTITY_DEBUG="$2" DOTNET_TieredCompilation=0 dotnet test "$dir/SwarmUITests/SwarmUITests.csproj" -c Release --filter "TestCategory=Identity" --logger "console;verbosity=normal" || status=$?
+    if [ "$1" = upstream ]; then rm "$dir/SwarmUITests/GeneratorIdentity.cs"; fi
+    if [ "$status" = 0 ] && { [ ! -s "$out" ] || [ ! -s "$cost" ]; }; then
+        echo "FAILED: no dump or cost file written to $out, $cost; the identity test did not run"
+        status=1
+    fi
+    exit "$status"
+
+# Compare the untraced cost of the sampled cases (GeneratorIdentity.MeasureCosts, a repeatable byte count per case) between head and upstream: each case's allocation may exceed upstream's by at most COST_BOUND bytes.
+# COST_BOUND is the two reference fields head adds, WorkflowGenerator.Trace and T2IParamInput.ParamReadTracker, 8 bytes on each of the two generators and two inputs a measured run creates.
+# Time is reported, not gated: separate processes differ by more than the code does. The traced cost at head is reported against the untraced cost at head.
+[script]
+costs:
+    paste "$WORK/upstream-debug0-cost.tsv" "$WORK/head-debug0-cost.tsv" | awk -F '\t' -v bound="$COST_BOUND" '
+        $1 != $4 { print "MISMATCHED case " NR ": " $1 " against " $4; bad = 1 }
+        {
+            d = $5 - $2
+            if (n == 0 || d > max) { max = d; maxCase = $1 }
+            if (n == 0 || d < min) { min = d; minCase = $1 }
+            if (d > bound) { over++; print "OVER " d " bytes: " $1 }
+            sum += d; upMs += $3; headMs += $6; n++
+        }
+        END {
+            printf "UNTRACED COST head against upstream over %d sampled cases: allocation difference min %d bytes (%s), max %d bytes (%s), mean %.1f bytes; %d over the %d-byte bound; summed time %.1f ms against %.1f ms (%.3fx)\n", n, min, minCase, max, maxCase, sum / n, over, bound, headMs, upMs, headMs / upMs
+            exit (bad || over > 0 || n == 0)
+        }'
+    paste "$WORK/head-debug0-cost.tsv" "$WORK/head-debug1-cost.tsv" | awk -F '\t' '
+        { untraced += $2; traced += $5; untracedMs += $3; tracedMs += $6; n++ }
+        END { printf "TRACED COST at head over %d sampled cases: %.1f KiB allocated against %.1f KiB untraced (%.3fx), %.1f ms against %.1f ms (%.3fx)\n", n, traced / 1024, untraced / 1024, traced / untraced, tracedMs, untracedMs, tracedMs / untracedMs }'
+
+# Compare every dump with upstream's debug-off dump; any difference fails and is written to diff-<dump>.txt.
+[script]
+compare:
+    status=0
+    for f in upstream-debug1 head-debug0 head-debug1; do
+        if cmp -s "$WORK/upstream-debug0.tsv" "$WORK/$f.tsv"; then
+            echo "IDENTICAL upstream-debug0 vs $f ($(wc -l < "$WORK/$f.tsv") cases)"
+        else
+            echo "DIFFERENT upstream-debug0 vs $f"
+            diff "$WORK/upstream-debug0.tsv" "$WORK/$f.tsv" > "$WORK/diff-$f.txt" || true
+            wc -l "$WORK/diff-$f.txt"
+            status=1
+        fi
+    done
+    sha256sum "$WORK"/*.tsv
+    exit "$status"
+
+# Every identity step: the worktree, the four dumps, the comparison, the untraced cost comparison.
+run: worktree (dump 'upstream' '0') (dump 'upstream' '1') (dump 'head' '0') (dump 'head' '1') compare costs
+
+# Record HEAD, branch and status, then the exit code and log of the build, both format checks, the unit tests and the identity run, in evidence.txt in the work folder.
+[script]
+evidence:
+    mkdir -p "$WORK"
+    out="$WORK/evidence.txt"
+    { echo "HEAD $(git -C "$REPO" rev-parse HEAD)"; echo "branch $(git -C "$REPO" rev-parse --abbrev-ref HEAD)"; echo "status:"; git -C "$REPO" status --short; } > "$out"
+    step() {
+        name="$1"
+        shift
+        status=0
+        "$@" > "$WORK/$name.log" 2>&1 || status=$?
+        echo "$name exit=$status log=$WORK/$name.log" >> "$out"
+    }
+    step build dotnet build "$REPO/src/SwarmUI.csproj"
+    step format-src dotnet format "$REPO/src/SwarmUI.csproj" --verify-no-changes
+    step format-tests dotnet format "$REPO/SwarmUITests/SwarmUITests.csproj" --verify-no-changes
+    step tests dotnet test "$REPO/SwarmUITests/SwarmUITests.csproj"
+    step identity just --justfile "$ID/justfile" run
+    cat "$out"

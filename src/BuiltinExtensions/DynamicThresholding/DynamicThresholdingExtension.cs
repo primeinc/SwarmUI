@@ -99,6 +99,6 @@ public class DynamicThresholdingExtension : Extension
             }
             // See WorkflowGeneratorSteps for definition of the priority values.
             // -5.5 puts this before the main Sampler, but after most other model changes (eg controlnet)
-        }, -5.5);
+        }, -5.5, "Dynamic Thresholding");
     }
 }

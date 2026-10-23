@@ -1,0 +1,35 @@
+{
+  "repo": "Comfy-Org/Qwen-Image-2.1",
+  "revision": "a8342359c61979b06a8dafb1a47991fe1f30e994",
+  "fetched": "2026-10-20",
+  "files": [
+    {
+      "path": "diffusion_models/qwen_image_2.1_bf16.safetensors",
+      "size": 14230280616,
+      "sha256": "89f4158d066cc33906a199fca85634f766892dd78f49b6698dabf187ac86c4bc",
+      "header": "qwen_image_2.1_bf16",
+      "header_sha256": "c43378af5fb061aee50cfc245837a6d897685da018b5a6e13e8fb31fac56f378"
+    },
+    {
+      "path": "loras/qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors",
+      "size": 913314512,
+      "sha256": "208dd43250e1e01467ba190572ae2e7107a7870ec1ff026bc65f791fa1e80e95",
+      "header": "qwen_image_2.1_turbo_lora_avg_rank_178_bf16",
+      "header_sha256": "b6905edc19e6efe3283d2a4b0991bed1c7f25e1ce1b6566693e27b9812ac3bb0"
+    },
+    {
+      "path": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+      "size": 9350798360,
+      "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+      "header": "qwen3vl_8b_int8_convrot",
+      "header_sha256": "b55c03ca5443ee1514738dbf69dceddf9074ae5e745bce5a2310754e0b37078d"
+    },
+    {
+      "path": "vae/qwen_image_2.1_vae_bf16.safetensors",
+      "size": 675509688,
+      "sha256": "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9",
+      "header": "qwen_image_2.1_vae_bf16",
+      "header_sha256": "c091c3d231f352db5fb44840e22388d2abe9c2c37b4daf97bdc6cc3448387759"
+    }
+  ]
+}

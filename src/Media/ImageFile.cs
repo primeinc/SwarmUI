@@ -96,7 +96,7 @@ public class ImageFile : MediaFile
         {
             img.Metadata.XmpProfile = null;
             ExifProfile prof = new();
-            prof.SetValue(ExifTag.UserComment, metadataText);
+            prof.SetValue(ExifTag.UserComment, MetadataHelper.FitTextToJpegExif(metadataText));
             img.Metadata.ExifProfile = prof;
         }
         return new Image(ISImgToJpgBytes(img), MediaType.ImageJpg);
@@ -267,6 +267,16 @@ public class ImageFile : MediaFile
         WEBP
     }
 
+    /// <summary>Returns true if an image format value (as <see cref="ConvertTo"/> takes it) saves as JPEG.</summary>
+    public static bool IsJpegFormat(string format) => format is "JPG" or "JPG90" or "JPG75";
+
+    /// <summary>Returns true if <see cref="ConvertTo"/> embeds stealth metadata for this format and stealth mode, given metadata to embed.</summary>
+    public static bool StealthApplies(string format, string stealthMetadata)
+    {
+        bool isLossyWebp = format.StartsWith("WEBP") && format != "WEBP_LOSSLESS";
+        return stealthMetadata.ToLowerFast() != "false" && (format == "PNG" || format.StartsWith("WEBP")) && !(isLossyWebp && stealthMetadata.ToLowerFast() == "rgb");
+    }
+
     /// <summary>Converts an image to the specified format, and the specific metadata text.</summary>
     public ImageFile ConvertTo(string format, string metadata = null, int dpi = 0, int quality = 100, string stealthMetadata = "false")
     {
@@ -276,9 +286,7 @@ public class ImageFile : MediaFile
         }
         using MemoryStream ms = new();
         ISImage img = ToIS;
-        bool isLossyWebp = format.StartsWith("WEBP") && format != "WEBP_LOSSLESS";
-        bool canDoStealth = metadata is not null && (format == "PNG" || format.StartsWith("WEBP")) && !(isLossyWebp && stealthMetadata.ToLowerFast() == "rgb");
-        if (stealthMetadata.ToLowerFast() != "false" && canDoStealth)
+        if (metadata is not null && StealthApplies(format, stealthMetadata))
         {
             string actualStealthMode = stealthMetadata.ToLowerInvariant();
             ISImage32 rgbaImage = img.CloneAs<Rgba32>();
