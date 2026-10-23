@@ -152,7 +152,7 @@ metadata image:
     print(json.dumps(json.loads(text), indent=2))
     EOF
 
-# Serve the data folder of one `just app` run (debug or plain) in the foreground at the server's default log level, to look at its images in the web UI.
+# Serve the data folder of one `just app` run (debug, plain or default) in the foreground at the server's default log level, to look at its images in the web UI.
 [script]
 view run='debug':
     cd "$REPO"
@@ -160,9 +160,11 @@ view run='debug':
     exec dotnet src/bin/Debug/net8.0/SwarmUI.dll --data_dir "$data" --settings_file "$data/Settings.fds" --backends_file "$data/Backends.fds" --host 127.0.0.1 --port "$APP_PORT" --launch_mode none
 
 # Run the real SwarmUI server from this tree and nothing else: it launches the pinned ComfyUI itself through its self-start backend, on the test models. Generate through its HTTP API and read the trace back from the saved images.
-# Twice: AddDebugData on (PNG and JPG outputs: the record matches the request and the graph that was posted, the JPG record fits one EXIF segment) and off (no debug metadata, no trace in the log). Each server gets a fresh data folder under $APP_WORK,
-# runs at log level Verbose with SaveLogToFile on (the defaults, Info and off, keep Debug lines such as the trace's only in memory), must find every Python package it requires already installed, and is shut down through /API/ShutdownServer,
-# which must take its ComfyUI down with it and leave the trace lines in Swarm's log file.
+# Three servers, each with a fresh data folder under $APP_WORK, every one of which must find every Python package it requires already installed and is shut down through /API/ShutdownServer, which must take its ComfyUI down with it:
+# - debug: AddDebugData on, log level Verbose, SaveLogToFile on. PNG and JPG: the record matches the request and the posted graph, the JPG record fits one EXIF segment. Then a request the generator rejects, a generation interrupted after posting,
+#   WebP (whole record), a JPG whose metadata a long negative prompt pushes past the EXIF limit (record cut, log key kept), and a batch of 2 (a trace each). Every image's trace line must be in Swarm's log file.
+# - plain: AddDebugData off. No debug metadata, no trace line in the console or the log file, the same pixels as debug.
+# - default: AddDebugData on at the default log level (Info) with SaveLogToFile off and Alpha stealth metadata: the trace line is only in memory (ListRecentLogMessages), and the pixels carry the same metadata as the PNG text.
 [script]
 app: setup models clipseg
     mkdir -p "$WORK/ComfyUI/custom_nodes"
@@ -170,7 +172,8 @@ app: setup models clipseg
     cd "$REPO"
     dotnet build src/SwarmUI.csproj --configuration Debug
     "$PYTHON" -I - <<'EOF'
-    import base64, io, json, os, pathlib, queue, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+    import base64, gzip, io, json, os, pathlib, queue, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+    import numpy
     from PIL import Image
 
     repo = pathlib.Path(os.environ["REPO"])
@@ -197,8 +200,11 @@ app: setup models clipseg
         except urllib.error.HTTPError as error:
             raise SystemExit(f"{url}: HTTP {error.code}: {error.read().decode(errors='replace')}")
 
+    def api_reply(route, sid, **body):
+        return json.loads(call(f"{base}/API/{route}", {"session_id": sid, **body}))
+
     def api(route, sid, **body):
-        reply = json.loads(call(f"{base}/API/{route}", {"session_id": sid, **body}))
+        reply = api_reply(route, sid, **body)
         if "error" in reply:
             raise SystemExit(f"{route}: {reply}")
         return reply
@@ -228,7 +234,7 @@ app: setup models clipseg
             position += 2 + length
         return found
 
-    def jpeg_metadata(raw):
+    def exif_metadata(raw):
         comment = Image.open(io.BytesIO(raw)).getexif().get_ifd(0x8769)[0x9286]
         for encoding in ("utf-16-be", "utf-16-le", "utf-8"):
             try:
@@ -237,16 +243,32 @@ app: setup models clipseg
                 pass
         raise SystemExit(f"UserComment is not JSON in utf-16 or utf-8: {comment[:64]!r}")
 
-    def start(data, debug):
+    def saved_metadata(format, raw):
+        return png_metadata(raw) if format == "PNG" else exif_metadata(raw)
+
+    def stealth_metadata(raw):
+        # MetadataHelper.EncodeStealthMetadata in Alpha mode: the low bit of each pixel's alpha, column by column, holds "stealth_pngcomp", a 32-bit bit count and the gzip-compressed metadata text.
+        alpha = numpy.asarray(Image.open(io.BytesIO(raw)).convert("RGBA"))[:, :, 3]
+        bits = (alpha.T.reshape(-1) & 1).astype(numpy.uint8)
+        signature = b"stealth_pngcomp"
+        start = len(signature) * 8 + 32
+        if numpy.packbits(bits[:len(signature) * 8]).tobytes() != signature:
+            return None
+        length = int("".join(str(b) for b in bits[len(signature) * 8:start]), 2)
+        return json.loads(gzip.decompress(numpy.packbits(bits[start:start + length]).tobytes()).decode("utf-8"))
+
+    def start(data, debug, loglevel, save_log):
         data.mkdir(parents=True)
-        (data / "Settings.fds").write_text("\n".join([
+        settings = [
             "IsInstalled: true", "InstallDate: 2026-10-22", "InstallVersion: live", "LaunchMode: none", f"AddDebugData: {str(debug).lower()}",
             "Maintenance:", "    CheckForUpdates: false",
-            "Logs:", "    SaveLogToFile: true",
             "Performance:", "    AllowGpuSpecificOptimizations: false",
-            "Paths:", f"    ModelRoot: {models.as_posix()}", "    SDLoraFolder: loras", f"    OutputPath: {(data / 'Output').as_posix()}", ""]))
+            "Paths:", f"    ModelRoot: {models.as_posix()}", "    SDLoraFolder: loras", f"    OutputPath: {(data / 'Output').as_posix()}"]
+        if save_log:
+            settings += ["Logs:", "    SaveLogToFile: true"]
+        (data / "Settings.fds").write_text("\n".join(settings + [""]))
         server = subprocess.Popen(["dotnet", str(dll), "--data_dir", str(data), "--settings_file", str(data / "Settings.fds"), "--backends_file", str(data / "Backends.fds"),
-            "--host", "127.0.0.1", "--port", os.environ["APP_PORT"], "--launch_mode", "none", "--loglevel", "Verbose"], cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            "--host", "127.0.0.1", "--port", os.environ["APP_PORT"], "--launch_mode", "none"] + (["--loglevel", loglevel] if loglevel else []), cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         lines = queue.Queue()
         def pump():
             with open(data / "swarm.log", "wb") as log:
@@ -275,6 +297,15 @@ app: setup models clipseg
                 raise SystemExit(f"port {os.environ['APP_PORT']} is taken: {line.strip()}")
             if needle in line:
                 return line
+
+    def drain(server, lines):
+        while True:
+            try:
+                line = lines.get_nowait()
+            except queue.Empty:
+                return
+            if line is None:
+                raise SystemExit(f"SwarmUI exited with {server.wait()}")
 
     def port_open(port):
         try:
@@ -307,12 +338,46 @@ app: setup models clipseg
         check(outside > 1000 and wrong_outside == 0, f"{label}: {outside} pixels outside both masks equal the init image, {wrong_outside} wrong")
         check(inside > 100 and wrong_inside == 0, f"{label}: {inside} pixels inside the static mask and outside the segment mask were redrawn, {wrong_inside} wrong")
 
-    def run(debug):
-        label = "debug" if debug else "plain"
+    def generate(sid, request):
+        reply = api("GenerateText2Image", sid, **request)
+        return [call(f"{base}/{urllib.parse.quote(path)}") for path in reply["images"]]
+
+    def traced_paths(label, sid, request, server, lines, log_keys):
+        try:
+            rejected = api_reply("GenerateText2Image", sid, **{**request, "prompt": "a cat on a road <extend:17> walking on"})
+        except SystemExit as error:
+            rejected = {"http_error": str(error)}
+        check("Video Extend Model" in json.dumps(rejected) and not rejected.get("images"), f"{label}: a request the generator rejects (<extend:> without a Video Extend Model) returns its error: {json.dumps(rejected)[:200]}")
+        drain(server, lines)
+        interrupted = {}
+        worker = threading.Thread(target=lambda: interrupted.update(reply=api_reply("GenerateText2Image", sid, **request)), daemon=True)
+        worker.start()
+        print("   " + wait_for(server, lines, "posted workflow sha256=", 300).strip()[:160])
+        api("InterruptAll", sid)
+        worker.join(600)
+        check(not worker.is_alive() and "reply" in interrupted and not interrupted["reply"].get("images"), f"{label}: a generation interrupted after its workflow was posted returns no image: {json.dumps(interrupted.get('reply'))[:200]}")
+        raws = generate(sid, {**request, "imageformat": "WEBP"})
+        trace = exif_metadata(raws[-1])["sui_extra_data"].get("debug_trace") or {}
+        check(len(raws) == 2 and "omitted" not in trace and len(trace.get("nodes") or {}) == 43, f"{label} WEBP (after the interrupt): the EXIF chunk holds the whole record, {len(trace.get('nodes') or {})} nodes, omitted {trace.get('omitted')!r}")
+        log_keys.append(trace.get("log_key"))
+        negative = "blurry, " * 400
+        raws = generate(sid, {**request, "imageformat": "JPG", "negativeprompt": negative})
+        segments = jpeg_exif_segments(raws[-1])
+        trace = exif_metadata(raws[-1])["sui_extra_data"].get("debug_trace") or {}
+        check(len(segments) == 1 and segments[0] <= 65535, f"{label} JPG with a {len(negative)}-character negative prompt: one Exif APP1 segment, sizes {segments}")
+        check(bool(trace.get("omitted")) and bool(trace.get("log_key")) and bool(trace.get("workflow", {}).get("sent_sha256")), f"{label} JPG with a {len(negative)}-character negative prompt: the record is cut to fit and keeps its log key and workflow identity; omitted {trace.get('omitted')!r}")
+        check("blurry" not in json.dumps(trace), f"{label} JPG with a {len(negative)}-character negative prompt: no negative prompt text in debug_trace")
+        log_keys.append(trace.get("log_key"))
+        raws = generate(sid, {**request, "images": 2, "savesegmentmask": False})
+        keys = [(png_metadata(raw)["sui_extra_data"].get("debug_trace") or {}).get("log_key") for raw in raws]
+        check(len(raws) == 2 and all(keys) and len(set(keys)) == 2, f"{label} batch of 2: each image carries its own trace, log keys {keys}")
+        log_keys.extend(keys)
+
+    def run(label, debug, loglevel, save_log, kept, stealth=None):
         data = work / f"data-{label}"
         shutil.rmtree(data, ignore_errors=True)
         failures_before = len(failures)
-        server, lines, pump_thread = start(data, debug)
+        server, lines, pump_thread = start(data, debug, loglevel, save_log)
         sid = comfy_port = None
         log_keys = []
         try:
@@ -324,7 +389,11 @@ app: setup models clipseg
             launched = wait_for(server, lines, f"Self-Start ComfyUI-{backend['id']} on port ", 300)
             comfy_port = int(launched.split(" on port ")[1].split(" ")[0])
             print("   " + launched.strip())
-            print("   " + wait_for(server, lines, f"Comfy backend {backend['id']} loaded value set and parsed.", 600).strip())
+            print("   " + wait_for(server, lines, f"Self-Start ComfyUI-{backend['id']} on port {comfy_port} started.", 600).strip())
+            if stealth:
+                user_settings = api("GetUserSettings", sid)["settings"]
+                check("stealthmetadata" in user_settings["fileformat"]["value"], f"{label}: the user setting fileformat.stealthmetadata exists")
+                api("ChangeUserSettings", sid, settings={"fileformat.stealthmetadata": stealth})
             params = api("ListT2IParams", sid)
             ids = {p["id"] for p in params["list"]}
             needed = ["prompt", "model", "width", "height", "steps", "cfgscale", "seed", "images", "initimage", "initimagecreativity", "maskimage", "maskshrinkgrow", "segmentmaskblur", "segmentmaskgrow", "savesegmentmask"]
@@ -341,7 +410,7 @@ app: setup models clipseg
             request = {"images": 1, "prompt": "a cat on a road <lora:qwen21-null:1> <segment:cat,1,0.5> a cat face", "model": dits[0], "width": size, "height": size, "steps": 2, "cfgscale": 1.0, "seed": 1,
                 "initimage": data_url(init), "initimagecreativity": 1.0, "maskimage": data_url(mask), "maskshrinkgrow": 8, "segmentmaskblur": 0, "segmentmaskgrow": 0, "savesegmentmask": True}
             check("imageformat" in ids, f"{label}: an imageformat parameter exists to request JPG")
-            formats = [("PNG", {})] + ([("JPG", {"imageformat": "JPG"})] if "imageformat" in ids else [])
+            formats = [("PNG", {})] + ([("JPG", {"imageformat": "JPG"})] if "imageformat" in ids and not stealth else [])
             for format, extra in formats:
                 reply = api("GenerateText2Image", sid, **request, **extra)
                 print(f"== {label} {format}: images {reply['images']}, backends {json.dumps(api('ListBackends', sid))}")
@@ -357,7 +426,7 @@ app: setup models clipseg
                 else:
                     segments = jpeg_exif_segments(raw)
                     check(len(segments) == 1 and segments[0] <= 65535, f"{label} {format}: one Exif APP1 segment, sizes {segments}")
-                    meta = jpeg_metadata(raw)
+                    meta = exif_metadata(raw)
                 extra_data = meta.get("sui_extra_data", {})
                 check(meta["sui_image_params"].get("model") in (dits[0], dits[0].removesuffix(".safetensors")), f"{label} {format}: metadata names the model {meta['sui_image_params'].get('model')}")
                 debug_keys = sorted(k for k in extra_data if k.startswith("debug"))
@@ -372,8 +441,12 @@ app: setup models clipseg
                 print(f"   trace keys {sorted(trace)}")
                 check(bool(trace.get("log_key")), f"{label} {format}: log_key {trace.get('log_key')}")
                 print(f"   full_trace {json.dumps(trace.get('full_trace'))}")
-                check(str(trace.get("full_trace")).endswith("printed to the console and saved to the log file"), f"{label} {format}: full_trace says a Verbose server with SaveLogToFile prints and saves the trace's log line")
+                check(str(trace.get("full_trace")).endswith(kept), f"{label} {format}: full_trace ends with {kept!r}")
                 log_keys.append(trace.get("log_key"))
+                if stealth:
+                    hidden = stealth_metadata(raw)
+                    check(hidden == meta, f"{label} {format}: the {stealth} stealth metadata in the pixels is the PNG text metadata, debug_trace included ({'decoded' if hidden else 'no stealth signature'})")
+                    check("omitted" not in trace, f"{label} {format}: with stealth metadata the 1024x1024 image holds the whole record")
                 leaks = [text for text in ("a cat on a road", "a cat face", "<segment:", "<lora:") if text in json.dumps(trace)]
                 check(not leaks, f"{label} {format}: no prompt text in debug_trace {leaks}")
                 if format == "JPG":
@@ -400,6 +473,11 @@ app: setup models clipseg
                     nodes = set(nodes) if isinstance(nodes, dict) else {str(n["id"]) for n in nodes}
                     check(len(trace["segments"]) == 1 and len(trace["samplers"]) >= 2, f"{label} {format}: {len(trace['segments'])} segment record, {len(trace['samplers'])} samplers")
                     check(len(nodes) == 43, f"{label} {format}: the node table holds {len(nodes)} nodes, as many as the graph ComfyLiveTests sends for this request")
+            if debug and not save_log:
+                recent = api("ListRecentLogMessages", sid, types=["Debug"], last_sequence_ids={})["data"].get("Debug", [])
+                check(bool(log_keys) and all(any(f"[WorkflowTrace {key}]" in m["message"] for m in recent) for key in log_keys), f"{label}: ListRecentLogMessages returns the Debug trace line of every image's log_key {log_keys} ({len(recent)} Debug messages kept)")
+            if label == "debug":
+                traced_paths(label, sid, request, server, lines, log_keys)
         finally:
             if sid is not None:
                 try:
@@ -415,16 +493,22 @@ app: setup models clipseg
             check(not port_open(comfy_port), f"{label}: ComfyUI on port {comfy_port} is gone after SwarmUI shut down")
         log_files = sorted((data / "Logs").rglob("*.log"))
         saved = "".join(path.read_text(errors="replace") for path in log_files)
-        if debug:
-            check(bool(log_keys) and all(f"[WorkflowTrace {key}]" in saved for key in log_keys), f"{label}: SwarmUI's log file {[p.relative_to(data).as_posix() for p in log_files]} holds the trace line of every image's log_key {log_keys}")
+        names = [p.relative_to(data).as_posix() for p in log_files]
+        if not save_log:
+            check(not log_files, f"{label}: SaveLogToFile off writes no log file {names}")
+        elif debug:
+            check(bool(log_keys) and all(f"[WorkflowTrace {key}]" in saved for key in log_keys), f"{label}: SwarmUI's log file {names} holds the trace line of every image's log_key {log_keys}")
         else:
-            check(bool(saved) and "[WorkflowTrace " not in saved, f"{label}: SwarmUI's log file {[p.relative_to(data).as_posix() for p in log_files]} holds no trace line")
+            check(bool(saved) and "[WorkflowTrace " not in saved, f"{label}: SwarmUI's log file {names} holds no trace line")
 
-    for debug in (True, False):
-        run(debug)
-    logs = {label: (work / f"data-{label}/swarm.log").read_text(errors="replace") for label in ("debug", "plain")}
+    run("debug", True, "Verbose", True, "printed to the console and saved to the log file")
+    run("plain", False, "Verbose", True, None)
+    run("default", True, None, False, "only (the server log level is Info, so it is not printed or saved)", stealth="Alpha")
+    logs = {label: (work / f"data-{label}/swarm.log").read_text(errors="replace") for label in ("debug", "plain", "default")}
     check("[WorkflowTrace " in logs["debug"], "the debug server logged its traces")
+    check("generation failed, partial trace" in logs["debug"], "the debug server logged the partial trace of the rejected request")
     check("[WorkflowTrace " not in logs["plain"], "the plain server logged no trace")
+    check("[WorkflowTrace " not in logs["default"], "the default-level server printed no trace line")
     for label, log in logs.items():
         installs = [line.strip() for line in log.splitlines() if "appears to not contain pip" in line or ("[Load " in line and line.rstrip().endswith(" for ComfyUI..."))]
         check(not installs, f"{label}: SwarmUI found every package it requires in the locked environment and ran no pip install {installs}")
