@@ -26,13 +26,13 @@ public class T2IMultiStepObjectBuilder
     /// <summary>Returns a box as "x", "y", "width" and "height".</summary>
     public static JObject TraceBox(JToken x, JToken y, JToken width, JToken height) => new() { ["x"] = x, ["y"] = y, ["width"] = width, ["height"] = height };
 
-    /// <summary>Describes one object pass: the object's region as fractions of the image, its box in pixels, the crop of the base image that is inpainted, the inpaint size, and the mask's box inside the inpaint. The crop box is also where the result is pasted back, resized to the crop size.</summary>
-    public static JObject TraceObjectPass(PromptRegion.Part part, int pixelX, int pixelY, int pixelWidth, int pixelHeight, int extraX, int extraY, int extraWidth, int extraHeight, int fixedWidth, int fixedHeight, double scaleWidth, double scaleHeight)
+    /// <summary>Describes one object pass, named by the object's 1-based position among the prompt's objects (the parts carry no context ID here, the user's prompt has none): the object's region as fractions of the image, its box in pixels, the crop of the base image that is inpainted, the inpaint size, and the mask's box inside the inpaint. The crop box is also where the result is pasted back, resized to the crop size.</summary>
+    public static JObject TraceObjectPass(int objectNumber, PromptRegion.Part part, int pixelX, int pixelY, int pixelWidth, int pixelHeight, int extraX, int extraY, int extraWidth, int extraHeight, int fixedWidth, int fixedHeight, double scaleWidth, double scaleHeight)
     {
         return new JObject()
         {
-            ["pass"] = $"object{part.ContextID}",
-            ["prompt"] = $"@object{part.ContextID}{TraceHash(part.Prompt)}",
+            ["pass"] = $"object{objectNumber}",
+            ["prompt"] = $"@object{objectNumber}{TraceHash(part.Prompt)}",
             ["region"] = TraceBox(part.X, part.Y, part.Width, part.Height),
             ["object_px"] = TraceBox(pixelX, pixelY, pixelWidth, pixelHeight),
             ["crop_px"] = TraceBox(extraX, extraY, extraWidth, extraHeight),
@@ -177,7 +177,7 @@ public class T2IMultiStepObjectBuilder
             MediaFile objFile = await createImageDirect(objInput);
             if (tracePasses is not null)
             {
-                JObject passTrace = TraceObjectPass(part, pixelX, pixelY, pixelWidth, pixelHeight, extraX, extraY, extraWidth, extraHeight, fixedWidth, fixedHeight, scaleWidth, scaleHeight);
+                JObject passTrace = TraceObjectPass(Array.IndexOf(objects, part) + 1, part, pixelX, pixelY, pixelWidth, pixelHeight, extraX, extraY, extraWidth, extraHeight, fixedWidth, fixedHeight, scaleWidth, scaleHeight);
                 TracePassResult(passTrace, objInput, objFile);
                 tracePasses.Add(passTrace);
             }

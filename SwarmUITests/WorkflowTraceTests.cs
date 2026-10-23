@@ -1647,11 +1647,15 @@ public class WorkflowTraceTests : SwarmUITest
     [Test]
     public void TestObjectPassRecord()
     {
-        PromptRegion.Part part = new PromptRegion($"{PromptMarkerBase} <object:0.5,0.25,0.5,0.5> zqxobject cat").Parts.Single(p => p.Type == PromptRegion.PartType.Object);
+        PromptRegion.Part[] parts = [.. new PromptRegion($"{PromptMarkerBase} <object:0.5,0.25,0.5,0.5> zqxobject cat <object:0,0,0.25,0.25> zqxobject dog").Parts.Where(p => p.Type == PromptRegion.PartType.Object)];
+        PromptRegion.Part part = parts[0];
         // A 1024x1024 base: the object is 512,256 512x512, the crop (10% over-bound) is 460,204 564x614, inpainted at 2x.
-        JObject pass = T2IMultiStepObjectBuilder.TraceObjectPass(part, 512, 256, 512, 512, 460, 204, 564, 614, 1128, 1228, 2.0, 2.0);
-        Assert.That($"{pass["pass"]}", Is.EqualTo($"object{part.ContextID}"));
-        Assert.That($"{pass["prompt"]}", Is.EqualTo($"@object{part.ContextID}{T2IMultiStepObjectBuilder.TraceHash(part.Prompt)}"));
+        JObject pass = T2IMultiStepObjectBuilder.TraceObjectPass(1, part, 512, 256, 512, 512, 460, 204, 564, 614, 1128, 1228, 2.0, 2.0);
+        Assert.That($"{pass["pass"]}", Is.EqualTo("object1"));
+        Assert.That($"{pass["prompt"]}", Is.EqualTo($"@object1{T2IMultiStepObjectBuilder.TraceHash(part.Prompt)}"));
+        // The user's prompt carries no context IDs, so every object part has the same one: passes are told apart by position.
+        Assert.That(parts.Select(p => p.ContextID).Distinct().Count(), Is.EqualTo(1));
+        Assert.That($"{T2IMultiStepObjectBuilder.TraceObjectPass(2, parts[1], 0, 0, 256, 256, 0, 0, 307, 307, 1024, 1024, 3.3, 3.3)["pass"]}", Is.EqualTo("object2"));
         static JObject box(int x, int y, int width, int height) => new() { ["x"] = x, ["y"] = y, ["width"] = width, ["height"] = height };
         foreach ((string key, JObject expected) in new[] { ("object_px", box(512, 256, 512, 512)), ("crop_px", box(460, 204, 564, 614)), ("mask_px", box(104, 104, 1024, 1024)), ("inpaint_size", new JObject() { ["width"] = 1128, ["height"] = 1228 }) })
         {
