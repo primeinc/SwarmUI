@@ -48,7 +48,13 @@ models:
     cd "$REPO"
     SWARMUI_TEST_COMFY_MODELS="$WORK/models" dotnet test SwarmUITests/SwarmUITests.csproj --filter "TestCategory=NullModelFiles" --logger "console;verbosity=normal"
 
-# Write the extra_model_paths YAML: the test model folder (with the clipseg folder ComfyUISelfStartBackend forwards), SwarmUI's ExtraNodes and the null-model hook.
+# Copy the swarm_null_models hook into the pinned ComfyUI's custom_nodes, the one place both a hand-started ComfyUI and SwarmUI's self-start backend load it from. Loaded twice, the hook wraps itself and every text encoder load fails.
+[script]
+hook: comfy
+    mkdir -p "$WORK/ComfyUI/custom_nodes"
+    cp -R "$NODES/swarm_null_models" "$WORK/ComfyUI/custom_nodes/"
+
+# Write the extra_model_paths YAML for a hand-started ComfyUI: the test model folder (with the clipseg folder ComfyUISelfStartBackend forwards) and SwarmUI's ExtraNodes.
 [script]
 paths:
     mkdir -p "$WORK/models/diffusion_models" "$WORK/models/text_encoders" "$WORK/models/vae" "$WORK/models/loras" "$WORK/models/clipseg"
@@ -65,7 +71,6 @@ paths:
         "swarmui_nodes:" \
         "    custom_nodes: |" \
         "        $REPO/src/BuiltinExtensions/ComfyUIBackend/ExtraNodes" \
-        "        $NODES" \
         > "$WORK/extra_model_paths.yaml"
     cat "$WORK/extra_model_paths.yaml"
 
@@ -123,7 +128,7 @@ headers:
 
 # Run ComfyUI on CPU in the foreground, with no node cache so every node of every job executes.
 [script]
-start: paths
+start: paths hook
     cd "$WORK/ComfyUI"
     exec "$PYTHON" main.py --cpu --cache-none --listen 127.0.0.1 --port "$PORT" --disable-auto-launch --extra-model-paths-config "$WORK/extra_model_paths.yaml"
 
@@ -166,9 +171,7 @@ view run='debug':
 # - plain: AddDebugData off. No debug metadata, no trace line in the console or the log file, the same pixels as debug.
 # - default: AddDebugData on at the default log level (Info) with SaveLogToFile off and Alpha stealth metadata: the trace line is only in memory (ListRecentLogMessages), and the pixels carry the same metadata as the PNG text.
 [script]
-app: setup models clipseg
-    mkdir -p "$WORK/ComfyUI/custom_nodes"
-    cp -R "$NODES/swarm_null_models" "$WORK/ComfyUI/custom_nodes/"
+app: setup models clipseg hook
     cd "$REPO"
     dotnet build src/SwarmUI.csproj --configuration Debug
     "$PYTHON" -I - <<'EOF'

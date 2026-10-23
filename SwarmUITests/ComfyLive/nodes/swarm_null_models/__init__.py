@@ -1,4 +1,4 @@
-"""Test-only ComfyUI module for SwarmUITests ComfyLiveTests, loaded through the custom_nodes path that SwarmUITests/ComfyLive/justfile writes. Never installed with SwarmUI.
+"""Test-only ComfyUI module for SwarmUITests ComfyLiveTests and `just app`, copied into the pinned ComfyUI's custom_nodes by SwarmUITests/ComfyLive/justfile (`just hook`). Never installed with SwarmUI.
 
 ComfyUI derives diffusion model and VAE dimensions from tensor shapes, but builds Qwen3-VL text encoders from fixed configs:
 comfy/text_encoders/llama.py Qwen3VL_8BConfig for the language model, comfy/text_encoders/qwen3vl.py QWEN3VL_VISION for the vision tower.
