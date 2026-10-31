@@ -965,9 +965,9 @@ public partial class WorkflowGenerator
     public (JArray, JArray, JArray, JArray) BuildInputImageHandling(List<JArray> images, JArray pos, JArray neg, JArray latent)
     {
         JArray imgNeg = null;
-        if (IsKontext() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsAnyFlux2() || IsFlux3Image() || IsBoogu() || IsMageFlow() || IsMingImage() || (IsKrea2() && UserInput.Get(ComfyUIBackendExtension.EnableReferenceLatents, "none") != "none"))
+        if (IsKontext() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsAnyFlux2() || IsFlux3Image() || IsBoogu() || IsFibo2() || IsMageFlow() || IsMingImage() || (IsKrea2() && UserInput.Get(ComfyUIBackendExtension.EnableReferenceLatents, "none") != "none"))
         {
-            if (IsOmniGen() || IsQwenImageEditPlus() || IsQwenImage21() || IsFlux3Image() || IsBoogu() || IsMageFlow())
+            if (IsOmniGen() || IsQwenImageEditPlus() || IsQwenImage21() || IsFlux3Image() || IsBoogu() || IsFibo2() || IsMageFlow())
             {
                 imgNeg = neg;
             }
@@ -999,7 +999,7 @@ public partial class WorkflowGenerator
             }
             if (img is not null)
             {
-                if (IsQwenImageEditPlus() || IsQwenImage21() || IsFlux3Image() || IsBoogu() || IsMageFlow())
+                if (IsQwenImageEditPlus() || IsQwenImage21() || IsFlux3Image() || IsBoogu() || IsFibo2() || IsMageFlow())
                 {
                     neg = imgNeg;
                 }
@@ -1195,7 +1195,7 @@ public partial class WorkflowGenerator
             defscheduler ??= "simple";
         }
         // TODO: Registry of model default preferences instead of this
-        else if (IsFlux() || IsWanVideo() || IsWanVideo22() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsZImage() || IsMingImage() || IsZetaChroma() || IsErnie() || IsHiDreamO1() || IsLens() || IsPixelDiT() || IsKrea2() || IsBoogu() || IsMageFlow() || IsMossImage() || IsMiniMaxMusic3() || IsSeedVR2())
+        else if (IsFlux() || IsWanVideo() || IsWanVideo22() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsZImage() || IsMingImage() || IsZetaChroma() || IsErnie() || IsHiDreamO1() || IsLens() || IsPixelDiT() || IsKrea2() || IsBoogu() || IsFibo2() || IsMageFlow() || IsMossImage() || IsMiniMaxMusic3() || IsSeedVR2())
         {
             defscheduler ??= "simple";
         }
@@ -1504,6 +1504,18 @@ public partial class WorkflowGenerator
             WGNodeData img = LoadImage(images[index], "${promptimages." + index + "}", false);
             (int width, int height) = images[index].GetResolution();
             int genWidth = UserInput.GetImageWidth(), genHeight = UserInput.GetImageHeight();
+            if (IsFibo2() && fixSize)
+            {
+                string scaled = CreateNode("ImageScale", new JObject()
+                {
+                    ["image"] = img.Path,
+                    ["width"] = genWidth,
+                    ["height"] = genHeight,
+                    ["crop"] = "center",
+                    ["upscale_method"] = "lanczos"
+                });
+                return NodePath(scaled, 0);
+            }
             int actual = (int)Math.Sqrt(width * height), target = (int)Math.Sqrt(genWidth * genHeight);
             bool doesFit = true;
             if (promptSize && textEncodedImage == "small")
@@ -2776,12 +2788,13 @@ public partial class WorkflowGenerator
                 ["text"] = prompt
             }, id);
         }
-        else if (IsIdeogram4() || IsKrea2() || IsMossImage() || (IsBoogu() && isPositive) || IsMageFlow())
+        else if (IsIdeogram4() || IsKrea2() || IsMossImage() || (IsBoogu() && isPositive) || (IsFibo2() && isPositive) || IsMageFlow())
         {
-            JArray imageNode = GetPromptImage(true, true, 0);
+            bool promptSize = !IsFibo2();
+            JArray imageNode = GetPromptImage(true, promptSize, 0);
             for (int i = 1; i < 10; i++)
             {
-                JArray image2 = GetPromptImage(true, true, i);
+                JArray image2 = GetPromptImage(true, promptSize, i);
                 if (image2 is null)
                 {
                     break;
@@ -2805,7 +2818,7 @@ public partial class WorkflowGenerator
                 ["target_height"] = height,
                 ["guidance"] = UserInput.Get(T2IParamTypes.FluxGuidanceScale, defaultGuidance),
                 ["images"] = imageNode,
-                ["llama_template"] = IsBoogu() ? null : "krea2" // TODO: Ideogram preferred template?
+                ["llama_template"] = IsBoogu() || IsFibo2() ? null : "krea2" // TODO: Ideogram preferred template?
             }, id);
         }
         else if (IsQwenImageEdit() && (isPositive || IsQwenImageEditPlus()) && (qwenImage = GetPromptImage(true, true)) is not null)
@@ -3212,7 +3225,7 @@ public partial class WorkflowGenerator
         string explicitSampler = UserInput.Get(ComfyUIBackendExtension.SamplerParam, null, sectionId: sectionId, includeBase: false) ?? (isRefiner ? UserInput.Get(ComfyUIBackendExtension.RefinerSamplerParam, null) : null);
         string explicitScheduler = UserInput.Get(ComfyUIBackendExtension.SchedulerParam, null, sectionId: sectionId, includeBase: false) ?? (isRefiner ? UserInput.Get(ComfyUIBackendExtension.RefinerSchedulerParam, null) : null);
         int startStep = isRefiner ? (int)Math.Round(steps * (1 - UserInput.Get(T2IParamTypes.RefinerControl, 1))) : 0;
-        string sampled = CreateKSampler(CurrentModel.Path, [cond, 0], [cond, 1], latent, cfg, steps, startStep, 10000, seed, false, true, explicitSampler: explicitSampler ?? "euler", explicitScheduler: explicitScheduler ?? "simple", sectionId: sectionId);
+        string sampled = CreateKSampler(CurrentModel.Path, [cond, 0], [cond, 1], latent, cfg, steps, startStep, 10000, seed, false, true, doTiled: isRefiner && UserInput.Get(T2IParamTypes.RefinerDoTiling, false), explicitSampler: explicitSampler ?? "euler", explicitScheduler: explicitScheduler ?? "simple", sectionId: sectionId);
         JArray sampledLatent = [sampled, 0];
         if (chunkOverlap is not null)
         {
