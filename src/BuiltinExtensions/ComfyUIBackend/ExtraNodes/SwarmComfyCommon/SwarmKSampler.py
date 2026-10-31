@@ -16,11 +16,31 @@ _preview_lock = threading.Lock()
 _preview_sampler_active = False
 _last_preview_step_sent = -1
 
+# preview_to_image is process-global, so its activation state must also be
+# process-global. Keeping this state module-local breaks if SwarmComfyCommon is
+# loaded more than once: the first module owns the monkeypatch while a later
+# module owns the active sampler.
+if not hasattr(latent_preview, "_swarm_preview_state"):
+    latent_preview._swarm_preview_state = {"active_count": 0, "lock": threading.Lock()}
+_preview_state = latent_preview._swarm_preview_state
+
+def _swarm_preview_active():
+    with _preview_state["lock"]:
+        return _preview_state["active_count"] > 0
+
+def _swarm_preview_begin():
+    with _preview_state["lock"]:
+        _preview_state["active_count"] += 1
+
+def _swarm_preview_end():
+    with _preview_state["lock"]:
+        _preview_state["active_count"] = max(0, _preview_state["active_count"] - 1)
+
 if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
     _original_preview_to_image = latent_preview.preview_to_image
     # Copy/paste of preview_to_image but with the Image.fromarray on unloaded data removed
     def _swarm_preview_to_image(latent_image, do_scale=True):
-        if not _preview_sampler_active:
+        if not _swarm_preview_active():
             return _original_preview_to_image(latent_image, do_scale)
         if do_scale:
             latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1).mul(0xFF))
@@ -160,6 +180,17 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_ma
         return None
 
 
+def _swarm_preview_frame_to_image(frame):
+    # Normal Comfy previewers return PIL.Image. Swarm's async preview monkeypatch
+    # returns a CPU uint8 tensor. Accept both so a bypassed/replaced monkeypatch
+    # cannot crash the preview sender.
+    if isinstance(frame, Image.Image):
+        return frame
+    if torch.is_tensor(frame):
+        return Image.fromarray(frame.numpy())
+    raise TypeError(f"Unsupported Swarm preview frame type: {type(frame).__name__}")
+
+
 def make_swarm_sampler_callback(steps, device, model, previews):
     previewer = latent_preview.get_previewer(device, model.model.latent_format) if previews != "none" else None
     pbar = comfy.utils.ProgressBar(steps)
@@ -202,10 +233,10 @@ def make_swarm_sampler_callback(steps, device, model, previews):
                     if not _preview_sampler_active or step < _last_preview_step_sent:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [Image.fromarray(tensor.numpy()) for tensor in frames])
+                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames])
                     else:
-                        for id, tensor in frames:
-                            swarm_send_extra_preview(id, Image.fromarray(tensor.numpy()))
+                        for id, frame in frames:
+                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame))
                     _last_preview_step_sent = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
@@ -344,7 +375,7 @@ def samplers_sample(model, noise, positive, negative, cfg, device, sampler, sigm
 
 #comfy/ComfyUI/comfy/samplers.py - KSampler
 class PatchedKSampler(comfy.samplers.KSampler):
-    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None, expected_step_count=0):
         if sigmas is None:
             sigmas = self.sigmas
 
@@ -357,21 +388,83 @@ class PatchedKSampler(comfy.samplers.KSampler):
             if start_step < (len(sigmas) - 1):
                 sigmas = sigmas[start_step:]
             else:
+                if expected_step_count > 0:
+                    raise ValueError(
+                        f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
+                        f"{expected_step_count} real denoising evaluations; got 0 "
+                        f"(scheduled={self.steps}, start={start_step}, "
+                        f"available_sigma_intervals={len(sigmas)-1}). "
+                        "Refusing an unchanged latent instead of silently pretending to edit."
+                    )
                 if latent_image is not None:
                     return latent_image
                 else:
                     return torch.zeros_like(noise)
 
+        # This is the ACTUAL Comfy sampler sigma boundary, not a planned graph.
+        # Qwen segment workflows pass their requested iteration count so we fail
+        # before expensive model execution if a scheduler silently truncated it.
+        if expected_step_count > 0:
+            actual_count = max(0, len(sigmas) - 1)
+            if actual_count != expected_step_count:
+                raise ValueError(
+                    f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
+                    f"{expected_step_count} sigma transitions; got "
+                    f"{actual_count} (scheduled={self.steps}, start={start_step}, "
+                    f"scheduler={self.scheduler}). Refusing truncated inference."
+                )
+            # These are actual ModelPatcher entries, not proof of their source or
+            # semantic fidelity. Unique key counts can remain constant for two LoRAs
+            # patching the same layers; contribution count distinguishes that.
+            patches = getattr(self.model, "patches", {})
+            contributions = sum(len(entries) for entries in patches.values())
+            print(
+                f"[QWEN21-SEG] sampler runtime: expected_steps={expected_step_count} "
+                f"actual_steps={actual_count} scheduled_steps={self.steps} start={start_step} "
+                f"patch_keys={len(patches)} patch_contributions={contributions} "
+                f"patch_uuid={getattr(self.model, 'patches_uuid', '(unavailable)')}",
+                flush=True,
+            )
         sampler = comfy.samplers.sampler_object(self.sampler)
+        # A sigma schedule is only a plan. Observe the callbacks actually emitted
+        # by the real Comfy sampler so 4 scheduled intervals cannot masquerade
+        # as 4 completed iterations. This is not a count of DiT forward calls:
+        # some samplers evaluate the model multiple times per iteration.
+        observed_steps = 0
 
-        return samplers_sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+        def observed_callback(step, x0, x, total_steps):
+            nonlocal observed_steps
+            observed_steps += 1
+            if callback is not None:
+                return callback(step, x0, x, total_steps)
+
+        samples = samplers_sample(
+            self.model, noise, positive, negative, cfg, self.device, sampler,
+            sigmas, self.model_options, latent_image=latent_image,
+            denoise_mask=denoise_mask,
+            callback=observed_callback if expected_step_count > 0 else callback,
+            disable_pbar=disable_pbar, seed=seed, model_negative=model_negative
+        )
+        if expected_step_count > 0:
+            print(
+                f"[QWEN21-SEG] sampler completed_steps={observed_steps} "
+                f"requested_steps={expected_step_count}",
+                flush=True,
+            )
+            if observed_steps != expected_step_count:
+                raise ValueError(
+                    f"[QWEN21-SEG] EXECUTION STEP MISMATCH: requested "
+                    f"{expected_step_count} completed sampler iterations but "
+                    f"observed {observed_steps} callback events."
+                )
+        return samples
 
 
 #comfy/ComfyUI/comfy/sample.py - sample
-def sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+def sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None, expected_step_count=0):
     sampler = PatchedKSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
-    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative, expected_step_count=expected_step_count)
     samples = samples.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
     return samples
 
@@ -405,6 +498,7 @@ class SwarmKSampler:
             },
             "optional": {
                 "model_negative": ("MODEL", ),
+                "expected_step_count": ("INT", {"default": 0, "min": 0, "max": 10000}),
             }
         }
 
@@ -413,7 +507,7 @@ class SwarmKSampler:
     FUNCTION = "run_sampling"
     DESCRIPTION = "Works like a vanilla Comfy KSamplerAdvanced, but with extra inputs for advanced features such as sigma scale, tiling, previews, etc."
 
-    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=None):
+    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=None, expected_step_count=0):
         device = comfy.model_management.get_torch_device()
         latent_samples = latent_image["samples"]
         latent_samples = comfy.sample.fix_empty_latent_channels(model, latent_samples)
@@ -481,20 +575,22 @@ class SwarmKSampler:
             with _preview_lock:
                 _preview_sampler_active = True
                 _last_preview_step_sent = -1
+            _swarm_preview_begin()
             try:
                 callback = make_swarm_sampler_callback(steps, device, model, previews)
 
                 samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
                                         denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
-                                        force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative)
+                                        force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative, expected_step_count=expected_step_count)
                 out["samples"] = samples
             finally:
                 with _preview_lock:
                     _preview_sampler_active = False
+                _swarm_preview_end()
         return (out, )
 
     # tiled sample version of sample function
-    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=None):
+    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=None, expected_step_count=0):
         out = latent_image.copy()
         # split image into tiles
         latent_samples = latent_image["samples"]
@@ -504,18 +600,18 @@ class SwarmKSampler:
         for coords, tile in tiles:
             tile_positive = crop_conditioning(positive, coords)
             tile_negative = crop_conditioning(negative, coords)
-            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, tile_positive, tile_negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative)
+            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, tile_positive, tile_negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative, expected_step_count=expected_step_count)
             resampled_tiles.append((coords, resampled_tile[0]["samples"]))
         # stitch the tiles to get the final upscaled image
         result = stitch_latent_tensors(latent_samples.shape, resampled_tiles)
         out["samples"] = result
         return (out,)
 
-    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size, model_negative=None):
+    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size, model_negative=None, expected_step_count=0):
         if tile_sample:
-            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=model_negative)
+            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=model_negative, expected_step_count=expected_step_count)
         else:
-            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative)
+            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative, expected_step_count=expected_step_count)
 
 
 NODE_CLASS_MAPPINGS = {

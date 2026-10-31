@@ -935,10 +935,10 @@ public partial class WorkflowGenerator
     }
 
     /// <summary>Creates a model loader and adapts it with any registered model adapters, and returns (Model, Clip, VAE).</summary>
-    public (T2IModel, WGNodeData, WGNodeData, WGNodeData) CreateModelLoader(T2IModel model, string type, string id = null, bool noCascadeFix = false, int sectionId = 0)
+    public (T2IModel, WGNodeData, WGNodeData, WGNodeData) CreateModelLoader(T2IModel model, string type, string id = null, bool noCascadeFix = false, int sectionId = 0, int additionalLoraConfinement = 0)
     {
         ModelLoadHelpers helpers = new(this);
-        string helper = $"modelloader_{model.Name}_{type}";
+        string helper = $"modelloader_{model.Name}_{type}" + (additionalLoraConfinement > 0 ? $"_lora_section_{additionalLoraConfinement}" : "");
         if (NodeHelpers.TryGetValue(helper, out string alreadyLoaded))
         {
             string[] parts = alreadyLoaded.SplitFast(':');
@@ -1688,9 +1688,18 @@ public partial class WorkflowGenerator
             }
         }
         UserInput.TargetResolutionPrecision = model?.ModelClass?.CompatClass?.ResolutionPrecision ?? 16;
-        foreach (WorkflowGenStep step in ModelGenSteps.Where(s => s.Priority > -100))
+        int priorAdditionalLoraConfinement = LoadingAdditionalLoraConfinement;
+        LoadingAdditionalLoraConfinement = additionalLoraConfinement;
+        try
         {
-            step.Action(this);
+            foreach (WorkflowGenStep step in ModelGenSteps.Where(s => s.Priority > -100))
+            {
+                step.Action(this);
+            }
+        }
+        finally
+        {
+            LoadingAdditionalLoraConfinement = priorAdditionalLoraConfinement;
         }
         if (LoadingClip is null && type != "SeedVR2")
         {
