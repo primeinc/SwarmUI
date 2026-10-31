@@ -691,7 +691,12 @@ function genInputs(delay_final = false) {
             };
             inputPrompt.addEventListener('input', update);
             inputPrompt.addEventListener('change', update);
+            inputPrompt.addEventListener('input', () => loraHelper.refreshConfinementOptions());
+            inputPrompt.addEventListener('change', () => loraHelper.refreshConfinementOptions());
         }
+        let altPrompt = getRequiredElementById('alt_prompt_textbox');
+        altPrompt.addEventListener('input', () => loraHelper.refreshConfinementOptions());
+        altPrompt.addEventListener('change', () => loraHelper.refreshConfinementOptions());
         let altPromptArea = getRequiredElementById('alt_prompt_region');
         if (defaultPromptVisible) {
             altPromptArea.style.display = 'none';

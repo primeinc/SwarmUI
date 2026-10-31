@@ -86,6 +86,27 @@ public class PromptHandlerTests : SwarmUITest
         Assert.That(LegacyPromptParser.Convert("(some:text)"), Is.EqualTo("<weight[1.1]:some:text>"));
     }
 
+    /// <summary>Records the exact real-world segment tag grammar without a fabricated model graph.</summary>
+    [Test]
+    public static void TestQwenGirlReplacementSegmentTag()
+    {
+        const string actualPrompt = "<segment:girl,0.8,0.1> Edit the image, replace the girl with a black boy with blue eyes";
+        PromptRegion parsed = new(actualPrompt);
+        Assert.That(parsed.Parts, Has.Count.EqualTo(1));
+        Assert.That(parsed.GlobalPrompt, Is.Empty,
+            "A segment-only prompt supplies no base-stage prompt; segment processing occurs after that stage.");
+        PromptRegion.Part segment = parsed.Parts.Single();
+        Assert.That(segment.Type, Is.EqualTo(PromptRegion.PartType.Segment));
+        Assert.That(segment.DataText, Is.EqualTo("girl"));
+        Assert.That(segment.Strength, Is.EqualTo(0.1).Within(0.000001),
+            "The last value is the CLIPSeg confidence threshold, not edit strength.");
+        Assert.That(segment.Strength2, Is.EqualTo(0.8).Within(0.000001),
+            "The penultimate value is segment edit creativity.");
+        Assert.That(segment.Prompt.Trim(), Is.EqualTo(
+            "Edit the image, replace the girl with a black boy with blue eyes"));
+        Assert.That((int)Math.Round(20 * (1 - segment.Strength2)), Is.EqualTo(4));
+    }
+
     /// <summary>Tests <see cref="PromptRegion.RemoveTagAttachment(string, string, out string)"/>.</summary>
     [Test]
     public static void TestRemoveTagAttachment()
