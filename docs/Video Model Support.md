@@ -51,19 +51,21 @@ To make a video **from a text prompt alone**, select the video model in the `Mod
 
 ### Image-To-Video Models
 
-To **animate a specific existing image**, use the following controls. They are not interchangeable:
+To **animate a specific existing image**, you have two choices: use a dedicated **starting-frame input** (the `Init Image` route), or use **prompt-attached pictures** as visual references. With H3 Ref2VA, a prompt-attached picture can also define the opening shot. These controls work differently:
 
 - **`Init Image` (source image / starting frame):** Upload the picture in the `Init Image` parameter group. This is the image the video stage will animate.
 - **`Init Image Creativity` (preliminary image-to-image *denoising strength*):** Set this to **`0`** to keep the uploaded source image unchanged and skip the preliminary *still-image generation* pass. It does **not** set video image-conditioning strength to zero, and it does **not** disable the video model's use of the starting frame.
-- **Images attached to the prompt box (`Prompt Images`, or *reference images*):** These supply visual references for supported models, such as `<Picture 1>` with MiniMax H3 Ref2AV. They are **not** the same as the `Init Image` starting frame. Attaching a picture to the prompt does not substitute for uploading it under `Init Image` when you want that exact picture animated.
+- **Images attached to the prompt box (`Prompt Images`, or *reference images*):** These are numbered references, such as `<Picture 1>`, `<Picture 2>`, and so on. **For H3 Ref2VA, the first attached image can also be the opening frame** when the prompt tells H3 to begin with it at 0.00 seconds; it may do so even without that instruction. Unlike a dedicated first-frame input, this is **prompt/reference conditioning**, not a hard keyframe constraint. Additional attached pictures can guide other subjects, shots, or moments.
 
-For an existing photo:
+For a **dedicated first-frame input** using an existing photo:
 
 1. Select a regular **image model** (such as SDXL or Flux) in `Models`. The current interface still requires a main model even when its image-generation pass will be skipped.
 2. Enable `Init Image`, upload the photo **there**, and set **`Init Image Creativity = 0`**.
 3. Enable `Image To Video` and choose your **video model** under `Video Model` (for example, H3 FL2VA).
 4. Set the length under **`Image To Video > Video Frames`**. Use the `Res` button next to the source image if you want to match its resolution; otherwise, the image may be stretched to fit.
 5. Generate. SwarmUI uses the uploaded still as the source frame for the video stage, without first generating a replacement still.
+
+**Alternative: H3 with prompt-attached images, in one video pass.** Select H3 Ref2VA as the **main model**, attach one or more images directly to the prompt, and say which image should appear when, such as `At 0.00 seconds, start from <Picture 1> and then slowly pan to the right.` Leave `Image To Video` **off**. This does not create a separate still-image generation pass. For precise first-frame conditioning, use the dedicated `Init Image` route above.
 
 If you **want SwarmUI to create the starting image** from a text prompt, leave `Init Image` off, choose an image model as the main model, and select a video model under `Image To Video`. In that case, the image-then-video two-stage pipeline is intentional.
 
@@ -573,13 +575,15 @@ https://github.com/user-attachments/assets/f20a2d4c-a667-47e1-9da8-82b3e1d55792
 
 The "FL2VA" model is used for first-frame-conditioned image-to-video and supports an optional `Video End Image` as the last frame (see [the Image-To-Video instructions above](#image-to-video-models)). Remember that H3 also generates audio, so describe the desired sound in the prompt.
 
-To animate an uploaded photo, put it under **`Init Image`**, not in the prompt's reference-image attachments. Set **`Init Image Creativity = 0`** to skip the preliminary still-image sampler. This does **not** remove FL2VA's first-frame conditioning: the photo is still the video source.
+To **explicitly condition the first frame** with FL2VA through SwarmUI's Image-to-Video pipeline, upload the photo under **`Init Image`**. Set **`Init Image Creativity = 0`** to skip preliminary still-image sampling; this does **not** remove FL2VA's first-frame conditioning.
+
+**Prompt-attached images are also useful for starting a video.** With H3 Ref2VA selected as the main model, you can attach multiple pictures right in the prompt. `<Picture 1>` can be used for the opening shot, including by telling the model `At 0.00 seconds, the video begins from <Picture 1>`. This is a **reference-guided opening**, not the same as a hard keyframe. Leave the separate **`Image To Video`** group off to keep it to one generation.
 
 For text-only H3 generation, instead select H3 as the main model, control the duration with **`Text To Video > Text2Video Frames`**, and leave **`Image To Video`** off. Choosing H3 in both places currently creates an unnecessary second video-generation stage.
 
 ### MiniMax H3 Reference Model Usage
 
-When using the Ref2AV reference model, you can attach images freely (up to a max of 10) to the **prompt box**. These are **reference images / prompt attachments**, not an `Init Image` starting frame. In the prompt, you can write something like `The person in <Picture 1>` to refer to the first attached picture (or `<Picture 2>` for the next). **`Init Image Creativity` does not control the strength of these references.**
+When using the Ref2AV reference model, you can attach multiple pictures to the **prompt box** (the current SwarmUI H3 encoding path accepts up to nine). They are referenced in attachment order as `<Picture 1>`, `<Picture 2>`, etc. **The first picture can be the opening shot:** H3 often begins with it, and you can make the intent explicit with a prompt such as `At 0.00 seconds, the scene begins from <Picture 1>`. Use other pictures for characters, details, or additional shots. This is reference conditioning, so an opening-frame match is not as strictly anchored as FL2VA's dedicated first-frame input. **`Init Image Creativity` does not control the strength of these references.** See [MiniMax's official prompt guide](https://github.com/MiniMax-AI/MiniMax-H3/blob/main/.agents/skills/h3-prompt-writing/references/base-en.txt) and [ComfyUI's Ref2VA multiframe example](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_minimax_h3_multiframe_reference.json), which uses `<Picture 1>` as the opening shot without a separate guide at frame zero.
 
 You can also attach audio files freely (up to a max of 3). In the prompt you can type something like `She has the voice from <Audio 1>` to reference the audio.
 
