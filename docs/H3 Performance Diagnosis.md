@@ -155,6 +155,57 @@ The comparison selects the **largest video latent** in the two-video run so
 its short first video cannot accidentally be compared against the final
 13.5-second main-model video.
 
+## When [H3PERF] and [H3VAE] do not appear in SwarmUI logs
+
+A launcher echo and a child-CMD smoke test are **not** proof that the
+ComfyUI worker loaded the tracing code. This fork emits a startup handshake
+from both sides of the real process boundary. After updating `dev`,
+**fully restart SwarmUI and its managed ComfyUI backend**, then inspect the
+SwarmUI console (Debug logging enabled) for:
+
+```text
+[H3TRACE-BOOT] host=SwarmUI backend=ComfyUI-0 traceEnabled=True childEnv=1
+[ComfyUI-0/STDERR] [H3TRACE-BOOT] source=SwarmComfyCommon import_start env=1 file=...
+[ComfyUI-0/STDERR] [H3TRACE-BOOT] source=SwarmComfyCommon status=enabled vae_hook=True custom_sampler=True ...
+[H3TRACE-ROUTE] stage=video-followup sampler=SwarmKSampler ... per_step_trace=True
+[ComfyUI-0/STDERR] [H3TRACE-ROUTE] source=SwarmKSampler model=MiniMaxH3 active=True ...
+[ComfyUI-0/STDERR] [H3PERF] {"event": "start", ...}
+[ComfyUI-0/STDERR] [H3VAE] {"event": "start", ...}
+```
+
+The lines are examples of the expected structure, **not recorded runtime
+output**. The parent trace state is reported even when disabled, and the
+Python package reports its loaded file path even when tracing is disabled.
+
+Interpret missing stages *in order*:
+
+1. **No SwarmUI host marker:** the running binary is stale, the wrong
+   installation is running, or this is not a self-start ComfyUI backend.
+2. **Host marker says traceEnabled=False:** the actual SwarmUI process was
+   not started with `SWARM_H3_TRACE=1`. Launch using the updated
+   `Windows_Update_SwarmUI_primeinc_test.bat`, not only the ordinary
+   `launch-windows.bat`.
+3. **Host enabled, but no Python package marker:** ComfyUI did not load
+   the patched `SwarmComfyCommon` from the expected installation, or
+   its import failed before reaching the hook. The Python marker names
+   the actual file path for comparison.
+4. **Package enabled, but C# route reports native KSamplerAdvanced:**
+   the earlier `[H3PERF]` trace was limited to `SwarmKSampler`.
+   This diagnosis is **not** proof that the native sampler is equivalent.
+5. **Route reports SwarmKSampler, but Python entry is absent:** the
+   worker is executing a different node implementation than the source
+   that generated the graph.
+6. **Python sampler entry reports active=False:** the effective model
+   class name did not pass the H3 guard. The entry records that name.
+7. **Sampler/VAE events missing despite activated routes:** inspect
+   plugin import warnings and actual ComfyUI process stderr. Both trace
+   event emitters now write directly to stderr with `flush=True`,
+   avoiding Python INFO log-level filtering.
+
+**Proof scope:** CPU-only CI verifies startup source gates, JSON formatting,
+and stderr emission; it cannot prove the live GPU worker, external
+ComfyUI version, or loaded custom-node path on your machine.
+
 ## VAE decoder progress and timing
 
 **H3 VAE decoding no longer has to disappear into a silent interval.**
