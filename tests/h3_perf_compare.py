@@ -45,6 +45,19 @@ def select_longest_video(runs):
     return max(runs, key=lambda run: (latent_video_volume(run), len(run["steps"])))
 
 
+def split_sequential_prompts(runs):
+    """Two controlled generations in one warm ComfyUI process, in requested order."""
+    groups = []
+    for run in runs:
+        pid = run["start"].get("prompt_id")
+        if not groups or groups[-1][0] != pid:
+            groups.append((pid, []))
+        groups[-1][1].append(run)
+    if len(groups) != 2:
+        raise ValueError("Expected exactly two distinct sequential H3 prompts in one log; found %d" % len(groups))
+    return groups[0][1], groups[1][1]
+
+
 def describe(run):
     s = run["start"]
     steps = run["steps"]
@@ -80,10 +93,13 @@ def compare(first, second):
 def main():
     parser = argparse.ArgumentParser(description="Compare real H3 sampler inputs and timings from two runs.")
     parser.add_argument("image_to_video_log", help="Log from two-output follow-up run")
-    parser.add_argument("main_video_log", help="Log from single-output main-model run")
+    parser.add_argument("main_video_log", nargs="?", help="Optional separate log from main-model run. Omit it if both runs are in one log, I2V first.")
     args = parser.parse_args()
     first_runs = parse_trace(args.image_to_video_log)
-    second_runs = parse_trace(args.main_video_log)
+    if args.main_video_log:
+        second_runs = parse_trace(args.main_video_log)
+    else:
+        first_runs, second_runs = split_sequential_prompts(first_runs)
     report = compare(select_longest_video(first_runs), select_longest_video(second_runs))
     report["sampler_counts"] = {"image_to_video": len(first_runs), "main_video": len(second_runs)}
     print(json.dumps(report, indent=2, sort_keys=True))
