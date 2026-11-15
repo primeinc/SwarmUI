@@ -70,6 +70,40 @@ This is **FL2VA first-frame conditioning**; it is not identical in semantics
 to **Ref2VA image-reference conditioning**, so output fidelity should be judged
 against the user's desired opening frame.
 
+## Windows log analysis menu
+
+After updating the `primeinc/SwarmUI` `dev` checkout, double-click
+[`H3_Log_Analyzer.bat`](../H3_Log_Analyzer.bat) in the repository root.
+It requires Python 3 and uses Windows' native file chooser (falling back to
+a typed/dragged file path). It never edits source logs.
+
+- **Quick Scan** reads older logs without `[H3PERF]` to extract prompt times,
+  model weight staging, compiler graph-break counts and output counts. It
+  explicitly labels the absence of detailed sampler measurements.
+- **Two Runs / One Log** expects the two-stage I2V request first, then main H3.
+  **Three Runs / One Log** expects I2V, main H3, then the one-frame-first-stage
+  I2V request. Runs must have distinct ComfyUI prompt IDs and appear in order.
+- **Compare Two/Three Files** accepts separate log files in the same order.
+  It reuses `tests/h3_perf_compare.py` and selects the longest video sampler
+  in each request; short preliminary samplers are not mistaken for final videos.
+- **Export H3 Trace** creates sanitized structured `.jsonl` containing only
+  `[H3PERF]` records. **Open Reports** opens `H3-Reports`.
+- Every successful operation writes timestamped `.txt` and `.json` files
+  under `H3-Reports`, which is excluded from Git along with
+  `h3-session*.log`. Source log paths appear in the local JSON receipt.
+
+To scan one file directly, drag its `.log` or `.txt` onto the batch file,
+or run `H3_Log_Analyzer.bat --scan "C:\\path with spaces\\h3-session.log"`.
+For a non-interactive Windows smoke test, run
+`H3_Log_Analyzer.bat --self-test`.
+
+For persistent logs, launch the updated Windows updater from a terminal
+with stdout/stderr redirected to a file, or use the PowerShell capture
+example below. The `SWARM_H3_TRACE=1` variable must be present in the
+ComfyUI backend's environment, and the backend must restart to reload the
+patched sampler. The analyzer does not change runtime settings or start
+model inference.
+
 ## Capture a discriminating trace
 
 This fork's `SwarmKSampler` has an **opt-in** shape-and-timing trace. Run the
