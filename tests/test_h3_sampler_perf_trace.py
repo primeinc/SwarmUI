@@ -62,7 +62,7 @@ class H3SamplerTraceTests(unittest.TestCase):
         self.assertEqual(record["latent_shapes"], [[1, 16, 97, 60, 60]])
 
     def test_step_times_use_monotonic_clock_and_forward_callback(self):
-        times = iter([100.0, 164.5, 229.0])
+        times = iter([100.0, 164.5, 166.0, 230.5, 231.0])
         events = []
         calls = []
         def original(step, x0, x, total):
@@ -73,8 +73,8 @@ class H3SamplerTraceTests(unittest.TestCase):
         self.assertEqual(wrapped(1, None, None, 4), "ok")
         self.assertEqual(calls, [(0, 4), (1, 4)])
         self.assertEqual(events, [
-            {"event": "step", "step": 1, "total_steps": 4, "elapsed_s": 64.5},
-            {"event": "step", "step": 2, "total_steps": 4, "elapsed_s": 64.5},
+            {"event": "step", "step": 1, "total_steps": 4, "elapsed_s": 64.5, "callback_s": 1.5},
+            {"event": "step", "step": 2, "total_steps": 4, "elapsed_s": 64.5, "callback_s": 0.5},
         ])
 
     def test_diagnostics_are_opt_in_not_an_inference_default(self):
