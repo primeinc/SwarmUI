@@ -76,6 +76,7 @@ def describe(run):
         "cuda_reserved_mb_start": s.get("cuda_reserved_mb"),
         "cuda_reserved_mb_finish": (run["finish"] or {}).get("cuda_reserved_mb"),
         "step_seconds": [step["elapsed_s"] for step in steps],
+        "preview_callback_seconds": [step.get("callback_s") for step in steps],
         "average_step_seconds": round(average, 2) if average is not None else None,
         "sampler_seconds": (run["finish"] or {}).get("elapsed_s"),
         "sampler_success": (run["finish"] or {}).get("success"),
