@@ -12,10 +12,6 @@ from comfy_extras.nodes_flux import Flux2Scheduler
 from comfy_extras.nodes_ideogram4 import ideogram4_sigmas
 from comfy_extras.nodes_custom_sampler import Guider_DualModel
 
-_preview_lock = threading.Lock()
-_preview_sampler_active = False
-_last_preview_step_sent = -1
-
 # preview_to_image is process-global, so its activation state must also be
 # process-global. Keeping this state module-local breaks if SwarmComfyCommon is
 # loaded more than once: the first module owns the monkeypatch while a later
@@ -46,7 +42,7 @@ if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
             latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1).mul(0xFF))
         else:
             latents_ubyte = (latent_image.clamp(0, 1).mul(0xFF))
-        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8, non_blocking=comfy.model_management.device_supports_non_blocking(latent_image.device))
+        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8)
         return latents_ubyte
     _swarm_preview_to_image._swarm_patched = True
     latent_preview.preview_to_image = _swarm_preview_to_image
@@ -135,9 +131,15 @@ def get_preview_metadata():
     return {"node_id": node_id, "prompt_id": prompt_id, "display_node_id": node_id, "parent_node_id": node_id, "real_node_id": node_id} # display_node_id, parent_node_id, real_node_id? comfy_execution/progress.py has this.
 
 
-def swarm_send_extra_preview(id, image):
+def make_swarm_preview_state():
+    # Capture Comfy's prompt/node context on the sampling thread. A background
+    # preview sender has no executing ContextVar and must not use last_prompt_id.
+    return {"lock": threading.Lock(), "active": True, "last_step_sent": -1, "metadata": get_preview_metadata()}
+
+
+def swarm_send_extra_preview(id, image, preview_metadata):
     server = PromptServer.instance
-    metadata = get_preview_metadata()
+    metadata = preview_metadata.copy()
     metadata["mime_type"] = "image/jpeg"
     metadata["id"] = id
     metadata_json = json.dumps(metadata).encode('utf-8')
@@ -151,13 +153,13 @@ def swarm_send_extra_preview(id, image):
     server.send_sync(9999123, combined_data, sid=server.client_id)
 
 
-def swarm_send_animated_preview(id, images):
+def swarm_send_animated_preview(id, images, preview_metadata):
     server = PromptServer.instance
     bytesIO = BytesIO()
     images[0].save(bytesIO, save_all=True, duration=int(1000.0/6), append_images=images[1 : len(images)], lossless=False, quality=60, method=0, format='WEBP')
     bytesIO.seek(0)
     image_bytes = bytesIO.getvalue()
-    metadata = get_preview_metadata()
+    metadata = preview_metadata.copy()
     metadata["mime_type"] = "image/webp"
     metadata["id"] = id
     metadata_json = json.dumps(metadata).encode('utf-8')
@@ -189,7 +191,7 @@ def _swarm_preview_frame_to_image(frame):
     raise TypeError(f"Unsupported Swarm preview frame type: {type(frame).__name__}")
 
 
-def make_swarm_sampler_callback(steps, device, model, previews):
+def make_swarm_sampler_callback(steps, device, model, previews, preview_state):
     previewer = latent_preview.get_previewer(device, model.model.latent_format) if previews != "none" else None
     pbar = comfy.utils.ProgressBar(steps)
     def callback(step, x0, x, total_steps):
@@ -224,18 +226,18 @@ def make_swarm_sampler_callback(steps, device, model, previews):
                 event = torch.cuda.Event()
                 event.record()
             def send_preview():
-                global _last_preview_step_sent
                 if event is not None:
                     event.synchronize()
-                with _preview_lock:
-                    if not _preview_sampler_active or step < _last_preview_step_sent:
+                with preview_state["lock"]:
+                    # Old samplers cannot submit previews into a newer generation.
+                    if not preview_state["active"] or step < preview_state["last_step_sent"]:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames])
+                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames], preview_state["metadata"])
                     else:
                         for id, frame in frames:
-                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame))
-                    _last_preview_step_sent = step
+                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame), preview_state["metadata"])
+                    preview_state["last_step_sent"] = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
 
@@ -569,21 +571,18 @@ class SwarmKSampler:
         
         out = latent_image.copy()
         if steps > 0:
-            global _preview_sampler_active, _last_preview_step_sent
-            with _preview_lock:
-                _preview_sampler_active = True
-                _last_preview_step_sent = -1
+            preview_state = make_swarm_preview_state()
             _swarm_preview_begin()
             try:
-                callback = make_swarm_sampler_callback(steps, device, model, previews)
+                callback = make_swarm_sampler_callback(steps, device, model, previews, preview_state)
 
                 samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
                                         denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
                                         force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative, expected_step_count=expected_step_count)
                 out["samples"] = samples
             finally:
-                with _preview_lock:
-                    _preview_sampler_active = False
+                with preview_state["lock"]:
+                    preview_state["active"] = False
                 _swarm_preview_end()
         return (out, )
 
