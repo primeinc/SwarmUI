@@ -27,6 +27,10 @@ dotnet-install.sh
 docker-compose.yml
 .env
 
+# H3 performance diagnostics (may contain local paths and machine telemetry)
+/H3-Reports/
+/h3-session*.log
+
 # Python
 __pycache__/
 venv/
