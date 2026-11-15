@@ -466,6 +466,14 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                     }
                     else
                     {
+                        // JSON execution_start messages are already prompt-gated above,
+                        // but binary previews were not. A reusable socket can deliver
+                        // an old sampler's async preview during the next generation.
+                        if (!isMe || !H3PreviewPromptGuard.Matches(output, promptId))
+                        {
+                            Logs.Debug($"Dropped a non-current ComfyUI preview before relaying it to batch {batchId} (prompt {promptId}).");
+                            continue;
+                        }
                         (MediaType mediaType, int index, int eventId, int preBytes) = ComfyRawWebsocketOutputToFormatLabel(output);
                         Logs.Verbose($"ComfyUI Websocket sent: {output.Length} bytes of image data as event {eventId} in format {mediaType} to index {index}");
                         if (isExpectingText || mediaType.MetaType == MediaMetaType.Text)
