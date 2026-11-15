@@ -104,6 +104,19 @@ confound the comparison.
    python .\tests\h3_perf_compare.py .\two-video.log .\one-video.log
    ```
 
+   To include the one-frame-first-stage third run, pass three separate logs:
+
+   ```powershell
+   python .\tests\h3_perf_compare.py .\two-video.log .\one-video.log --one-frame-followup-log .\one-frame-followup.log
+   ```
+
+   Or, if all three requests ran sequentially in one backend process in that
+   order (two-video, main video, one-frame follow-up):
+
+   ```powershell
+   python .\tests\h3_perf_compare.py .\h3-session.log --three-in-one-log
+   ```
+
 The comparison selects the **largest video latent** in the two-video run so
 its short first video cannot accidentally be compared against the final
 13.5-second main-model video.
