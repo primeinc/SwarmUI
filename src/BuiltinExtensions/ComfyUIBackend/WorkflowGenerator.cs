@@ -1195,7 +1195,7 @@ public partial class WorkflowGenerator
             defscheduler ??= "simple";
         }
         // TODO: Registry of model default preferences instead of this
-        else if (IsFlux() || IsWanVideo() || IsWanVideo22() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsZImage() || IsMingImage() || IsZetaChroma() || IsErnie() || IsHiDreamO1() || IsLens() || IsPixelDiT() || IsKrea2() || IsBoogu() || IsFibo2() || IsMageFlow() || IsMossImage() || IsMiniMaxMusic3() || IsSeedVR2())
+        else if (IsFlux() || IsWanVideo() || IsWanVideo22() || IsOmniGen() || IsQwenImage() || IsQwenImage21() || IsZImage() || IsMingImage() || IsZetaChroma() || IsErnie() || IsHiDreamO1() || IsLens() || IsPixelDiT() || IsKrea2() || IsBoogu() || IsFibo2() || IsMageFlow() || IsMossImage() || IsMiniMaxMusic3() || IsSeedVR2() || IsMiniMaxH3Image())
         {
             defscheduler ??= "simple";
         }
@@ -2628,6 +2628,19 @@ public partial class WorkflowGenerator
     /// <summary>Creates a "CLIPTextEncode" or equivalent node for the given input.</summary>
     public JArray CreateConditioningDirect(string prompt, JArray clip, T2IModel model, bool isPositive, string id = null, JArray attachImages = null, int steps = -1)
     {
+        int width = UserInput.GetImageWidth();
+        int height = UserInput.GetImageHeight();
+        if (prompt.ToLowerFast().Contains("<bbox"))
+        {
+            int bboxWidth = width, bboxHeight = height;
+            if (IsRefinerStage)
+            {
+                double scale = UserInput.Get(T2IParamTypes.RefinerUpscale, 1);
+                bboxWidth = (int)Math.Round(bboxWidth * scale) / 16 * 16;
+                bboxHeight = (int)Math.Round(bboxHeight * scale) / 16 * 16;
+            }
+            prompt = T2IPromptHandling.ProcessPromptForModel(prompt, model, bboxWidth, bboxHeight);
+        }
         if (steps == -1)
         {
             steps = UserInput.Get(T2IParamTypes.Steps, 20);
@@ -2639,8 +2652,6 @@ public partial class WorkflowGenerator
         }
         string node;
         double mult = isPositive ? 1.5 : 0.8;
-        int width = UserInput.GetImageWidth();
-        int height = UserInput.GetImageHeight();
         bool enhance = UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true);
         bool needsAdvancedEncode = prompt.Contains("<break>") || prompt.Contains("<weight") || prompt.Contains("<embed") || prompt.Contains("<fromto") || prompt.Contains("<alternate") || prompt.Contains("<alt:") || prompt.Contains("<alt[") || prompt.Contains('(');
         double defaultGuidance = -1;
@@ -2649,7 +2660,30 @@ public partial class WorkflowGenerator
             defaultGuidance = 1;
         }
         JArray minimaxRefs = null;
-        if (isPositive && IsMiniMaxH3())
+        if (isPositive && IsMiniMaxH3Image())
+        {
+            JObject refData = new()
+            {
+                ["vae"] = CurrentVae.Path
+            };
+            bool hasAny = false;
+            // TODO: Warn or error if max inputs exceeded
+            for (int i = 0; i < 16; i++)
+            {
+                JArray image = GetPromptImage(false, true, i);
+                if (image is null)
+                {
+                    break;
+                }
+                hasAny = true;
+                refData[$"ref_images.ref_image_{i}"] = image;
+            }
+            if (hasAny)
+            {
+                minimaxRefs = NodePath(CreateNode("SwarmMiniMaxH3ImageCollectReferences", refData), 0);
+            }
+        }
+        else if (isPositive && IsMiniMaxH3())
         {
             JObject refData = new()
             {
