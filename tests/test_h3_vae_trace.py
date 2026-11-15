@@ -55,7 +55,10 @@ class H3VaeTraceTests(unittest.TestCase):
     def setUp(self):
         self.trace = module()
         self.logs = []
-        self.trace.logging.info = self.capture
+        original_logging = self.trace.logging
+        import types
+        self.trace.logging = types.SimpleNamespace(info=self.capture, warning=lambda *args: None)
+        self.addCleanup(setattr, self.trace, "logging", original_logging)
 
     def capture(self, format_string, payload):
         self.assertEqual(format_string, "[H3VAE] %s")
