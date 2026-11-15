@@ -103,6 +103,72 @@ class H3LogConsoleTests(unittest.TestCase):
         self.assertEqual(json.loads(events[0])['event'], 'start')
         self.assertNotIn('ComfyUI-0/STDERR', events[0])
 
+    def test_vaes_are_reported_separately_from_sampler_and_legacy_timing(self):
+        src = self.base / 'with-vaes.log'
+        src.write_text(
+            self.logs[1].read_text(encoding='utf-8')
+            + '00:09:37 [INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'main', 'node_id': '80', 'stage': 'video',
+                'event': 'start', 'method': 'decode_tiled', 'latent_shape': [1, 16, 97, 60, 78]
+            }) + '\n'
+            + '00:09:52 [INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'main', 'node_id': '80', 'stage': 'video',
+                'event': 'working', 'elapsed_s': 15
+            }) + '\n'
+            + '00:10:46 [INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'main', 'node_id': '80', 'stage': 'video',
+                'event': 'finish', 'elapsed_s': 69.0, 'status': 'success'
+            }) + '\n'
+            + '00:10:47 [INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'main', 'node_id': '81', 'stage': 'audio',
+                'event': 'start', 'method': 'decode'
+            }) + '\n'
+            + '00:10:48 [INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'main', 'node_id': '81', 'stage': 'audio',
+                'event': 'finish', 'elapsed_s': 1.25, 'status': 'success'
+            }) + '\n', encoding='utf-8')
+        report = h3.build_report('scan', [src])
+        self.assertTrue(report['trace_found'])
+        self.assertEqual(report['vae_summary']['video_decode_s'], 69)
+        self.assertEqual(report['vae_summary']['audio_decode_s'], 1.25)
+        self.assertEqual(report['vae_summary']['finish_count'], 2)
+        self.assertFalse(report['vae_summary']['incomplete'])
+        summary = h3.render(report)
+        self.assertIn('VAE DECODE TIMELINE', summary)
+        self.assertIn('69.00 s', summary)
+        self.assertIn('1.25 s', summary)
+
+    def test_compare_and_trace_export_include_vaes_but_keep_samplers_separate(self):
+        first = self.base / 'first-plus-vae.log'
+        first.write_text(
+            self.logs[0].read_text(encoding='utf-8')
+            + '[INFO] [H3VAE] ' + json.dumps({
+                'prompt_id': 'i2v', 'node_id': '100', 'stage': 'video',
+                'event': 'finish', 'elapsed_s': 34.5, 'status': 'success'
+            }) + '\n', encoding='utf-8')
+        result = h3.build_report('two-files', [first, self.logs[1]])
+        self.assertEqual(result['sampler_counts'], [2, 1])
+        self.assertEqual(result['vae_by_run']['image_to_video']['video_decode_s'], 34.5)
+        self.assertEqual(result['vae_by_run']['main_video']['events'], 0)
+        self.assertIn('POST-SAMPLER VAE DECODING', h3.render(result))
+        export = h3.build_report('extract', [first])
+        vae = [x for x in export['events'] if x['trace_kind'] == 'H3VAE']
+        self.assertEqual(len(vae), 1)
+        self.assertEqual(vae[0]['stage'], 'video')
+        self.assertEqual(sum(x['trace_kind'] == 'H3PERF' for x in export['events']), 12)
+
+    def test_incomplete_vae_and_bad_vae_json_are_detected(self):
+        log = self.base / 'incomplete-vae.log'
+        log.write_text('[H3VAE] ' + json.dumps({
+            'prompt_id': 'P', 'node_id': '77', 'event': 'start', 'stage': 'video'
+        }) + '\n', encoding='utf-8')
+        result = h3.build_report('scan', [log])
+        self.assertTrue(result['vae_summary']['incomplete'])
+        self.assertEqual(result['vae_summary']['video_decode_s'], 0)
+        log.write_text('[H3VAE] {"bad": incomplete\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'Malformed \\[H3VAE\\]'):
+            h3.build_report('scan', [log])
+
     def test_missing_trace_errors_without_creating_false_comparison(self):
         old = self.base / 'old.log'
         old.write_text('Prompt executed in 384.81 seconds', encoding='utf-8')
