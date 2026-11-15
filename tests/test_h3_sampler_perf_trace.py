@@ -107,6 +107,24 @@ class H3SamplerTraceTests(unittest.TestCase):
         self.assertEqual(emitted[1]["callback_s"], 0.5)
         self.assertEqual(emitted[1]["weights_resident_mb"], 8.0)
 
+    def test_trace_records_use_comfy_logging_not_unobserved_stdout(self):
+        import json
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name == "_swarm_h3_trace_emit"]
+        self.assertEqual(len(functions), 1)
+        observed = []
+        logger = types.SimpleNamespace(info=lambda fmt, payload: observed.append((fmt, payload)))
+        env = {"logging": logger, "json": json}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), "exec"), env)
+        env["_swarm_h3_trace_emit"]("step", {"prompt_id": "job", "node_id": "10"},
+                                     {"elapsed_s": 65.3})
+        self.assertEqual(len(observed), 1)
+        self.assertIn("[H3PERF]", observed[0][0])
+        self.assertEqual(json.loads(observed[0][1]), {
+            "event": "step", "prompt_id": "job", "node_id": "10", "elapsed_s": 65.3,
+        })
+
     def test_diagnostics_are_opt_in_not_an_inference_default(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertIn('os.environ.get("SWARM_H3_TRACE") == "1"', source)
