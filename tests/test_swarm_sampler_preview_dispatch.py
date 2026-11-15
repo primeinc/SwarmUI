@@ -118,6 +118,39 @@ class PreviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.targeted_clients, ["A-client"])
         self.assertEqual(self.sent[0][2]["prompt_id"], "A")
 
+    def test_real_preview_serializer_targets_captured_client_not_global_client(self):
+        # Exercise the actual sender implementation, not the callback mock.
+        import io
+        import json
+        import struct
+        class FakeImage:
+            def save(self, stream, **kwargs):
+                stream.write(b"PREVIEW-PIXELS")
+        sent = []
+        server = types.SimpleNamespace(
+            client_id="B-client",
+            send_sync=lambda event, data, sid=None: sent.append((event, data, sid)),
+        )
+        module = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        names = {"swarm_send_extra_preview", "swarm_send_animated_preview"}
+        selected = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        self.assertEqual({n.name for n in selected}, names)
+        env = {
+            "PromptServer": types.SimpleNamespace(instance=server),
+            "BytesIO": io.BytesIO, "json": json, "struct": struct,
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), env)
+        image = FakeImage()
+        env["swarm_send_extra_preview"](0, image, {"prompt_id": "A"}, client_id="A-client")
+        env["swarm_send_animated_preview"](0, [image], {"prompt_id": "A"}, client_id="A-client")
+        self.assertEqual([sid for event, data, sid in sent], ["A-client", "A-client"])
+        self.assertTrue(all(event == 9999123 for event, data, sid in sent))
+        for event, data, sid in sent:
+            size = struct.unpack(">I", data[:4])[0]
+            meta = json.loads(data[4:4 + size])
+            self.assertEqual(meta["prompt_id"], "A")
+            self.assertIn(b"PREVIEW-PIXELS", data)
+
     def test_cpu_preview_copy_is_not_nonblocking(self):
         module = ast.parse(SOURCE.read_text(encoding="utf-8"))
         candidates = [n for n in ast.walk(module)
