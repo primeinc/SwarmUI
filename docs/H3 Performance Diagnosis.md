@@ -155,6 +155,42 @@ The comparison selects the **largest video latent** in the two-video run so
 its short first video cannot accidentally be compared against the final
 13.5-second main-model video.
 
+## Preventing stale step-2 previews from previous jobs
+
+**The preview boundary fix** is independent of the sampler's GPU preview
+implementation. The custom sampler sends the originating `prompt_id` in a
+metadata-bearing event-4 binary preview. Previously
+`ComfyUIAPIAbstractBackend.AwaitJobLive` parsed the image MIME type and index
+but ignored the `prompt_id`. With reused sockets, a delayed preview from
+the preceding job could be forwarded as a preview for the current request.
+
+The production `H3PreviewPromptGuard.Matches` now rejects an event-4
+frame whose explicit `prompt_id` differs from the active ComfyUI prompt.
+The receiver also drops **all binary frames before the current prompt's
+`execution_start`**. A native preview that has no `prompt_id` remains
+accepted to avoid changing unrelated ComfyUI model behavior.
+
+The async `SwarmKSampler` preview sender also snapshots
+`PromptServer.instance.client_id` when its sampler begins. Queued workers
+send to that captured socket client, not whichever client was most recently
+assigned when they finish rendering.
+
+**Verification boundaries:**
+`tests/h3-preview-guard` compiles and invokes the actual production
+C# identity helper against real event-4 binary envelope fixtures and
+negative controls; `tests/test_h3_preview_delivery_contract.py` checks
+the production call site; `tests/test_swarm_sampler_preview_dispatch.py`
+tests the real Python serializers and queued workers under simulated
+client switches. These checks do not run your H3 model on your GPU.
+The corresponding live acceptance case remains: on two successive H3
+video generations, the second sampling-step preview must belong to the
+**current** job, never the previous image or a black placeholder.
+
+The live [H3TRACE-ROUTE] marker must also confirm `SwarmKSampler` when
+testing the custom preview callback. If ComfyUI did not register the custom
+node, SwarmUI may fall back to native `KSamplerAdvanced`, which is outside
+the custom callback's scope.
+
 ## When [H3PERF] and [H3VAE] do not appear in SwarmUI logs
 
 A launcher echo and a child-CMD smoke test are **not** proof that the
