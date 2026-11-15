@@ -14,6 +14,7 @@ import sys
 import h3_perf_compare as perf
 
 H3_EVENT = re.compile(r'\[H3PERF\]\s*(\{.*\})')
+H3_VAE_EVENT = re.compile(r'\[H3VAE\]\s*(\{.*\})')
 MODEL_PREP = re.compile(r'Model\s+(MiniMaxH3(?:TEModel_|VideoVAE|AudioVAE)?)\s+prepared for dynamic VRAM loading\.\s+(\d+)MB Staged')
 PROMPT_TIME = re.compile(r'Prompt executed in\s+([\d.]+)\s+seconds')
 COMPILER_BREAKS = re.compile(r'Comfy model compiler graph breaks:\s+(\d+)')
@@ -23,6 +24,42 @@ BAR = '=' * 76
 
 def _read_log(path):
     return Path(path).read_text(encoding='utf-8-sig', errors='replace')
+
+
+def vae_events(path):
+    """Read only opt-in decoder events, without inferring decoder time from a log gap."""
+    events = []
+    for line in _read_log(path).splitlines():
+        if "[H3VAE]" not in line:
+            continue
+        match = H3_VAE_EVENT.search(line)
+        if match is None:
+            raise ValueError("Malformed [H3VAE] record")
+        try:
+            event = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            raise ValueError("Malformed [H3VAE] record") from None
+        events.append(event)
+    return events
+
+
+def summarize_vae(events, prompt_id=None):
+    finished = [e for e in events if e.get("event") == "finish" and
+                (prompt_id is None or str(e.get("prompt_id")) == str(prompt_id))]
+    return {
+        "events": len([e for e in events if prompt_id is None or str(e.get("prompt_id")) == str(prompt_id)]),
+        "video_decode_s": round(sum(e.get("elapsed_s", 0) for e in finished if e.get("stage") == "video"), 3),
+        "audio_decode_s": round(sum(e.get("elapsed_s", 0) for e in finished if e.get("stage") == "audio"), 3),
+        "image_decode_s": round(sum(e.get("elapsed_s", 0) for e in finished if e.get("stage") == "image"), 3),
+        "finish_count": len(finished),
+        "incomplete": bool([
+            e for e in events if e.get("event") == "start" and
+            (prompt_id is None or str(e.get("prompt_id")) == str(prompt_id))
+        ]) and len(finished) < len([
+            e for e in events if e.get("event") == "start" and
+            (prompt_id is None or str(e.get("prompt_id")) == str(prompt_id))
+        ]),
+    }
 
 
 def legacy_scan(path):
@@ -77,21 +114,25 @@ def build_report(mode, logs):
         result['trace_found'] = bool(runs)
         result['prompts'] = split_runs(runs)
         result['legacy'] = legacy_scan(logs[0])
+        result['vae_events'] = vae_events(logs[0])
+        result['vae_summary'] = summarize_vae(result['vae_events'])
         return result
     if mode == 'extract':
         lines = []
         for raw in _read_log(logs[0]).splitlines():
-            if '[H3PERF]' not in raw:
+            kind = 'H3PERF' if '[H3PERF]' in raw else 'H3VAE' if '[H3VAE]' in raw else None
+            if kind is None:
                 continue
-            found = H3_EVENT.search(raw)
+            found = (H3_EVENT if kind == 'H3PERF' else H3_VAE_EVENT).search(raw)
             if not found:
-                raise ValueError('Found a truncated or malformed [H3PERF] record')
+                raise ValueError(f'Found a truncated or malformed [{kind}] record')
             try:
-                lines.append(json.loads(found.group(1)))
+                event = json.loads(found.group(1))
+                lines.append({'trace_kind': kind, **event})
             except json.JSONDecodeError:
-                raise ValueError('Found a truncated or malformed [H3PERF] record') from None
+                raise ValueError(f'Found a truncated or malformed [{kind}] record') from None
         if not lines:
-            raise ValueError('No [H3PERF] events found. Launch SwarmUI with SWARM_H3_TRACE=1 and retry.')
+            raise ValueError('No [H3PERF] or [H3VAE] events found. Launch SwarmUI with SWARM_H3_TRACE=1 and retry.')
         result['events'] = lines
         return result
 
@@ -104,6 +145,12 @@ def build_report(mode, logs):
     selected = [perf.select_longest_video(group) for group in run_groups]
     result['comparison'] = _details(*selected)
     result['sampler_counts'] = [len(group) for group in run_groups]
+    traces_by_file = [vae_events(path) for path in logs]
+    stages = ["image_to_video", "main_video", "one_frame_followup"]
+    result['vae_by_run'] = {}
+    for i, chosen in enumerate(selected):
+        events = traces_by_file[0] if mode in ('two-in-one', 'three-in-one') else traces_by_file[i]
+        result['vae_by_run'][stages[i]] = summarize_vae(events, chosen['start'].get('prompt_id'))
     return result
 
 
@@ -154,6 +201,16 @@ def render(report):
             for j, sampler in enumerate(p['samplers'], 1):
                 lines += _sampler_block(f'SAMPLER {j}', sampler)
         legacy = report['legacy']
+        vae = report['vae_summary']
+        if vae['events']:
+            lines.append('-' * 76)
+            lines.append('  H3 VAE DECODE TIMELINE (measured, not estimated)')
+            lines.append(_line('VAE telemetry events', str(vae['events'])))
+            lines.append(_line('Video VAE decode', _fmt(vae['video_decode_s'], ' s', 2)))
+            lines.append(_line('Audio VAE decode', _fmt(vae['audio_decode_s'], ' s', 2)))
+            lines.append(_line('Image VAE decode', _fmt(vae['image_decode_s'], ' s', 2)))
+            if vae['incomplete']:
+                lines.append('  ! An H3 VAE decode started but had no finish event.')
         if not report['trace_found']:
             lines.extend(['', '  No detailed trace in this log. Legacy timing only.',
                           '  To capture sampler inputs: SWARM_H3_TRACE=1 on the ComfyUI process.'])
@@ -165,7 +222,9 @@ def render(report):
         for model in legacy['preparations'][-8:]:
             lines.append(_line('Staged weights', f'{model["model"]}: {model["staged_mb"]} MB'))
     elif mode == 'extract':
-        lines.append(_line('Valid [H3PERF] events', str(len(report['events']))))
+        lines.append(_line('Valid H3 trace events', str(len(report['events']))))
+        lines.append(_line('H3 sampler events', str(sum(e.get('trace_kind') == 'H3PERF' for e in report['events']))))
+        lines.append(_line('H3 VAE events', str(sum(e.get('trace_kind') == 'H3VAE' for e in report['events']))))
         lines.append('  Raw events are saved as a JSONL file without prompt text or pixels.')
     else:
         cmp = report['comparison']
@@ -182,6 +241,14 @@ def render(report):
             lines.append(_line('B / A step-time ratio', f'{b/a:.2f}x'))
             lines.append(_line('B - A per-step', f'{b-a:+.2f} s'))
         lines.append(_line('Sampler counts per run', str(report.get('sampler_counts', []))))
+        if any(v['events'] for v in report.get('vae_by_run', {}).values()):
+            lines.append('-' * 76)
+            lines.append('  POST-SAMPLER VAE DECODING')
+            for stage, vae in report['vae_by_run'].items():
+                if vae['events']:
+                    lines.append(_line(stage, f"video {_fmt(vae['video_decode_s'], ' s', 2)} / audio {_fmt(vae['audio_decode_s'], ' s', 2)}"))
+                    if vae['incomplete']:
+                        lines.append('  ! Incomplete VAE timing in ' + stage)
         changed = list(cmp['different'])
         lines.append(_line('Different recorded fields', str(len(changed))))
         for key in changed[:18]:
