@@ -15,6 +15,33 @@ A Modular AI Image Generation Web-User-Interface, with an emphasis on making pow
 
 ----
 
+
+## MiniMax H3: One video, with or without reference pictures
+
+**Making a video with H3, whether your prompt contains only text or also has attached pictures?** Select **MiniMax H3** as your main model in **Models**, then:
+
+1. Leave **Image-to-Video Follow-up** **off**. Attaching even one picture to the prompt already makes the main H3 generation image-conditioned; no additional video model is needed.
+2. Open **Main Video Generation** and set **Main Video Frames** to the length you want. This duration applies to H3 whether the prompt has zero, one, or several attached pictures.
+3. Click **Generate**. You should get one video.
+
+At the usual **24 FPS**, these frame settings give approximately:
+
+| Video length | Main Video Frames |
+| --- | ---: |
+| 5 seconds | 124 |
+| 10 seconds | 243 |
+| 15 seconds | 362 |
+
+H3 only supports certain frame counts, so the exact duration may vary slightly.
+
+**Why the warning?** The old names "Text To Video" and "Image To Video" confused **what you provide as input** with **which generation stage runs**. They were not mutually exclusive modes. If H3 is both the main model and the follow-up video model, SwarmUI currently runs H3 twice: about 5 seconds with the base defaults, then another video from its first frame. Disabling the follow-up stage avoids the duplicate inference. It does **not** disable image references attached to your main H3 prompt.
+
+**Want dedicated first-frame conditioning instead?** Select a regular *image* model as the main model, enable **Image-to-Video Follow-up**, and choose H3 FL2VA as **Video Model**. Upload your starting picture under **Init Image** and set **Init Image Creativity** to **0** to bypass the preliminary still-image sampler. Set the follow-up video length with **Image-to-Video Follow-up > Video Frames**. If you want SwarmUI to generate a new still image before animating it, leave the still-image generation stage enabled.
+
+**You can also start an H3 video from a prompt-attached picture.** With H3 Ref2VA selected as the **main model**, attach several pictures directly to the prompt and describe the opening as `At 0.00 seconds, the video begins from <Picture 1>`. H3 often uses the first attached picture as the opening scene. This is **reference-guided** rather than a guaranteed, pixel-anchored first-frame keyframe. Keep **Image-to-Video Follow-up** off to avoid the unnecessary second video generation. **Init Image Creativity = 0** only controls preliminary still-image denoising in the separate **Init Image** workflow; it does not control prompt-reference conditioning.
+
+For more video-model options, see [Video Model Support](docs/Video%20Model%20Support.md).
+
 # Status
 
 This project is in **Almost-Release** status. This means for most tasks, Swarm has excellent tooling available to you, but there are a few areas I still want to perfect. Swarm is recommended as an ideal UI for most users, beginners and pros alike.

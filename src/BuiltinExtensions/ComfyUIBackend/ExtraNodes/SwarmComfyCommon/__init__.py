@@ -1,4 +1,9 @@
-import os, folder_paths, traceback
+import os, folder_paths, traceback, sys
+
+# This bootstrap marker does not depend on Python logging having been configured.
+# If SwarmUI's parent reports trace=1 but this line never appears, this package
+# did not load (or the backend is running a different/stale copy).
+print(f"[H3TRACE-BOOT] source=SwarmComfyCommon import_start env={'1' if os.environ.get('SWARM_H3_TRACE') == '1' else 'off'} file={__file__}", file=sys.stderr, flush=True)
 
 from . import SwarmBlending, SwarmImages, SwarmInternalUtil, SwarmKSampler, SwarmLoadImageB64, SwarmLoraLoader, SwarmMasks, SwarmSaveImageWS, SwarmTiling, SwarmExtractLora, SwarmUnsampler, SwarmLatents, SwarmInputNodes, SwarmTextHandling, SwarmText, SwarmReference, SwarmMath, SwarmSam2, SwarmAudio, SwarmVideo, SwarmModels
 
@@ -43,3 +48,13 @@ def register_model_folder(name):
         folder_paths.folder_names_and_paths[name] = (folder_paths.folder_names_and_paths[name][0], folder_paths.supported_pt_extensions)
 
 register_model_folder("yolov8")
+
+# Opt-in live H3 video/audio VAE timeline. Patch only ComfyUI's existing VAE
+# methods, not the generated graph or any decoder implementation.
+if os.environ.get("SWARM_H3_TRACE") == "1":
+    import comfy.sd
+    from . import SwarmVaeTrace
+    _h3_vae_hooked = SwarmVaeTrace.install_trace(comfy.sd.VAE)
+    print(f"[H3TRACE-BOOT] source=SwarmComfyCommon status=enabled vae_hook={_h3_vae_hooked or getattr(comfy.sd.VAE, '_swarm_h3_vae_traced', False)} custom_sampler={'SwarmKSampler' in NODE_CLASS_MAPPINGS} file={__file__}", file=sys.stderr, flush=True)
+else:
+    print(f"[H3TRACE-BOOT] source=SwarmComfyCommon status=disabled vae_hook=False file={__file__}", file=sys.stderr, flush=True)

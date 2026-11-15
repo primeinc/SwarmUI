@@ -114,7 +114,7 @@ public record class T2IParamType(string Name, string Description, string Default
     bool VisibleNormally = true, bool IsAdvanced = false, string FeatureFlag = null, PermInfo Permission = null, bool Toggleable = false, double OrderPriority = 10, T2IParamGroup Group = null, string IgnoreIf = null,
     ParamViewType ViewType = ParamViewType.SMALL, bool HideFromMetadata = false, Func<string, string> MetadataFormat = null, bool AlwaysRetain = false, double ChangeWeight = 0, bool ExtraHidden = false, bool CanSectionalize = false,
     T2IParamDataType Type = T2IParamDataType.UNSET, bool DoNotSave = false, bool ImageShouldResize = true, bool ImageAlwaysB64 = false, bool DoNotPreview = false, bool Nonreusable = false, string DependNonDefault = null, bool IntentionalUnused = false,
-    string Subtype = null, string ID = null, Type SharpType = null)
+    string Subtype = null, string ID = null, Type SharpType = null, string DisplayName = null)
 {
     public JObject ToNet(Session session)
     {
@@ -128,7 +128,7 @@ public record class T2IParamType(string Name, string Description, string Default
         }
         return new JObject()
         {
-            ["name"] = Name,
+            ["name"] = DisplayName ?? Name,
             ["id"] = ID,
             ["description"] = Description,
             ["type"] = Type.ToString().ToLowerFast(),
@@ -195,7 +195,7 @@ public record class T2IRegisteredParam<T>(T2IParamType Type)
 /// <param name="IsAdvanced">If true, this is an advanced setting group that should be hidden by a dropdown.</param>
 /// <param name="CanShrink">If true, the group can be shrunk on-page to hide it. If false, it is always open.</param>
 /// <param name="Parent">A parent group of this group, or null if none.</param>
-public record class T2IParamGroup(string Name, bool Toggles = false, bool Open = true, double OrderPriority = 10, string Description = "", bool IsAdvanced = false, bool CanShrink = true, T2IParamGroup Parent = null)
+public record class T2IParamGroup(string Name, bool Toggles = false, bool Open = true, double OrderPriority = 10, string Description = "", bool IsAdvanced = false, bool CanShrink = true, T2IParamGroup Parent = null, string DisplayName = null)
 {
     public string ID => T2IParamTypes.CleanTypeName(Name);
 
@@ -203,7 +203,7 @@ public record class T2IParamGroup(string Name, bool Toggles = false, bool Open =
     {
         return new JObject()
         {
-            ["name"] = Name,
+            ["name"] = DisplayName ?? Name,
             ["id"] = ID,
             ["toggles"] = Toggles,
             ["open"] = Open,
@@ -219,6 +219,9 @@ public record class T2IParamGroup(string Name, bool Toggles = false, bool Open =
 /// <summary>Central manager of Text2Image parameter types.</summary>
 public class T2IParamTypes
 {
+    /// <summary>Qwen 2.1 segment sampling mode: native reference editing or partial-denoise masked img2img.</summary>
+    public static T2IRegisteredParam<string> SegmentQwen21Sampling;
+
     /// <summary>Map of all currently loaded types, by cleaned name.</summary>
     public static Dictionary<string, T2IParamType> Types = [];
 
@@ -345,7 +348,7 @@ public class T2IParamTypes
     public static T2IRegisteredParam<List<Image>> PromptImages;
     public static T2IRegisteredParam<List<AudioFile>> PromptAudios;
     public static T2IRegisteredParam<List<VideoFile>> PromptVideos;
-    public static T2IRegisteredParam<bool> OutputIntermediateImages, DoNotSave, DoNotSaveIntermediates, ControlNetPreviewOnly, RevisionZeroPrompt, RemoveBackground, NoSeedIncrement, NoPreviews, VideoBoomerang, ModelSpecificEnhancements, UseInpaintingEncode, MaskCompositeUnthresholded, SaveSegmentMask, InitImageRecompositeMask, UseReferenceOnly, RefinerDoTiling, AutomaticVAE, ZeroNegative, FluxDisableGuidance, SmartImagePromptResizing, NoLoadModels, NoInternalSpecialHandling, ForwardRawBackendData, ForwardSwarmData, NegativeModelIncludeLoras, ContinueAfterErrors, JustLoadModel,
+    public static T2IRegisteredParam<bool> OutputIntermediateImages, DoNotSave, DoNotSaveIntermediates, ControlNetPreviewOnly, RevisionZeroPrompt, RemoveBackground, NoSeedIncrement, NoPreviews, VideoBoomerang, ModelSpecificEnhancements, UseInpaintingEncode, MaskCompositeUnthresholded, SaveSegmentMask, SegmentQwenUseOriginalReference, InitImageRecompositeMask, UseReferenceOnly, RefinerDoTiling, AutomaticVAE, ZeroNegative, FluxDisableGuidance, SmartImagePromptResizing, NoLoadModels, NoInternalSpecialHandling, ForwardRawBackendData, ForwardSwarmData, NegativeModelIncludeLoras, ContinueAfterErrors, JustLoadModel,
         PlaceholderParamGroupStarred, PlaceholderParamGroupUser1, PlaceholderParamGroupUser2, PlaceholderParamGroupUser3;
 
     public static T2IParamGroup GroupImagePrompting, GroupCore, GroupVariation, GroupResolution, GroupSampling, GroupInitImage, GroupRefiners, GroupRefinerOverrides,
@@ -427,9 +430,9 @@ public class T2IParamTypes
             "7", Min: 0, Max: 100, ViewMax: 20, Step: 0.5, Examples: ["5", "6", "7", "8", "9"], OrderPriority: -18, ViewType: ParamViewType.SLIDER, Group: GroupCore, ChangeWeight: -3, CanSectionalize: true
             ));
         // ================================================ Text2Video ================================================
-        GroupText2Video = new("Text To Video", Open: false, OrderPriority: -30, Toggles: true, Description: $"Support for Text2Video models.");
-        Text2VideoFrames = Register<int>(new("Text2Video Frames", "How many frames to generate within the video.\nGenmo Mochi 1 can support any frame count up to 200, multiples of 6 plus 1 (7, 13, 19, 25, ...) are required and will automatically round if you enter an invalid value. Defaults to 25.\nLTXV supports frame counts anywhere up to 257. Multiples of 8 plus 1 (9, 17, 25, 33, 41, ...) are required and will automatically round if you enter an invalid value. Defaults to 97.\nHunyuan Video and Wan-2.1 support dynamic frame counts. Multiples of 4 plus 1 (5, 9, 13, 17, ...) are required and will automatically round if you enter an invalid value. Hunyuan defaults to 73, Wan defaults to 81.",
-            "24", Min: 1, Max: 100000, OrderPriority: 1, Group: GroupText2Video, FeatureFlag: "text2video", Toggleable: true, ViewType: ParamViewType.VIDEO_FRAMES
+        GroupText2Video = new("Text To Video", Open: false, OrderPriority: -30, Toggles: true, DisplayName: "Main Video Generation", Description: "Settings for the video generated by the main model, whether the prompt contains only text or also has attached reference images. This is the duration to use for H3 Ref2VA with prompt-attached pictures. The separate Image-to-Video Follow-up group adds another generation stage.");
+        Text2VideoFrames = Register<int>(new("Text2Video Frames", "How many frames the main video model generates, including image-conditioned H3 generation using pictures attached to the prompt. This is the main video duration; the Video Frames setting under Image-to-Video Follow-up controls a separate stage.\nGenmo Mochi 1 can support any frame count up to 200, multiples of 6 plus 1 (7, 13, 19, 25, ...) are required and will automatically round if you enter an invalid value. Defaults to 25.\nLTXV supports frame counts anywhere up to 257. Multiples of 8 plus 1 (9, 17, 25, 33, 41, ...) are required and will automatically round if you enter an invalid value. Defaults to 97.\nHunyuan Video and Wan-2.1 support dynamic frame counts. Multiples of 4 plus 1 (5, 9, 13, 17, ...) are required and will automatically round if you enter an invalid value. Hunyuan defaults to 73, Wan defaults to 81.",
+            "24", Min: 1, Max: 100000, OrderPriority: 1, Group: GroupText2Video, FeatureFlag: "text2video", Toggleable: true, ViewType: ParamViewType.VIDEO_FRAMES, DisplayName: "Main Video Frames"
             ));
         List<string> videoFormats = ["webp", "gif", "gif-hd", "webm", "h264-mp4", "h265-mp4", "prores"];
         // ================================================ Text2Audio ================================================
@@ -602,14 +605,14 @@ public class T2IParamTypes
             "false", IgnoreIf: "false", FeatureFlag: "controlnet", Permission: Permissions.ParamControlNet, VisibleNormally: false
             ));
         // ================================================ Image To Video ================================================
-        GroupVideo = new("Image To Video", Open: false, OrderPriority: 0, Toggles: true, Description: $"Generate videos using models that take an image as their primary input.\n<a target=\"_blank\" href=\"{Utilities.RepoDocsRoot}/Video%20Model%20Support.md\">See more docs here.</a>");
+        GroupVideo = new("Image To Video", Open: false, OrderPriority: 0, Toggles: true, DisplayName: "Image-to-Video Follow-up", Description: $"Optional additional generation stage: pass a still image from the main stage (or an uploaded Init Image) into a second video model. This is NOT how you turn on prompt-image conditioning for a main video model such as H3 Ref2VA. For H3 with prompt-attached pictures, leave this disabled and use Main Video Generation to set duration.\n<a target=\"_blank\" href=\"{Utilities.RepoDocsRoot}/Video%20Model%20Support.md\">See more docs here.</a>");
         static bool isVideoModel(T2IModel model)
         {
             string id = model.ModelClass.ID;
             return id.Contains("stable-video-diffusion") || id.Contains("lightricks-ltx-video") || id.Contains("-video2world") || id.Contains("-i2v") || id.Contains("-ti2v") || id.Contains("-flf2v") || id.Contains("-image2video") || id.Contains("hunyuan-video-1_5") || id.Contains("kandinsky5-video") ||
                 (model.ModelClass.CompatClass == T2IModelClassSorter.CompatMiniMaxH3 && (!model.Name.Contains("ref2va") || model.Name.Contains("fl2va")));
         }
-        VideoModel = Register<T2IModel>(new("Video Model", "The model to use for video generation.\nSelect an image-to-video conversion model, note that text-to-video models do not work.",
+        VideoModel = Register<T2IModel>(new("Video Model", "The model to use for a follow-up image-to-video stage, after the main model.\nYou do not need to select one just because your main video prompt includes attached pictures. Select an image-to-video conversion model; text-to-video-only models do not work here.",
             "", GetValues: s => CleanModelList(Program.MainSDModels.ListModelsFor(s).Where(m => m.ModelClass is not null && isVideoModel(m)).Select(m => m.Name)),
             OrderPriority: 1, Group: GroupVideo, Permission: Permissions.ParamVideo, FeatureFlag: "video", Subtype: "Stable-Diffusion", ChangeWeight: 9, DoNotPreview: true
             ));
@@ -620,7 +623,7 @@ public class T2IParamTypes
         VideoSwapPercent = Register<double>(new("Video Swap Percent", "If using a video model pair (eg Wan 2.2), For Image-To-Video, this is the percentage of steps given to the Swap model.\nFor example, at Steps=20 Swap=0.75, the base will run 5 steps then the swap model will run 15.\nWan 2.2 generally uses 50% or higher.",
             "0.5", Min: 0, Max: 1, Step: 0.05, OrderPriority: 1.7, ViewType: ParamViewType.SLIDER, Group: GroupVideo, Permission: Permissions.ParamVideo, FeatureFlag: "video", IsAdvanced: true, DoNotPreview: true, DependNonDefault: VideoSwapModel.Type.ID
             ));
-        VideoFrames = Register<int>(new("Video Frames", "How many frames to generate within the video.\nSVD-XT normally uses 25 frames, and SVD (non-XT) 0.9 used 14 frames.\nLTXV supports frame counts anywhere up to 257. Multiples of 8 plus 1 (9, 17, 25, 33, 41, ...) are required and will automatically round if you enter an invalid value. Defaults to 97.\nCosmos was only trained for 121.\nWan 2.1 expects 81, but will mostly work with other values.",
+        VideoFrames = Register<int>(new("Video Frames", "How many frames to generate in the optional image-to-video follow-up stage. For video generated directly by the main model (including image-conditioned H3), use Main Video Frames instead.\nSVD-XT normally uses 25 frames, and SVD (non-XT) 0.9 used 14 frames.\nLTXV supports frame counts anywhere up to 257. Multiples of 8 plus 1 (9, 17, 25, 33, 41, ...) are required and will automatically round if you enter an invalid value. Defaults to 97.\nCosmos was only trained for 121.\nWan 2.1 expects 81, but will mostly work with other values.",
             "24", Min: 1, Max: 100000, OrderPriority: 2, Group: GroupVideo, Permission: Permissions.ParamVideo, FeatureFlag: "video", DoNotPreview: true, Toggleable: true, ChangeWeight: 1, ViewType: ParamViewType.VIDEO_FRAMES
             ));
         VideoSteps = Register<int>(new("Video Steps", "How many steps to use for the video model.\nHigher step counts yield better quality, but much longer generation time.\n20 is sufficient as a basis, but some video models need higher steps to achieve coherence.",
@@ -892,6 +895,12 @@ public class T2IParamTypes
         SegmentCFGScale = Register<double>(new("Segment CFG Scale", "For the segment model independently of the base model, how strongly to scale prompt input.\nHigher CFG scales tend to produce more contrast, and lower CFG scales produce less contrast.\n"
             + "Too-high values can cause corrupted/burnt images, too-low can cause nonsensical images.\n7 is a good baseline. Normal usages vary between 4 and 9.\nSome model types, such as Turbo, expect CFG around 1.",
             "7", Min: 0, Max: 100, ViewMax: 20, Step: 0.5, Examples: ["5", "6", "7", "8", "9"], OrderPriority: 5, ViewType: ParamViewType.SLIDER, Group: GroupSegmentOverrides, ChangeWeight: -3, Toggleable: true, IsAdvanced: true
+            ));
+        SegmentQwenUseOriginalReference = Register<bool>(new("Segment Qwen 2.1 Original Reference", "",
+            "true", IgnoreIf: "true", FeatureFlag: "comfyui", IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.5
+            ));
+        SegmentQwen21Sampling = Register<string>(new("Segment Qwen 2.1 Sampling", "Masked Img2Img is the native masked Qwen 2.1 inpainting workflow and is the default for segment edits. Reference Edit is unmasked whole-crop image editing, with the segment mask applied only when stitching.",
+            "Masked Img2Img", IgnoreIf: "Masked Img2Img", FeatureFlag: "comfyui", GetValues: _ => ["Masked Img2Img", "Reference Edit"], IsAdvanced: true, Group: GroupSegmentOverrides, OrderPriority: 5.6
             ));
         // ================================================ Advanced Sampling ================================================
         GroupAdvancedSampling = new("Advanced Sampling", Open: false, OrderPriority: 15, IsAdvanced: true);

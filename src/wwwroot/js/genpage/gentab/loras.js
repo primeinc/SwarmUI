@@ -45,6 +45,80 @@ class LoraHelper {
         3: 'VideoSwap'
     }
 
+    /** Match server autoConfine: each region/object/segment/extend tag receives the next section ID (starting at 11). */
+    getConfinementOptions(promptText, selectedConfinement = '0') {
+        let options = [
+            { value: '0', label: '@ Global' },
+            { value: '5', label: 'Base' },
+            { value: '1', label: 'Refiner' },
+            { value: '2', label: 'Video' },
+            { value: '3', label: 'VideoSwap' },
+            { value: '4', label: 'PixelDecoder' }
+        ];
+        const stageIds = { base: 5, refiner: 1, pixeldecoder: 4, video: 2, videoswap: 3 };
+        let sectionId = -1;
+        let segmentIndex = 0;
+        for (const tag of (promptText || '').matchAll(/<([a-z][a-z0-9]*)(?=[:/>])[^>]*>/gi)) {
+            const kind = tag[1].toLowerCase();
+            if (Object.prototype.hasOwnProperty.call(stageIds, kind)) {
+                sectionId = stageIds[kind];
+                continue;
+            }
+            if (!['segment', 'object', 'region', 'extend'].includes(kind)) {
+                continue;
+            }
+            sectionId = Math.max(sectionId, 10) + 1;
+            if (kind === 'segment') {
+                segmentIndex++;
+            }
+            const data = tag[0].slice(1, -1).split('//')[0];
+            const detail = data.includes(':') ? data.slice(data.indexOf(':') + 1).split(',')[0].trim() : '';
+            const title = kind[0].toUpperCase() + kind.slice(1);
+            const label = title + (kind === 'segment' ? ` ${segmentIndex}` : '') + (detail ? `: ${detail}` : '');
+            if (!options.some(opt => opt.value === String(sectionId))) {
+                options.push({ value: String(sectionId), label });
+            }
+        }
+        const requested = String(selectedConfinement ?? 0);
+        if (!options.some(opt => opt.value === requested)) {
+            // Never silently display an existing segment-scoped LoRA as Global.
+            options.push({ value: requested, label: `Section ${requested} (not in current prompt)` });
+        }
+        return options;
+    }
+
+    getActiveConfinementPrompt() {
+        const primary = document.getElementById('input_prompt');
+        const alternative = document.getElementById('alt_prompt_textbox');
+        return document.activeElement === alternative && alternative
+            ? alternative.value
+            : (primary?.value ?? alternative?.value ?? '');
+    }
+
+    populateConfinementSelect(select, confinement, promptText = this.getActiveConfinementPrompt()) {
+        const choices = this.getConfinementOptions(promptText, confinement);
+        const sameOptions = select.options.length === choices.length
+            && Array.from(select.options).every((opt, i) =>
+                opt.value === choices[i].value && opt.text === choices[i].label);
+        if (!sameOptions) {
+            select.replaceChildren();
+            for (const choice of choices) {
+                select.add(new Option(choice.label, choice.value));
+            }
+        }
+        select.value = String(confinement ?? 0);
+    }
+
+    refreshConfinementOptions() {
+        for (const lora of this.selected) {
+            const rendered = this.rendered[lora.name];
+            if (rendered) {
+                this.populateConfinementSelect(rendered.confinementInput, lora.confinement);
+                rendered.fixSize();
+            }
+        }
+    }
+
     /** Get the "LoRAs" parameter input element. */
     getLorasInput() {
         return document.getElementById('input_loras');
@@ -109,7 +183,7 @@ class LoraHelper {
             let renderElem = this.rendered[lora.name];
             if (renderElem) {
                 renderElem.weightInput.value = lora.weight;
-                renderElem.confinementInput.value = lora.confinement;
+                this.populateConfinementSelect(renderElem.confinementInput, lora.confinement);
                 renderElem.fixSize();
             }
             else {
@@ -141,12 +215,7 @@ class LoraHelper {
                     this.rebuildParams();
                 });
                 let confinementInput = document.createElement('select');
-                confinementInput.add(new Option('@ Global', '0', true, true));
-                confinementInput.add(new Option('Base', '5'));
-                confinementInput.add(new Option('Refiner', '1'));
-                confinementInput.add(new Option('Video', '2'));
-                confinementInput.add(new Option('VideoSwap', '3'));
-                confinementInput.value = lora.confinement in this.confinementNames ? lora.confinement : '0';
+                this.populateConfinementSelect(confinementInput, lora.confinement);
                 let fixSize = () => {
                     let displayText = confinementInput.selectedOptions.length > 0 ? confinementInput.selectedOptions[0].text : '';
                     if (confinementInput.value == '0') {

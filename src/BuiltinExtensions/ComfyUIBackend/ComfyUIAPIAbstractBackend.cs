@@ -36,16 +36,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
 
     public string ModelFolderFormat = null;
 
-    public class ReusableSocket
-    {
-        public string ID;
-
-        public ClientWebSocket Socket;
-
-        public long LastUsed = Environment.TickCount64;
-    }
-
-    public ConcurrentQueue<ReusableSocket> ReusableSockets = new();
+    // A websocket is owned by one AwaitJobLive request, never pooled across
+    // requests. This keeps late binary previews on their originating socket.
+    // Active sockets are tracked only so backend shutdown can close them.
+    public ConcurrentDictionary<ClientWebSocket, byte> ActiveJobSockets = new();
 
     public string WSID;
 
@@ -191,20 +185,24 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
 
     public async Task ClearSockets()
     {
-        while (ReusableSockets.TryDequeue(out ReusableSocket socket))
+        foreach (ClientWebSocket socket in ActiveJobSockets.Keys)
         {
             try
             {
-                if (socket.Socket.State == WebSocketState.Open)
+                if (socket.State == WebSocketState.Open)
                 {
                     using CancellationTokenSource cancel = Utilities.TimedCancel(TimeSpan.FromSeconds(5));
-                    await socket.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", cancel.Token);
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", cancel.Token);
                 }
-                socket.Socket.Dispose();
             }
             catch (Exception ex)
             {
                 Logs.Verbose($"ComfyUI backend {BackendData.ID} failed to close websocket: {ex.ReadableString()}");
+            }
+            finally
+            {
+                ActiveJobSockets.TryRemove(socket, out _);
+                socket.Dispose();
             }
         }
     }
@@ -245,55 +243,34 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         metadataObj["preview_notice"] = "Image is not done generating";
         string previewMetadata = T2IParamInput.MetadataToString(new JObject() { ["sui_image_params"] = metadataObj, ["sui_extra_data"] = user_input.BuildExtraDataJObject() });
         int expectedNodes = workflowJson.Count;
-        string id = null;
+        string id = Guid.NewGuid().ToString();
         ClientWebSocket socket = null;
         try
         {
-            while (ReusableSockets.TryDequeue(out ReusableSocket oldSocket))
+            // ComfyUI associates execution with the client's websocket ID.
+            // Reusing that connection between requests allows queued async
+            // preview bytes from one prompt to bleed into the next prompt.
+            Logs.Verbose($"Connecting prompt-owned ComfyUI websocket client {id}...");
+            socket = await NetworkBackendUtils.ConnectWebsocket(APIAddress, $"ws?clientId={id}");
+            ActiveJobSockets.TryAdd(socket, 0);
+            await socket.SendJson(new JObject()
             {
-                if (oldSocket.Socket.State == WebSocketState.Open)
+                ["type"] = "feature_flags",
+                ["data"] = new JObject()
                 {
-                    if (Environment.TickCount64 - oldSocket.LastUsed > TimeSpan.FromMinutes(30).TotalMilliseconds)
-                    {
-                        Logs.Verbose($"Old websocket expired (timeout, {TimeSpan.FromMilliseconds(Environment.TickCount64 - oldSocket.LastUsed)}), closing.");
-                        ReusableSocket finalCopy = oldSocket;
-                        _ = Utilities.RunCheckedTask(async () =>
-                        {
-                            using CancellationTokenSource cancel = Utilities.TimedCancel(TimeSpan.FromSeconds(5));
-                            await finalCopy.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, cancel.Token);
-                            finalCopy.Socket.Dispose();
-                        });
-                        continue;
-                    }
-                    Logs.Verbose("Reuse existing websocket");
-                    id = oldSocket.ID;
-                    socket = oldSocket.Socket;
-                    break;
+                    ["supports_preview_metadata"] = true
+                    // supports_manager_v4_ui
                 }
-                else
-                {
-                    oldSocket.Socket.Dispose();
-                }
-            }
-            if (socket is null)
-            {
-                Logs.Verbose("Need to connect a websocket...");
-                id = Guid.NewGuid().ToString();
-                socket = await NetworkBackendUtils.ConnectWebsocket(APIAddress, $"ws?clientId={id}");
-                await socket.SendJson(new JObject()
-                {
-                    ["type"] = "feature_flags",
-                    ["data"] = new JObject()
-                    {
-                        ["supports_preview_metadata"] = true
-                        // supports_manager_v4_ui
-                    }
-                }, API.WebsocketTimeout);
-                Logs.Verbose("Connected.");
-            }
+            }, API.WebsocketTimeout);
+            Logs.Verbose($"Connected prompt-owned ComfyUI websocket client {id}.");
         }
         catch (Exception ex)
         {
+            if (socket is not null)
+            {
+                ActiveJobSockets.TryRemove(socket, out _);
+                socket.Dispose();
+            }
             Logs.Verbose($"Websocket comfy connection failed: {ex.ReadableString()}");
             if (CanIdle)
             {
@@ -466,6 +443,14 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                     }
                     else
                     {
+                        // JSON execution_start messages are already prompt-gated above,
+                        // but binary previews were not. A reusable socket can deliver
+                        // an old sampler's async preview during the next generation.
+                        if (!isMe || !H3PreviewPromptGuard.Matches(output, promptId))
+                        {
+                            Logs.Debug($"Dropped a non-current ComfyUI preview before relaying it to batch {batchId} (prompt {promptId}).");
+                            continue;
+                        }
                         (MediaType mediaType, int index, int eventId, int preBytes) = ComfyRawWebsocketOutputToFormatLabel(output);
                         Logs.Verbose($"ComfyUI Websocket sent: {output.Length} bytes of image data as event {eventId} in format {mediaType} to index {index}");
                         if (isExpectingText || mediaType.MetaType == MediaMetaType.Text)
@@ -582,9 +567,10 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         }
         finally
         {
-            if (!socket.CloseStatus.HasValue)
+            if (socket is not null)
             {
-                ReusableSockets.Enqueue(new() { ID = id, Socket = socket });
+                ActiveJobSockets.TryRemove(socket, out _);
+                socket.Dispose();
             }
         }
     }

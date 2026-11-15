@@ -4,6 +4,12 @@ on:
     push:
     pull_request:
 
+# Cancel obsolete checks when a new commit arrives on the same ref.
+# Keep distinct workflows, branches and PR refs from canceling each other.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
 jobs:
     test:
         runs-on: ubuntu-latest
@@ -15,4 +21,89 @@ jobs:
         - uses: actions/setup-dotnet@v5
           with:
             dotnet-version: '8.x'
+        - name: Validate opt-in H3 sampler performance trace and A/B comparator (NO GPU)
+          run: |
+            python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmVaeTrace.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/__init__.py tests/h3_perf_compare.py tests/h3_log_console.py
+            python3 -m unittest discover -s tests -p 'test_h3_*perf*.py' -v
+        - name: Verify H3 video/audio VAE timeline and failure/heartbeat behavior (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_vae_trace.py -v
+        - name: Verify H3 process, plugin, and sampler-route startup handshakes (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_trace_boot.py -v
+        - name: Validate log analysis menu reports, legacy fallback and negative cases (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_log_console.py -v
         - run: bash ./launchtools/run_tests.sh
+        # These checks are deliberately only syntax checks. They do not imply
+        # that Qwen segment LoRA weights were matched or applied during inference.
+        - name: Validate vendored upstream Qwen node and production routing (NOT inference)
+          run: python3 -m unittest discover -s tests -p test_qwen_native_bundle.py -v
+        - name: Validate live acceptance test syntax (NOT inference)
+          run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
+        - name: Reproduce and guard against cross-generation sampler preview races (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_swarm_sampler_preview_dispatch.py -v
+        - name: Reject stale Comfy event-4 previews at the actual websocket boundary (.NET 8, NO GPU)
+          run: |
+            python3 -m unittest discover -s tests -p test_h3_preview_delivery_contract.py -v
+            dotnet run --project tests/h3-preview-guard/H3PreviewGuardSmoke.csproj --configuration Release
+        - name: Verify per-prompt websocket lifecycle and unified sampler dispatch (NO GPU)
+          run: |
+            python3 -m unittest discover -s tests -p test_h3_request_websocket_lifecycle.py -v
+            python3 -m unittest discover -s tests -p test_h3_sampler_dispatch_contract.py -v
+        - name: Ensure superseded CI workflows cancel automatically (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_ci_workflow_concurrency.py -v
+        - name: Keep async preview conversion scoped to the executing sampler (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_swarm_preview_context_isolation.py -v
+        - name: Validate H3 prompt-image resize binding and collector sizing (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_prompt_image_resize.py -v
+        - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
+          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py
+        - name: Validate browser JS syntax (NOT browser execution)
+          run: node --check src/wwwroot/js/genpage/gentab/loras.js
+
+    crop-stitch-cpu:
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v6
+        - uses: actions/setup-python@v6
+          with:
+            python-version: '3.12'
+        # Exercise upstream real-tensor crop/stitch behavior, not mocks or
+        # handrolled imitations. This does not imply a Qwen GPU acceptance pass.
+        - name: Install CPU tensor dependencies for upstream CropAndStitch tests
+          run: |
+            python3 -m pip install 'numpy<3' pillow scipy
+            python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - name: Run unmodified upstream CropAndStitch round-trip and mask tests
+          env:
+            PYTHONPATH: src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch
+          run: python3 -m unittest discover -s src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/tests -p 'test_*.py' -v
+
+    h3-windows-launcher-smoke:
+        runs-on: windows-latest
+        steps:
+        - uses: actions/checkout@v6
+        - uses: actions/setup-python@v6
+          with:
+            python-version: '3.12'
+        - name: Verify H3 diagnostics inherited by child CMD without launching SwarmUI
+          shell: cmd
+          run: |
+            call Windows_Update_SwarmUI_primeinc_test.bat --verify-h3-trace > h3-trace-smoke.txt
+            if errorlevel 1 exit /b 1
+            findstr /X /C:"H3_TRACE_CHILD_INHERITANCE_OK" h3-trace-smoke.txt
+        - name: Verify interactive H3 log-analysis menu and Python report dispatch
+          shell: cmd
+          run: |
+            call H3_Log_Analyzer.bat --self-test > h3-menu-smoke.txt 2>&1
+            if errorlevel 1 (
+              type h3-menu-smoke.txt
+              exit /b 1
+            )
+            findstr /X /C:"H3_LOG_MENU_SELFTEST_OK" h3-menu-smoke.txt
+            if errorlevel 1 exit /b 1
+            echo 9> h3-menu-choice.txt
+            call H3_Log_Analyzer.bat < h3-menu-choice.txt > h3-menu-render.txt 2>&1
+            if errorlevel 1 (
+              type h3-menu-render.txt
+              exit /b 1
+            )
+            findstr /C:"S W A R M  /  H 3   P E R F   S T U D I O" h3-menu-render.txt

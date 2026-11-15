@@ -142,6 +142,7 @@ class SwarmMaskBounds:
             "optional": {
                 "aspect_x": ("INT", {"default": 0, "min": 0, "max": 4096, "tooltip": "An X width value, used to indicate a target aspect ratio. 0 to allow any aspect."}),
                 "aspect_y": ("INT", {"default": 0, "min": 0, "max": 4096, "tooltip": "A Y height value, used to indicate a target aspect ratio. 0 to allow any aspect."}),
+                "reject_empty": ("BOOLEAN", {"default": False, "tooltip": "Fail instead of cropping the full image when the detection mask is empty."}),
             }
         }
 
@@ -151,9 +152,14 @@ class SwarmMaskBounds:
     FUNCTION = "get_bounds"
     DESCRIPTION = "Returns the bounding box of the mask (as pixel coordinates x,y,width,height), optionally grown by the number of pixels specified in 'grow'."
 
-    def get_bounds(self, mask, grow, aspect_x=0, aspect_y=0):
+    def get_bounds(self, mask, grow, aspect_x=0, aspect_y=0, reject_empty=False):
         if len(mask.shape) == 3:
             mask = mask[0]
+        # Without this guard, torch.argmax on an all-zero mask returns zero,
+        # and SwarmMaskBounds silently selects the ENTIRE image. A bad detector
+        # must not launch an expensive Qwen edit of the wrong region.
+        if reject_empty and not torch.any(mask > 0).item():
+            raise ValueError("SwarmMaskBounds: the selected segment mask is empty; refusing a full-frame crop")
         sum_x = (torch.sum(mask, dim=0) != 0).to(dtype=torch.int)
         sum_y = (torch.sum(mask, dim=1) != 0).to(dtype=torch.int)
         def getval(arr, direction):

@@ -1,4 +1,5 @@
-import torch, struct, json, threading
+import torch, struct, json, threading, os, time, sys
+from contextvars import ContextVar
 from io import BytesIO
 from PIL import Image
 import latent_preview, comfy
@@ -12,21 +13,34 @@ from comfy_extras.nodes_flux import Flux2Scheduler
 from comfy_extras.nodes_ideogram4 import ideogram4_sigmas
 from comfy_extras.nodes_custom_sampler import Guider_DualModel
 
-_preview_lock = threading.Lock()
-_preview_sampler_active = False
-_last_preview_step_sent = -1
+# The monkeypatch is process-global but its active mode must NOT be. A
+# process-wide counter changes native Comfy previews in unrelated threads.
+# Store one ContextVar on latent_preview so reloaded copies of this module
+# still share the same mode with the original monkeypatch.
+if not hasattr(latent_preview, "_swarm_preview_context"):
+    latent_preview._swarm_preview_context = ContextVar("swarm_async_preview_active", default=False)
+_preview_context = latent_preview._swarm_preview_context
+
+def _swarm_preview_active():
+    return _preview_context.get()
+
+def _swarm_preview_begin():
+    return _preview_context.set(True)
+
+def _swarm_preview_end(token):
+    _preview_context.reset(token)
 
 if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
     _original_preview_to_image = latent_preview.preview_to_image
     # Copy/paste of preview_to_image but with the Image.fromarray on unloaded data removed
     def _swarm_preview_to_image(latent_image, do_scale=True):
-        if not _preview_sampler_active:
+        if not _swarm_preview_active():
             return _original_preview_to_image(latent_image, do_scale)
         if do_scale:
             latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1).mul(0xFF))
         else:
             latents_ubyte = (latent_image.clamp(0, 1).mul(0xFF))
-        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8, non_blocking=comfy.model_management.device_supports_non_blocking(latent_image.device))
+        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8)
         return latents_ubyte
     _swarm_preview_to_image._swarm_patched = True
     latent_preview.preview_to_image = _swarm_preview_to_image
@@ -102,22 +116,122 @@ def swarm_fixed_noise(seed, latent_image, var_seed, var_seed_strength):
 
 
 def get_preview_metadata():
+    # Only the current execution context can identify the preview's owner.
+    # ComfyUI's last_prompt_id/last_node_id are process-global and may belong
+    # to an entirely different generation by the time a worker emits pixels.
     executing_context = get_executing_context()
-    prompt_id = None
-    node_id = None
-    if executing_context is not None:
-        prompt_id = executing_context.prompt_id
-        node_id = executing_context.node_id
-    if prompt_id is None:
-        prompt_id = PromptServer.instance.last_prompt_id
-    if node_id is None:
-        node_id = PromptServer.instance.last_node_id
-    return {"node_id": node_id, "prompt_id": prompt_id, "display_node_id": node_id, "parent_node_id": node_id, "real_node_id": node_id} # display_node_id, parent_node_id, real_node_id? comfy_execution/progress.py has this.
+    prompt_id = executing_context.prompt_id if executing_context is not None else None
+    node_id = executing_context.node_id if executing_context is not None else None
+    return {"node_id": node_id, "prompt_id": prompt_id, "display_node_id": node_id,
+            "parent_node_id": node_id, "real_node_id": node_id}
 
 
-def swarm_send_extra_preview(id, image):
-    server = PromptServer.instance
+def make_swarm_preview_state():
     metadata = get_preview_metadata()
+    client_id = PromptServer.instance.client_id
+    # Never send an unowned preview. A missing execution context is not
+    # permission to guess from a process-global most-recent job.
+    owned = bool(metadata["prompt_id"] and metadata["node_id"] and client_id)
+    if not owned:
+        print("[H3TRACE-ROUTE] source=SwarmKSampler preview_disabled=no_execution_identity_or_client",
+              file=sys.stderr, flush=True)
+    return {"lock": threading.Lock(), "active": owned, "last_step_sent": -1,
+            "metadata": metadata, "client_id": client_id}
+
+
+def _swarm_h3_trace_shapes(tensor):
+    """Shape-only inspection; does not read pixels or synchronize the GPU."""
+    if getattr(tensor, "is_nested", False):
+        return [list(item.shape) for item in tensor.unbind()]
+    return [list(tensor.shape)]
+
+
+def _swarm_h3_trace_snapshot(model, positive, latent_samples):
+    """Summarize effective H3 reference/keyframe conditioning without logging data."""
+    refs, keyframes, text_tokens = [], [], []
+    for entry in positive:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        embedding, options = entry[0], entry[1]
+        shape = getattr(embedding, "shape", ())
+        if len(shape) > 1:
+            text_tokens.append(int(shape[1]))
+        if not isinstance(options, dict):
+            continue
+        for block in options.get("minimax_refs") or []:
+            if isinstance(block, dict):
+                refs.append({
+                    "kind": block.get("kind"), "latent_h": block.get("latent_h"),
+                    "latent_w": block.get("latent_w"),
+                    "latent_shape": list(block["latent"].shape) if block.get("latent") is not None else None,
+                })
+        for block in options.get("minimax_keyframes") or []:
+            if isinstance(block, dict):
+                keyframes.append({
+                    "frame": block.get("resolved_frame_index"),
+                    "latent_shape": list(block["latent"].shape) if block.get("latent") is not None else None,
+                })
+    return {
+        "model_type": type(model.model).__name__,
+        "latent_shapes": _swarm_h3_trace_shapes(latent_samples),
+        "text_tokens": text_tokens, "refs": refs, "keyframes": keyframes,
+        "disable_cfg1_optimization": bool(model.model_options.get("disable_cfg1_optimization", False)),
+    }
+
+
+def _swarm_h3_trace_residency(model):
+    """Comfy ModelPatcher GPU weight residency, not just PyTorch tensor allocations.
+
+    Mirrors ComfyUI DynamicVramModelPatcher.loaded_size() semantics (revision
+    c844cb672186f187bf9455e2808821417a10d296); no weight copies or sync.
+    """
+    resident = model.loaded_size()
+    total = model.model_size()
+    return {
+        "weights_resident_mb": round(resident / (1024 * 1024), 1),
+        "weights_offloaded_mb": round(max(0, total - resident) / (1024 * 1024), 1),
+        "weights_total_mb": round(total / (1024 * 1024), 1),
+        "dynamic_model": bool(model.is_dynamic()),
+    }
+
+
+def _swarm_h3_trace_timed_callback(callback, emit, clock=None, residency=None):
+    """Time actual sampling callbacks, excluding preview and trace overhead."""
+    if clock is None:
+        clock = time.perf_counter
+    last = clock()
+
+    def traced(step, x0, x, total_steps):
+        nonlocal last
+        arrived = clock()
+        result = callback(step, x0, x, total_steps)
+        departed = clock()
+        info = {"event": "step", "step": step + 1, "total_steps": total_steps,
+                "elapsed_s": round(arrived - last, 3),
+                "callback_s": round(departed - arrived, 3)}
+        if residency is not None:
+            info.update(residency())
+        emit(info)
+        # Neither preview generation nor telemetry belongs in the next step's
+        # model-runtime interval.
+        last = clock()
+        return result
+
+    return traced
+
+
+def _swarm_h3_trace_emit(event, identity, payload):
+    info = {"event": event, "prompt_id": identity.get("prompt_id"),
+            "node_id": identity.get("node_id")}
+    info.update(payload)
+    # Swarm's self-start monitor reads the child's STDERR directly.
+    # Do not rely on the root INFO logging level being enabled in ComfyUI.
+    print("[H3PERF] " + json.dumps(info, sort_keys=True), file=sys.stderr, flush=True)
+
+
+def swarm_send_extra_preview(id, image, preview_metadata, *, client_id=None):
+    server = PromptServer.instance
+    metadata = preview_metadata.copy()
     metadata["mime_type"] = "image/jpeg"
     metadata["id"] = id
     metadata_json = json.dumps(metadata).encode('utf-8')
@@ -128,16 +242,16 @@ def swarm_send_extra_preview(id, image):
     combined_data.extend(struct.pack(">I", len(metadata_json)))
     combined_data.extend(metadata_json)
     combined_data.extend(image_bytes)
-    server.send_sync(9999123, combined_data, sid=server.client_id)
+    server.send_sync(9999123, combined_data, sid=server.client_id if client_id is None else client_id)
 
 
-def swarm_send_animated_preview(id, images):
+def swarm_send_animated_preview(id, images, preview_metadata, *, client_id=None):
     server = PromptServer.instance
     bytesIO = BytesIO()
     images[0].save(bytesIO, save_all=True, duration=int(1000.0/6), append_images=images[1 : len(images)], lossless=False, quality=60, method=0, format='WEBP')
     bytesIO.seek(0)
     image_bytes = bytesIO.getvalue()
-    metadata = get_preview_metadata()
+    metadata = preview_metadata.copy()
     metadata["mime_type"] = "image/webp"
     metadata["id"] = id
     metadata_json = json.dumps(metadata).encode('utf-8')
@@ -145,7 +259,7 @@ def swarm_send_animated_preview(id, images):
     combined_data.extend(struct.pack(">I", len(metadata_json)))
     combined_data.extend(metadata_json)
     combined_data.extend(image_bytes)
-    server.send_sync(9999123, combined_data, sid=server.client_id)
+    server.send_sync(9999123, combined_data, sid=server.client_id if client_id is None else client_id)
 
 
 def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_max, rho):
@@ -158,12 +272,23 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_ma
         return None
 
 
-def make_swarm_sampler_callback(steps, device, model, previews):
+def _swarm_preview_frame_to_image(frame):
+    # Normal Comfy previewers return PIL.Image. Swarm's async preview monkeypatch
+    # returns a CPU uint8 tensor. Accept both so a bypassed/replaced monkeypatch
+    # cannot crash the preview sender.
+    if isinstance(frame, Image.Image):
+        return frame
+    if torch.is_tensor(frame):
+        return Image.fromarray(frame.numpy())
+    raise TypeError(f"Unsupported Swarm preview frame type: {type(frame).__name__}")
+
+
+def make_swarm_sampler_callback(steps, device, model, previews, preview_state):
     previewer = latent_preview.get_previewer(device, model.model.latent_format) if previews != "none" else None
     pbar = comfy.utils.ProgressBar(steps)
     def callback(step, x0, x, total_steps):
         pbar.update_absolute(step + 1, total_steps, None)
-        if previewer:
+        if previewer and preview_state["active"]:
             if getattr(x0, "is_nested", False) and hasattr(x0, "tensors"):
                 x0 = x0.tensors[0]
             if x0.ndim == 5:
@@ -193,18 +318,20 @@ def make_swarm_sampler_callback(steps, device, model, previews):
                 event = torch.cuda.Event()
                 event.record()
             def send_preview():
-                global _last_preview_step_sent
                 if event is not None:
                     event.synchronize()
-                with _preview_lock:
-                    if not _preview_sampler_active or step < _last_preview_step_sent:
+                with preview_state["lock"]:
+                    # Old samplers cannot submit previews into a newer generation.
+                    if not preview_state["active"] or step < preview_state["last_step_sent"]:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [Image.fromarray(tensor.numpy()) for tensor in frames])
+                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames], preview_state["metadata"],
+                                                    client_id=preview_state["client_id"])
                     else:
-                        for id, tensor in frames:
-                            swarm_send_extra_preview(id, Image.fromarray(tensor.numpy()))
-                    _last_preview_step_sent = step
+                        for id, frame in frames:
+                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame), preview_state["metadata"],
+                                                     client_id=preview_state["client_id"])
+                    preview_state["last_step_sent"] = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
 
@@ -342,7 +469,7 @@ def samplers_sample(model, noise, positive, negative, cfg, device, sampler, sigm
 
 #comfy/ComfyUI/comfy/samplers.py - KSampler
 class PatchedKSampler(comfy.samplers.KSampler):
-    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None, expected_step_count=0):
         if sigmas is None:
             sigmas = self.sigmas
 
@@ -355,21 +482,83 @@ class PatchedKSampler(comfy.samplers.KSampler):
             if start_step < (len(sigmas) - 1):
                 sigmas = sigmas[start_step:]
             else:
+                if expected_step_count > 0:
+                    raise ValueError(
+                        f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
+                        f"{expected_step_count} real denoising evaluations; got 0 "
+                        f"(scheduled={self.steps}, start={start_step}, "
+                        f"available_sigma_intervals={len(sigmas)-1}). "
+                        "Refusing an unchanged latent instead of silently pretending to edit."
+                    )
                 if latent_image is not None:
                     return latent_image
                 else:
                     return torch.zeros_like(noise)
 
+        # This is the ACTUAL Comfy sampler sigma boundary, not a planned graph.
+        # Qwen segment workflows pass their requested iteration count so we fail
+        # before expensive model execution if a scheduler silently truncated it.
+        if expected_step_count > 0:
+            actual_count = max(0, len(sigmas) - 1)
+            if actual_count != expected_step_count:
+                raise ValueError(
+                    f"[QWEN21-SEG] SAMPLER STEP MISMATCH: expected "
+                    f"{expected_step_count} sigma transitions; got "
+                    f"{actual_count} (scheduled={self.steps}, start={start_step}, "
+                    f"scheduler={self.scheduler}). Refusing truncated inference."
+                )
+            # These are actual ModelPatcher entries, not proof of their source or
+            # semantic fidelity. Unique key counts can remain constant for two LoRAs
+            # patching the same layers; contribution count distinguishes that.
+            patches = getattr(self.model, "patches", {})
+            contributions = sum(len(entries) for entries in patches.values())
+            print(
+                f"[QWEN21-SEG] sampler runtime: expected_steps={expected_step_count} "
+                f"actual_steps={actual_count} scheduled_steps={self.steps} start={start_step} "
+                f"patch_keys={len(patches)} patch_contributions={contributions} "
+                f"patch_uuid={getattr(self.model, 'patches_uuid', '(unavailable)')}",
+                flush=True,
+            )
         sampler = comfy.samplers.sampler_object(self.sampler)
+        # A sigma schedule is only a plan. Observe the callbacks actually emitted
+        # by the real Comfy sampler so 4 scheduled intervals cannot masquerade
+        # as 4 completed iterations. This is not a count of DiT forward calls:
+        # some samplers evaluate the model multiple times per iteration.
+        observed_steps = 0
 
-        return samplers_sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+        def observed_callback(step, x0, x, total_steps):
+            nonlocal observed_steps
+            observed_steps += 1
+            if callback is not None:
+                return callback(step, x0, x, total_steps)
+
+        samples = samplers_sample(
+            self.model, noise, positive, negative, cfg, self.device, sampler,
+            sigmas, self.model_options, latent_image=latent_image,
+            denoise_mask=denoise_mask,
+            callback=observed_callback if expected_step_count > 0 else callback,
+            disable_pbar=disable_pbar, seed=seed, model_negative=model_negative
+        )
+        if expected_step_count > 0:
+            print(
+                f"[QWEN21-SEG] sampler completed_steps={observed_steps} "
+                f"requested_steps={expected_step_count}",
+                flush=True,
+            )
+            if observed_steps != expected_step_count:
+                raise ValueError(
+                    f"[QWEN21-SEG] EXECUTION STEP MISMATCH: requested "
+                    f"{expected_step_count} completed sampler iterations but "
+                    f"observed {observed_steps} callback events."
+                )
+        return samples
 
 
 #comfy/ComfyUI/comfy/sample.py - sample
-def sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+def sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None, expected_step_count=0):
     sampler = PatchedKSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
-    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative, expected_step_count=expected_step_count)
     samples = samples.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
     return samples
 
@@ -403,6 +592,7 @@ class SwarmKSampler:
             },
             "optional": {
                 "model_negative": ("MODEL", ),
+                "expected_step_count": ("INT", {"default": 0, "min": 0, "max": 10000}),
             }
         }
 
@@ -411,7 +601,7 @@ class SwarmKSampler:
     FUNCTION = "run_sampling"
     DESCRIPTION = "Works like a vanilla Comfy KSamplerAdvanced, but with extra inputs for advanced features such as sigma scale, tiling, previews, etc."
 
-    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=None):
+    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=None, expected_step_count=0):
         device = comfy.model_management.get_torch_device()
         latent_samples = latent_image["samples"]
         latent_samples = comfy.sample.fix_empty_latent_channels(model, latent_samples)
@@ -475,24 +665,56 @@ class SwarmKSampler:
         
         out = latent_image.copy()
         if steps > 0:
-            global _preview_sampler_active, _last_preview_step_sent
-            with _preview_lock:
-                _preview_sampler_active = True
-                _last_preview_step_sent = -1
+            # Diagnostics are opt-in. Inference and GPU synchronization stay unchanged.
+            trace_requested = os.environ.get("SWARM_H3_TRACE") == "1"
+            trace_model_class = type(model.model).__name__
+            trace_enabled = trace_requested and "MiniMaxH3" in trace_model_class
+            trace_identity = get_preview_metadata() if trace_requested else None
+            if trace_requested:
+                print(f"[H3TRACE-ROUTE] source=SwarmKSampler model={trace_model_class} active={trace_enabled} prompt_id={trace_identity.get('prompt_id')} node_id={trace_identity.get('node_id')}", file=sys.stderr, flush=True)
+            trace_started = time.perf_counter() if trace_enabled else None
+            trace_success = False
+            if trace_enabled:
+                details = _swarm_h3_trace_snapshot(model, positive, latent_samples)
+                details.update({"cfg": cfg, "steps": steps, "sampler": sampler_name,
+                                "scheduler": scheduler, "previews": previews,
+                                "start_at_step": start_at_step, "end_at_step": end_at_step,
+                                "device": str(device),
+                                "patch_keys": len(getattr(model, "patches", {}) or {})})
+                if getattr(device, "type", None) == "cuda":
+                    details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
+                    details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                details.update(_swarm_h3_trace_residency(model))
+                _swarm_h3_trace_emit("start", trace_identity, details)
+            preview_state = make_swarm_preview_state()
+            preview_token = _swarm_preview_begin()
             try:
-                callback = make_swarm_sampler_callback(steps, device, model, previews)
+                callback = make_swarm_sampler_callback(steps, device, model, previews, preview_state)
+                if trace_enabled:
+                    callback = _swarm_h3_trace_timed_callback(
+                        callback, lambda event: _swarm_h3_trace_emit(event["event"], trace_identity, event),
+                        residency=lambda: _swarm_h3_trace_residency(model))
 
                 samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
                                         denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
-                                        force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative)
+                                        force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative, expected_step_count=expected_step_count)
                 out["samples"] = samples
+                trace_success = True
             finally:
-                with _preview_lock:
-                    _preview_sampler_active = False
+                if trace_enabled:
+                    details = {"elapsed_s": round(time.perf_counter() - trace_started, 3), "success": trace_success}
+                    if getattr(device, "type", None) == "cuda":
+                        details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
+                        details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                    details.update(_swarm_h3_trace_residency(model))
+                    _swarm_h3_trace_emit("finish", trace_identity, details)
+                with preview_state["lock"]:
+                    preview_state["active"] = False
+                _swarm_preview_end(preview_token)
         return (out, )
 
     # tiled sample version of sample function
-    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=None):
+    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=None, expected_step_count=0):
         out = latent_image.copy()
         # split image into tiles
         latent_samples = latent_image["samples"]
@@ -502,18 +724,18 @@ class SwarmKSampler:
         for coords, tile in tiles:
             tile_positive = crop_conditioning(positive, coords)
             tile_negative = crop_conditioning(negative, coords)
-            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, tile_positive, tile_negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative)
+            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, tile_positive, tile_negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative, expected_step_count=expected_step_count)
             resampled_tiles.append((coords, resampled_tile[0]["samples"]))
         # stitch the tiles to get the final upscaled image
         result = stitch_latent_tensors(latent_samples.shape, resampled_tiles)
         out["samples"] = result
         return (out,)
 
-    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size, model_negative=None):
+    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size, model_negative=None, expected_step_count=0):
         if tile_sample:
-            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=model_negative)
+            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=model_negative, expected_step_count=expected_step_count)
         else:
-            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative)
+            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative, expected_step_count=expected_step_count)
 
 
 NODE_CLASS_MAPPINGS = {
