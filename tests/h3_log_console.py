@@ -62,6 +62,59 @@ def summarize_vae(events, prompt_id=None):
     }
 
 
+def trace_health(path):
+    """Evidence-based startup/dispatch diagnosis; never equates absent logs to an absent hook."""
+    lines = _read_log(path).splitlines()
+    host = [line for line in lines if "[H3TRACE-BOOT] host=SwarmUI" in line]
+    plugin_import = [line for line in lines
+                     if "[H3TRACE-BOOT] source=SwarmComfyCommon import_start" in line]
+    plugin_state = [line for line in lines
+                    if "[H3TRACE-BOOT] source=SwarmComfyCommon status=" in line]
+    csharp_routes = [line for line in lines
+                     if "[H3TRACE-ROUTE] stage=" in line]
+    python_routes = [line for line in lines
+                     if "[H3TRACE-ROUTE] source=SwarmKSampler" in line]
+    sampler_records = sum("[H3PERF] " in line for line in lines)
+    vae_records = sum("[H3VAE] " in line for line in lines)
+
+    if not host:
+        verdict = "No host bootstrap evidence: this log may omit startup, predate tracing, or come from another installation."
+    elif "traceEnabled=False" in host[-1]:
+        verdict = "SwarmUI started without SWARM_H3_TRACE=1; use the trace-enabled updater and restart."
+    elif not plugin_import:
+        verdict = "Host enabled tracing, but custom-node import was not observed; inspect ComfyUI custom-node loading or log completeness."
+    elif plugin_state and "status=disabled" in plugin_state[-1]:
+        verdict = "ComfyUI plugin saw tracing disabled despite the SwarmUI host setting; inspect process environment."
+    elif not plugin_state:
+        verdict = "Custom node began importing, but did not confirm that its VAE hook installed."
+    elif not csharp_routes:
+        verdict = "Trace package loaded; no H3 sampler route was recorded in this log."
+    elif "sampler=KSamplerAdvanced" in csharp_routes[-1]:
+        verdict = "Native KSamplerAdvanced was selected; custom [H3PERF] step events are not expected."
+    elif not python_routes:
+        verdict = "SwarmKSampler was selected by workflow generation but Python sampler entry was not observed."
+    elif "active=False" in python_routes[-1]:
+        verdict = "The Python sampler ran, but its effective model class did not satisfy the H3 tracing guard."
+    elif not sampler_records:
+        verdict = "The Python sampler entered with H3 tracing enabled, but [H3PERF] records did not arrive."
+    elif not vae_records:
+        verdict = "H3 sampling was traced; no VAE decoder records were captured in this log."
+    else:
+        verdict = "Host, plugin, sampler and VAE trace events are all observable."
+
+    return {
+        "host_boot_seen": bool(host),
+        "host_trace_enabled": bool(host and "traceEnabled=True" in host[-1]),
+        "plugin_import_seen": bool(plugin_import),
+        "plugin_hook_status_seen": bool(plugin_state),
+        "sampler_route_seen": bool(csharp_routes),
+        "python_sampler_entry_seen": bool(python_routes),
+        "sampler_event_count": sampler_records,
+        "vae_event_count": vae_records,
+        "verdict": verdict,
+    }
+
+
 def legacy_scan(path):
     raw = _read_log(path)
     prepared = [{'model': n, 'staged_mb': int(mb)} for n, mb in MODEL_PREP.findall(raw)]
@@ -114,6 +167,7 @@ def build_report(mode, logs):
         result['trace_found'] = bool(runs)
         result['prompts'] = split_runs(runs)
         result['legacy'] = legacy_scan(logs[0])
+        result['trace_health'] = trace_health(logs[0])
         result['vae_events'] = vae_events(logs[0])
         result['vae_summary'] = summarize_vae(result['vae_events'])
         return result
@@ -201,6 +255,16 @@ def render(report):
             for j, sampler in enumerate(p['samplers'], 1):
                 lines += _sampler_block(f'SAMPLER {j}', sampler)
         legacy = report['legacy']
+        health = report['trace_health']
+        lines.append('-' * 76)
+        lines.append('  TRACE DELIVERY HEALTH')
+        lines.append(_line('Host startup seen', 'YES' if health['host_boot_seen'] else 'NO'))
+        lines.append(_line('Child plugin import', 'YES' if health['plugin_import_seen'] else 'NO'))
+        lines.append(_line('Sampler route / entry',
+                           f"{int(health['sampler_route_seen'])} / {int(health['python_sampler_entry_seen'])}"))
+        lines.append(_line('Sampler / VAE events',
+                           f"{health['sampler_event_count']} / {health['vae_event_count']}"))
+        lines.append('  ' + health['verdict'])
         vae = report['vae_summary']
         if vae['events']:
             lines.append('-' * 76)
