@@ -1,4 +1,4 @@
-import torch, struct, json, threading
+import torch, struct, json, threading, os, time
 from io import BytesIO
 from PIL import Image
 import latent_preview, comfy
@@ -135,6 +135,70 @@ def make_swarm_preview_state():
     # Capture Comfy's prompt/node context on the sampling thread. A background
     # preview sender has no executing ContextVar and must not use last_prompt_id.
     return {"lock": threading.Lock(), "active": True, "last_step_sent": -1, "metadata": get_preview_metadata()}
+
+
+def _swarm_h3_trace_shapes(tensor):
+    """Shape-only inspection; does not read pixels or synchronize the GPU."""
+    if getattr(tensor, "is_nested", False):
+        return [list(item.shape) for item in tensor.unbind()]
+    return [list(tensor.shape)]
+
+
+def _swarm_h3_trace_snapshot(model, positive, latent_samples):
+    """Summarize effective H3 reference/keyframe conditioning without logging data."""
+    refs, keyframes, text_tokens = [], [], []
+    for entry in positive:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        embedding, options = entry[0], entry[1]
+        shape = getattr(embedding, "shape", ())
+        if len(shape) > 1:
+            text_tokens.append(int(shape[1]))
+        if not isinstance(options, dict):
+            continue
+        for block in options.get("minimax_refs") or []:
+            if isinstance(block, dict):
+                refs.append({
+                    "kind": block.get("kind"), "latent_h": block.get("latent_h"),
+                    "latent_w": block.get("latent_w"),
+                    "latent_shape": list(block["latent"].shape) if block.get("latent") is not None else None,
+                })
+        for block in options.get("minimax_keyframes") or []:
+            if isinstance(block, dict):
+                keyframes.append({
+                    "frame": block.get("resolved_frame_index"),
+                    "latent_shape": list(block["latent"].shape) if block.get("latent") is not None else None,
+                })
+    return {
+        "model_type": type(model.model).__name__,
+        "latent_shapes": _swarm_h3_trace_shapes(latent_samples),
+        "text_tokens": text_tokens, "refs": refs, "keyframes": keyframes,
+        "disable_cfg1_optimization": bool(model.model_options.get("disable_cfg1_optimization", False)),
+    }
+
+
+def _swarm_h3_trace_timed_callback(callback, emit, clock=None):
+    """Time actual sampling callbacks, not an estimated step count."""
+    if clock is None:
+        clock = time.perf_counter
+    last = clock()
+
+    def traced(step, x0, x, total_steps):
+        nonlocal last
+        now = clock()
+        emit({"event": "step", "step": step + 1, "total_steps": total_steps,
+              "elapsed_s": round(now - last, 3)})
+        last = now
+        return callback(step, x0, x, total_steps)
+
+    return traced
+
+
+def _swarm_h3_trace_emit(event, identity, payload):
+    info = {"event": event, "prompt_id": identity.get("prompt_id"),
+            "node_id": identity.get("node_id")}
+    info.update(payload)
+    print("[H3PERF] " + json.dumps(info, sort_keys=True), flush=True)
 
 
 def swarm_send_extra_preview(id, image, preview_metadata):
@@ -571,16 +635,42 @@ class SwarmKSampler:
         
         out = latent_image.copy()
         if steps > 0:
+            # Diagnostics are opt-in. Inference and GPU synchronization stay unchanged.
+            trace_enabled = os.environ.get("SWARM_H3_TRACE") == "1" and "MiniMaxH3" in type(model.model).__name__
+            trace_identity = get_preview_metadata() if trace_enabled else None
+            trace_started = time.perf_counter() if trace_enabled else None
+            trace_success = False
+            if trace_enabled:
+                details = _swarm_h3_trace_snapshot(model, positive, latent_samples)
+                details.update({"cfg": cfg, "steps": steps, "sampler": sampler_name,
+                                "scheduler": scheduler, "previews": previews,
+                                "start_at_step": start_at_step, "end_at_step": end_at_step,
+                                "device": str(device),
+                                "patch_keys": len(getattr(model, "patches", {}) or {})})
+                if getattr(device, "type", None) == "cuda":
+                    details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
+                    details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                _swarm_h3_trace_emit("start", trace_identity, details)
             preview_state = make_swarm_preview_state()
             _swarm_preview_begin()
             try:
                 callback = make_swarm_sampler_callback(steps, device, model, previews, preview_state)
+                if trace_enabled:
+                    callback = _swarm_h3_trace_timed_callback(
+                        callback, lambda event: _swarm_h3_trace_emit(event["event"], trace_identity, event))
 
                 samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
                                         denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
                                         force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative, expected_step_count=expected_step_count)
                 out["samples"] = samples
+                trace_success = True
             finally:
+                if trace_enabled:
+                    details = {"elapsed_s": round(time.perf_counter() - trace_started, 3), "success": trace_success}
+                    if getattr(device, "type", None) == "cuda":
+                        details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
+                        details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                    _swarm_h3_trace_emit("finish", trace_identity, details)
                 with preview_state["lock"]:
                     preview_state["active"] = False
                 _swarm_preview_end()
