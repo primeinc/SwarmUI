@@ -11,7 +11,7 @@ Comfy-Org/ComfyUI@c844cb672186f187bf9455e2808821417a10d296
 """
 import functools
 import json
-import logging
+import sys
 import threading
 import time
 
@@ -50,9 +50,10 @@ def _emit(data):
     # The ComfyUI backend captures Python logging on STDERR.
     # All records are single-line and contain no input/output tensor values.
     try:
-        logging.info("[H3VAE] %s", json.dumps(data, sort_keys=True))
+        # Direct STDERR survives ComfyUI/Python root logger filtering.
+        print("[H3VAE] " + json.dumps(data, sort_keys=True), file=sys.stderr, flush=True)
     except (TypeError, ValueError):
-        logging.warning("[H3VAE] telemetry serialization failed")
+        print("[H3VAE] telemetry serialization failed", file=sys.stderr, flush=True)
 
 
 def _wrap_decoder(original, method, heartbeat_seconds, identity, clock):
