@@ -44,22 +44,26 @@ class PreviewDispatchTests(unittest.TestCase):
     def setUp(self):
         QueuedThread.jobs = []
         self.sent = []
+        self.targeted_clients = []
         self.current_context = contextvars.ContextVar("context", default=None)
-        self.server = types.SimpleNamespace(last_prompt_id=None, last_node_id=None)
+        self.server = types.SimpleNamespace(last_prompt_id=None, last_node_id=None, client_id=None)
         self.model = types.SimpleNamespace(model=types.SimpleNamespace(latent_format=object()))
         module = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
         names = {"get_preview_metadata", "make_swarm_preview_state", "make_swarm_sampler_callback"}
         selected = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in names]
         self.assertEqual({node.name for node in selected}, names)
         progress = lambda steps: types.SimpleNamespace(update_absolute=lambda *args: None)
+        def capture(idx, frame, metadata, *, client_id=None):
+            self.sent.append((idx, frame, metadata.copy()))
+            self.targeted_clients.append(client_id)
         env = {
             "threading": types.SimpleNamespace(Lock=threading.Lock, Thread=QueuedThread),
             "get_executing_context": self.current_context.get,
             "PromptServer": types.SimpleNamespace(instance=self.server),
             "latent_preview": types.SimpleNamespace(get_previewer=lambda device, latent_format: FakePreviewer()),
             "comfy": types.SimpleNamespace(utils=types.SimpleNamespace(ProgressBar=progress)),
-            "swarm_send_extra_preview": lambda idx, frame, metadata: self.sent.append((idx, frame, metadata.copy())),
-            "swarm_send_animated_preview": lambda idx, frames, metadata: self.sent.append((idx, frames, metadata.copy())),
+            "swarm_send_extra_preview": capture,
+            "swarm_send_animated_preview": capture,
             "_swarm_preview_frame_to_image": lambda frame: frame,
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), env)
@@ -69,6 +73,7 @@ class PreviewDispatchTests(unittest.TestCase):
     def _prepare(self, job):
         self.server.last_prompt_id = job
         self.server.last_node_id = job + "-sampler"
+        self.server.client_id = job + "-client"
         self.current_context.set(types.SimpleNamespace(prompt_id=job, node_id=job + "-sampler"))
         state = self.state()
         cb = self.callback(4, object(), self.model, "one", state)
@@ -100,6 +105,18 @@ class PreviewDispatchTests(unittest.TestCase):
         QueuedThread.jobs[0]()  # Step 1 must not overwrite it.
         self.assertEqual([item[1] for item in self.sent], ["step2"])
         state["active"] = False
+
+    def test_preview_targets_originating_client_when_global_client_changes(self):
+        # A queued worker runs after Comfy's process-global client_id changes.
+        # It must never deliver A's pixels to B's websocket client.
+        state, cb = self._prepare("A")
+        cb(1, FakeLatent("A-current-pixels"), None, 4)
+        self.server.client_id = "B-client"
+        self.current_context.set(None)
+        self.assertEqual(len(QueuedThread.jobs), 1)
+        QueuedThread.jobs[0]()
+        self.assertEqual(self.targeted_clients, ["A-client"])
+        self.assertEqual(self.sent[0][2]["prompt_id"], "A")
 
     def test_cpu_preview_copy_is_not_nonblocking(self):
         module = ast.parse(SOURCE.read_text(encoding="utf-8"))
