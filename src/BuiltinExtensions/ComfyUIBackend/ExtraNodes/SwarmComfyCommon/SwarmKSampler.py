@@ -1,4 +1,4 @@
-import torch, struct, json, threading, os, time, logging
+import torch, struct, json, threading, os, time, sys
 from io import BytesIO
 from PIL import Image
 import latent_preview, comfy
@@ -222,7 +222,9 @@ def _swarm_h3_trace_emit(event, identity, payload):
     info = {"event": event, "prompt_id": identity.get("prompt_id"),
             "node_id": identity.get("node_id")}
     info.update(payload)
-    logging.info("[H3PERF] %s", json.dumps(info, sort_keys=True))
+    # Swarm's self-start monitor reads the child's STDERR directly.
+    # Do not rely on the root INFO logging level being enabled in ComfyUI.
+    print("[H3PERF] " + json.dumps(info, sort_keys=True), file=sys.stderr, flush=True)
 
 
 def swarm_send_extra_preview(id, image, preview_metadata):
