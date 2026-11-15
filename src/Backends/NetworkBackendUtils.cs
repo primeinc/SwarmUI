@@ -589,7 +589,15 @@ public static class NetworkBackendUtils
                 while ((line = fixedReader.ReadLine()) != null)
                 {
                     string lineLow = line.ToLowerFast();
-                    if (lineLow.StartsWith("traceback (") || (lineLow.Contains("error: ") && !lineLow.Contains("found comfy_kitchen backend")))
+                    // Comfy logs are normally routed as Debug. Promote only
+                    // opt-in H3 trace payloads/boot markers to Info, or a
+                    // correctly configured backend silently hides the trace.
+                    if (line.Contains("[H3TRACE-BOOT]") || line.Contains("[H3TRACE-ROUTE]") ||
+                        line.Contains("[H3PERF]") || line.Contains("[H3VAE]"))
+                    {
+                        Logs.Info($"[{nameSimple}/STDERR] {line}");
+                    }
+                    else if (lineLow.StartsWith("traceback (") || (lineLow.Contains("error: ") && !lineLow.Contains("found comfy_kitchen backend")))
                     {
                         keepShowing = true;
                         Logs.Warning($"[{nameSimple}/STDERR] {line}");
