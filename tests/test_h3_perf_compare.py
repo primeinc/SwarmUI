@@ -64,6 +64,51 @@ class H3PerfCompareTests(unittest.TestCase):
         self.assertEqual(compare_tool.select_longest_video(first)["start"]["prompt_id"], "i2v")
         self.assertEqual(compare_tool.select_longest_video(second)["start"]["prompt_id"], "main")
 
+    def test_three_sequential_executions_distinguish_124_1_and_324_frames(self):
+        def sampler(pid, node, t, seconds, refs, keyframes):
+            return {
+                "start": {
+                    "prompt_id": pid, "node_id": node,
+                    "latent_shapes": [[1, 24, t, 78, 46], [1, 32, 2, 547]],
+                    "refs": refs, "keyframes": keyframes,
+                    "steps": 4, "cfg": 1, "sampler": "euler", "scheduler": "simple",
+                },
+                "steps": [{"elapsed_s": seconds / 4}],
+                "finish": {"elapsed_s": seconds, "success": True},
+            }
+        runs = [
+            sampler("i2v124", "10", 37, 40, [{"kind": "image"}], []),
+            sampler("i2v124", "92", 97, 261, [], [{"frame": 0}]),
+            sampler("main324", "10", 97, 491, [{"kind": "image"}], []),
+            sampler("i2v1", "10", 1, 27, [{"kind": "image"}], []),
+            sampler("i2v1", "92", 97, 261, [], [{"frame": 0}]),
+        ]
+        first, second, third = compare_tool.split_sequential_prompts(runs, count=3)
+        self.assertEqual([len(first), len(second), len(third)], [2, 1, 2])
+        big1 = compare_tool.select_longest_video(first)
+        big3 = compare_tool.select_longest_video(third)
+        self.assertEqual(big1["start"]["latent_shapes"], big3["start"]["latent_shapes"])
+        self.assertEqual(compare_tool.describe(big1)["sampler_seconds"],
+                         compare_tool.describe(big3)["sampler_seconds"])
+        self.assertEqual(compare_tool.select_longest_video(second)["finish"]["elapsed_s"], 491)
+        self.assertEqual(first[0]["start"]["latent_shapes"][0][2], 37)
+        self.assertEqual(third[0]["start"]["latent_shapes"][0][2], 1)
+
+    def test_actual_h3_latent_generator_special_cases_single_frame(self):
+        import ast
+        source = (Path(__file__).resolve().parents[1] /
+                  "src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmModels.py")
+        parsed = ast.parse(source.read_text(encoding="utf-8"))
+        wanted = {"temporal_shape", "video_latent_t", "align_frame_count"}
+        functions = [node for node in parsed.body
+                     if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        self.assertEqual({node.name for node in functions}, wanted)
+        env = {"H3_FPS": 24, "H3_AUDIO_LATENT_FPS": 40}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), env)
+        self.assertEqual(env["temporal_shape"](1), (1, 1, 2))
+        self.assertEqual(env["temporal_shape"](124), (124, 37, 207))
+        self.assertEqual(env["temporal_shape"](324), (328, 97, 547))
+
     def test_empty_log_is_not_mistaken_for_fast_sampler(self):
         with self.assertRaisesRegex(ValueError, "SWARM_H3_TRACE"):
             compare_tool.select_longest_video([])
