@@ -53,16 +53,19 @@ def make_vae(model_type):
 
 class H3VaeTraceTests(unittest.TestCase):
     def setUp(self):
+        import io
+        from contextlib import redirect_stderr
         self.trace = module()
-        self.logs = []
-        original_logging = self.trace.logging
-        import types
-        self.trace.logging = types.SimpleNamespace(info=self.capture, warning=lambda *args: None)
-        self.addCleanup(setattr, self.trace, "logging", original_logging)
+        self.stderr = io.StringIO()
+        redirect = redirect_stderr(self.stderr)
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
 
-    def capture(self, format_string, payload):
-        self.assertEqual(format_string, "[H3VAE] %s")
-        self.logs.append(json.loads(payload))
+    @property
+    def logs(self):
+        return [json.loads(line.split(" ", 1)[1])
+                for line in self.stderr.getvalue().splitlines()
+                if line.startswith("[H3VAE] ")]
 
     def test_video_decode_tiled_emits_start_and_finish_without_changing_return(self):
         VAE = make_vae(MiniMaxH3VideoVAE)
