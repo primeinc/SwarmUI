@@ -2692,6 +2692,8 @@ public partial class WorkflowGenerator
                 ["width"] = width,
                 ["height"] = height,
                 ["length"] = UserInput.Get(T2IParamTypes.Text2VideoFrames, 124),
+                // The collector owns H3-specific scaling; pass the existing UI preference into it.
+                ["ref_image_size"] = UserInput.Get(T2IParamTypes.SmartImagePromptResizing, true) ? "match" : "max",
             };
             bool hasAny = false;
             // TODO: Warn or error if max inputs exceeded
