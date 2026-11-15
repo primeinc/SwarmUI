@@ -1,7 +1,7 @@
 # Diagnose MiniMax H3 performance differences
 
-This procedure distinguishes **main-model H3 Ref2VA with one prompt-attached picture**
-from **H3 FL2VA Image-to-Video follow-up**. Two videos taking less time than one
+This procedure distinguishes **main-model H3 with a prompt-attached reference picture**
+from **H3 Image-to-Video follow-up with explicit first-frame conditioning**. Two videos taking less time than one
 is a performance symptom, not proof that a particular setting is wrong.
 
 ## Known controlled comparison (reported November 15, 2026)
@@ -12,6 +12,63 @@ is a performance symptom, not proof that a particular setting is wrong.
 - Main-model video: roughly **123 seconds per visible sampler step**, one saved video
 - Output metadata only records the requested parameter; it does **not** prove
   effective sampler model, latent shape, guidance payload, or sampler count
+
+## Third controlled run: one-frame H3 base + 324-frame I2V
+
+| User observation | Main 324 frames | Two-stage, base default | Two-stage, base **1 frame** |
+| --- | ---: | ---: | ---: |
+| Four-step long sampler | 491 s | 261 s | 261 s |
+| Total Comfy prompt time | 634 s | 535.90 s | **384.81 s** |
+| Seconds per long step | ~122.9 | ~65.3 | ~65.3 |
+| Outputs reported | 1 | 2 | 2 |
+
+The initial two-stage base frame count is **not present in the supplied log excerpt**.
+SwarmUI defaults the base H3 count to 124 when unset; confirm the graph before
+treating the first column as a verified 124-frame run. Both follow-up runs requested
+324 frames, aligned to 328 by H3. Both users' requests used one prompt image,
+4 steps and CFG 1.
+
+The third run isolates two costs. Shortening the first stage reduces prompt time by
+**151.09 s**, while the visible long-video sampler stays **261 s**. Moving from the
+one-frame follow-up run to main 324-frame H3 costs **249.19 s total**, of which
+approximately **230 s** is in the long sampler (491 vs 261). Those costs are not
+explained by extra saved output files, CFG, or the number of prompt images.
+
+**A single frame is a genuine H3 special case, not five frames.** SwarmUI's
+`MiniMaxH3AlignFrames(1)` returns 1; the real
+`SwarmModels.py::temporal_shape(1)` returns (1 output frame, 1 video latent step,
+2 audio latent tokens). By contrast, 124 frames use **37** video latent steps,
+and requested 324 frames become 328 actual output frames with **97** video
+latent steps. This explains why the first-stage work is far smaller in the
+third run. The separate long sampler remains a 328-frame job.
+
+**The two long samplers are different model tasks, not the same input shape
+under different parameter labels.** The main H3 reference path builds
+`SwarmMiniMaxH3CollectReferences`, then injects `minimax_refs` into the
+conditioning. The I2V path creates a dedicated first-frame constraint using
+`SwarmMiniMaxH3AddKeyframes`. Upstream H3 packs reference pictures into
+`ref_img` attention rows and explicit first frames into `cond` rows.
+MiniMax publishes **Ref2VA** and **FL2VA** as separate task-specific checkpoints
+(official source: https://github.com/MiniMax-AI/MiniMax-H3/blob/main/README.md).
+Checkpoint identity, exact latent resolution, and attention/VRAM behavior must
+be read from the generated workflow/trace before attributing the observed
+230-second difference to a specific kernel or model weight file.
+
+**Generation-time display:** 6.41 minutes is about 384.6 seconds, matching the
+entire 384.81-second Comfy prompt execution. The separately displayed 27.33-second
+one-frame generation is part of that total, not another 27.33 seconds to add on.
+
+**Minimal workflow for a single final video from a known opening image:** Use
+a regular image model as the UI's required base model, upload the image under
+**Init Image**, set **Init Image Creativity = 0** to bypass its still-image
+sampler, and select H3 **FL2VA** in **Image-to-Video Follow-up**, with
+**Video Frames = 324**. This lets the follow-up use the uploaded image directly
+as a first-frame keyframe without first generating a video to harvest frame 0.
+`Save Image Before Video` already suppresses the initial output for this
+zero-creativity case unless intermediate images are explicitly requested.
+This is **FL2VA first-frame conditioning**; it is not identical in semantics
+to **Ref2VA image-reference conditioning**, so output fidelity should be judged
+against the user's desired opening frame.
 
 ## Capture a discriminating trace
 
