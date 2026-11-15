@@ -43,3 +43,10 @@ def register_model_folder(name):
         folder_paths.folder_names_and_paths[name] = (folder_paths.folder_names_and_paths[name][0], folder_paths.supported_pt_extensions)
 
 register_model_folder("yolov8")
+
+# Opt-in live H3 video/audio VAE timeline. Patch only ComfyUI's existing VAE
+# methods, not the generated graph or any decoder implementation.
+if os.environ.get("SWARM_H3_TRACE") == "1":
+    import comfy.sd
+    from . import SwarmVaeTrace
+    SwarmVaeTrace.install_trace(comfy.sd.VAE)
