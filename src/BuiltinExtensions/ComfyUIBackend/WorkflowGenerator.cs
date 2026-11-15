@@ -1458,21 +1458,16 @@ public partial class WorkflowGenerator
         {
             inputs["control_after_generate"] = "fixed";
         }
+        // One decision controls both graph generation and route telemetry.
+        // An H3 generation that lacks SwarmKSampler can still run through
+        // Comfy's native sampler, but the custom per-step preview trace is
+        // unavailable. Do not silently pretend otherwise.
+        bool useSwarmSampler = Features.Contains("variation_seed") && !RestrictCustomNodes;
+        bool isH3TraceRoute = IsMiniMaxH3() ||
+            (IsImageToVideo && UserInput.TryGet(T2IParamTypes.VideoModel, out T2IModel videoModel) &&
+             videoModel.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID);
         string created;
-        // The H3 sampler trace lives inside SwarmKSampler. If the graph uses
-        // native KSamplerAdvanced instead, a missing [H3PERF] is expected.
-        if (Environment.GetEnvironmentVariable("SWARM_H3_TRACE") == "1")
-        {
-            bool isH3TraceRoute = IsMiniMaxH3() ||
-                (IsImageToVideo && UserInput.TryGet(T2IParamTypes.VideoModel, out T2IModel videoModel) &&
-                 videoModel.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID);
-            if (isH3TraceRoute)
-            {
-                string samplerNodeClass = Features.Contains("variation_seed") && !RestrictCustomNodes ? "SwarmKSampler" : "KSamplerAdvanced";
-                Logs.Info($"[H3TRACE-ROUTE] stage={(IsImageToVideo ? "video-followup" : "main")} sampler={samplerNodeClass} node={firstId ?? "auto"} steps={steps} cfg={cfg} per_step_trace={(samplerNodeClass == "SwarmKSampler")}");
-            }
-        }
-        if (Features.Contains("variation_seed") && !RestrictCustomNodes)
+        if (useSwarmSampler)
         {
             inputs["var_seed"] = UserInput.Get(T2IParamTypes.VariationSeed, 0, sectionId: sectionId);
             inputs["var_seed_strength"] = UserInput.Get(T2IParamTypes.VariationSeedStrength, 0, sectionId: sectionId);
@@ -1488,6 +1483,15 @@ public partial class WorkflowGenerator
         else
         {
             created = CreateNode("KSamplerAdvanced", inputs, firstId);
+        }
+        if (!useSwarmSampler && isH3TraceRoute)
+        {
+            Logs.Warning("H3 custom per-step previews and [H3PERF] tracing are unavailable: the backend selected native KSamplerAdvanced because SwarmKSampler was not available or custom nodes were restricted.");
+        }
+        if (isH3TraceRoute && Environment.GetEnvironmentVariable("SWARM_H3_TRACE") == "1")
+        {
+            string samplerNodeClass = useSwarmSampler ? "SwarmKSampler" : "KSamplerAdvanced";
+            Logs.Info($"[H3TRACE-ROUTE] stage={(IsImageToVideo ? "video-followup" : "main")} sampler={samplerNodeClass} node={created} steps={steps} cfg={cfg} per_step_trace={useSwarmSampler}");
         }
         if (willCascadeFix)
         {
