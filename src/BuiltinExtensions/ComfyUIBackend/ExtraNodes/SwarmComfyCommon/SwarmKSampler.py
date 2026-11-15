@@ -185,11 +185,15 @@ def _swarm_h3_trace_timed_callback(callback, emit, clock=None):
 
     def traced(step, x0, x, total_steps):
         nonlocal last
-        now = clock()
+        arrived = clock()
+        result = callback(step, x0, x, total_steps)
+        departed = clock()
+        # Distinguish model/sampler time from Swarm's preview/progress callback.
         emit({"event": "step", "step": step + 1, "total_steps": total_steps,
-              "elapsed_s": round(now - last, 3)})
-        last = now
-        return callback(step, x0, x, total_steps)
+              "elapsed_s": round(arrived - last, 3),
+              "callback_s": round(departed - arrived, 3)})
+        last = departed
+        return result
 
     return traced
 
