@@ -34,6 +34,10 @@ jobs:
           run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
         - name: Reproduce and guard against cross-generation sampler preview races (NO GPU)
           run: python3 -m unittest discover -s tests -p test_swarm_sampler_preview_dispatch.py -v
+        - name: Reject stale Comfy event-4 previews at the actual websocket boundary (.NET 8, NO GPU)
+          run: |
+            python3 -m unittest discover -s tests -p test_h3_preview_delivery_contract.py -v
+            dotnet run --project tests/h3-preview-guard/H3PreviewGuardSmoke.csproj --configuration Release
         - name: Validate H3 prompt-image resize binding and collector sizing (NO GPU)
           run: python3 -m unittest discover -s tests -p test_h3_prompt_image_resize.py -v
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
