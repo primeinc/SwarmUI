@@ -38,6 +38,10 @@ jobs:
           run: |
             python3 -m unittest discover -s tests -p test_h3_preview_delivery_contract.py -v
             dotnet run --project tests/h3-preview-guard/H3PreviewGuardSmoke.csproj --configuration Release
+        - name: Verify per-prompt websocket lifecycle and unified sampler dispatch (NO GPU)
+          run: |
+            python3 -m unittest discover -s tests -p test_h3_request_websocket_lifecycle.py -v
+            python3 -m unittest discover -s tests -p test_h3_sampler_dispatch_contract.py -v
         - name: Validate H3 prompt-image resize binding and collector sizing (NO GPU)
           run: python3 -m unittest discover -s tests -p test_h3_prompt_image_resize.py -v
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
