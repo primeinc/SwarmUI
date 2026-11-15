@@ -15,6 +15,31 @@ A Modular AI Image Generation Web-User-Interface, with an emphasis on making pow
 
 ----
 
+
+## MiniMax H3: Avoid generating two videos
+
+**Making a video from a text prompt?** Select **MiniMax H3** as your main model in the **Models** tab, then:
+
+1. Leave **Image To Video** turned **off**. Do not also select H3 under **Image To Video > Video Model**.
+2. Open **Text To Video** and set **Text2Video Frames** to the length you want.
+3. Click **Generate**. You should get one video.
+
+At the usual **24 FPS**, these frame settings give approximately:
+
+| Video length | Text2Video Frames |
+| --- | ---: |
+| 5 seconds | 124 |
+| 10 seconds | 243 |
+| 15 seconds | 362 |
+
+H3 only supports certain frame counts, so the exact duration may vary slightly.
+
+**Why the warning?** If H3 is both your main model **and** the **Image To Video** model, SwarmUI currently runs H3 twice: first to make a short video (about 5 seconds with the default settings), then to make the longer video from its first frame. It may save both files and waste time generating a video you did not ask for. Turning off **Image To Video** avoids that extra pass when you want text-to-video.
+
+**Want to animate an image instead?** Select a regular *image* model as the main model, enable **Image To Video**, and choose H3 as **Video Model**. Upload your picture under **Init Image** and set **Init Image Creativity** to **0** so SwarmUI uses your picture without generating a new base image. Set the length with **Image To Video > Video Frames**. If you actually want SwarmUI to create a new image *and then* animate it, leave the image-generation stage enabled.
+
+For more video-model options, see [Video Model Support](docs/Video%20Model%20Support.md).
+
 # Status
 
 This project is in **Almost-Release** status. This means for most tasks, Swarm has excellent tooling available to you, but there are a few areas I still want to perfect. Swarm is recommended as an ideal UI for most users, beginners and pros alike.
