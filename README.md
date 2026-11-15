@@ -38,6 +38,8 @@ H3 only supports certain frame counts, so the exact duration may vary slightly.
 
 **Want to animate an image instead?** Select a regular *image* model as the main model, enable **Image To Video**, and choose H3 as **Video Model**. Upload your picture under **Init Image** and set **Init Image Creativity** to **0** so SwarmUI uses your picture without generating a new base image. Set the length with **Image To Video > Video Frames**. If you actually want SwarmUI to create a new image *and then* animate it, leave the image-generation stage enabled.
 
+**Source image vs. reference image:** For a video that starts from your photo, upload it under **Init Image**. Images attached directly to the prompt are **reference images** (internally called `Prompt Images`), not the starting frame. **Init Image Creativity = 0** only skips preliminary still-image denoising; it does not disable the video model's first-frame conditioning or change prompt-reference strength.
+
 For more video-model options, see [Video Model Support](docs/Video%20Model%20Support.md).
 
 # Status
