@@ -15,6 +15,10 @@ jobs:
         - uses: actions/setup-dotnet@v5
           with:
             dotnet-version: '8.x'
+        - name: Validate opt-in H3 sampler performance trace and A/B comparator (NO GPU)
+          run: |
+            python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py tests/h3_perf_compare.py
+            python3 -m unittest discover -s tests -p 'test_h3_*perf*.py' -v
         - run: bash ./launchtools/run_tests.sh
         # These checks are deliberately only syntax checks. They do not imply
         # that Qwen segment LoRA weights were matched or applied during inference.
