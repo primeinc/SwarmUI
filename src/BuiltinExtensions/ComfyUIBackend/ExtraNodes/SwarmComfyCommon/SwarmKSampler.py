@@ -1,4 +1,5 @@
 import torch, struct, json, threading, os, time, sys
+from contextvars import ContextVar
 from io import BytesIO
 from PIL import Image
 import latent_preview, comfy
@@ -12,25 +13,22 @@ from comfy_extras.nodes_flux import Flux2Scheduler
 from comfy_extras.nodes_ideogram4 import ideogram4_sigmas
 from comfy_extras.nodes_custom_sampler import Guider_DualModel
 
-# preview_to_image is process-global, so its activation state must also be
-# process-global. Keeping this state module-local breaks if SwarmComfyCommon is
-# loaded more than once: the first module owns the monkeypatch while a later
-# module owns the active sampler.
-if not hasattr(latent_preview, "_swarm_preview_state"):
-    latent_preview._swarm_preview_state = {"active_count": 0, "lock": threading.Lock()}
-_preview_state = latent_preview._swarm_preview_state
+# The monkeypatch is process-global but its active mode must NOT be. A
+# process-wide counter changes native Comfy previews in unrelated threads.
+# Store one ContextVar on latent_preview so reloaded copies of this module
+# still share the same mode with the original monkeypatch.
+if not hasattr(latent_preview, "_swarm_preview_context"):
+    latent_preview._swarm_preview_context = ContextVar("swarm_async_preview_active", default=False)
+_preview_context = latent_preview._swarm_preview_context
 
 def _swarm_preview_active():
-    with _preview_state["lock"]:
-        return _preview_state["active_count"] > 0
+    return _preview_context.get()
 
 def _swarm_preview_begin():
-    with _preview_state["lock"]:
-        _preview_state["active_count"] += 1
+    return _preview_context.set(True)
 
-def _swarm_preview_end():
-    with _preview_state["lock"]:
-        _preview_state["active_count"] = max(0, _preview_state["active_count"] - 1)
+def _swarm_preview_end(token):
+    _preview_context.reset(token)
 
 if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
     _original_preview_to_image = latent_preview.preview_to_image
@@ -686,7 +684,7 @@ class SwarmKSampler:
                 details.update(_swarm_h3_trace_residency(model))
                 _swarm_h3_trace_emit("start", trace_identity, details)
             preview_state = make_swarm_preview_state()
-            _swarm_preview_begin()
+            preview_token = _swarm_preview_begin()
             try:
                 callback = make_swarm_sampler_callback(steps, device, model, previews, preview_state)
                 if trace_enabled:
@@ -709,7 +707,7 @@ class SwarmKSampler:
                     _swarm_h3_trace_emit("finish", trace_identity, details)
                 with preview_state["lock"]:
                     preview_state["active"] = False
-                _swarm_preview_end()
+                _swarm_preview_end(preview_token)
         return (out, )
 
     # tiled sample version of sample function
