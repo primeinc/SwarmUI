@@ -161,7 +161,7 @@ A launcher echo and a child-CMD smoke test are **not** proof that the
 ComfyUI worker loaded the tracing code. This fork emits a startup handshake
 from both sides of the real process boundary. After updating `dev`,
 **fully restart SwarmUI and its managed ComfyUI backend**, then inspect the
-SwarmUI console (Debug logging enabled) for:
+SwarmUI console for (trace records are forwarded at **Info**):
 
 ```text
 [H3TRACE-BOOT] host=SwarmUI backend=ComfyUI-0 traceEnabled=True childEnv=1
@@ -200,7 +200,14 @@ Interpret missing stages *in order*:
 7. **Sampler/VAE events missing despite activated routes:** inspect
    plugin import warnings and actual ComfyUI process stderr. Both trace
    event emitters now write directly to stderr with `flush=True`,
-   avoiding Python INFO log-level filtering.
+   avoiding Python INFO log-level filtering. SwarmUI's
+   `NetworkBackendUtils.ReportLogsFromProcess` now promotes only H3 diagnostic
+   markers from the usual Debug subprocess severity to Info.
+
+**H3 Performance Studio Quick Scan** also reports the observable host,
+plugin, sampler and VAE checkpoints, and identifies the earliest missing
+one. Old logs that omit application startup are labeled inconclusive rather
+than proving the environment variable was absent.
 
 **Proof scope:** CPU-only CI verifies startup source gates, JSON formatting,
 and stderr emission; it cannot prove the live GPU worker, external
