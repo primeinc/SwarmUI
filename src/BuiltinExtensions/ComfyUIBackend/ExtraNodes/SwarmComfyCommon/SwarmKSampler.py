@@ -662,8 +662,12 @@ class SwarmKSampler:
         out = latent_image.copy()
         if steps > 0:
             # Diagnostics are opt-in. Inference and GPU synchronization stay unchanged.
-            trace_enabled = os.environ.get("SWARM_H3_TRACE") == "1" and "MiniMaxH3" in type(model.model).__name__
-            trace_identity = get_preview_metadata() if trace_enabled else None
+            trace_requested = os.environ.get("SWARM_H3_TRACE") == "1"
+            trace_model_class = type(model.model).__name__
+            trace_enabled = trace_requested and "MiniMaxH3" in trace_model_class
+            trace_identity = get_preview_metadata() if trace_requested else None
+            if trace_requested:
+                print(f"[H3TRACE-ROUTE] source=SwarmKSampler model={trace_model_class} active={trace_enabled} prompt_id={trace_identity.get('prompt_id')} node_id={trace_identity.get('node_id')}", file=sys.stderr, flush=True)
             trace_started = time.perf_counter() if trace_enabled else None
             trace_success = False
             if trace_enabled:
