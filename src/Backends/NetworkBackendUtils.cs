@@ -370,6 +370,14 @@ public static class NetworkBackendUtils
                 WorkingDirectory = dir
             };
             PythonLaunchHelper.CleanEnvironmentOfPythonMess(start, $"({nameSimple} launch) ");
+            if (nameSimple.StartsWith("ComfyUI-", StringComparison.OrdinalIgnoreCase))
+            {
+                // The old CMD smoke test never checked the actual backend launch.
+                // Explicitly forward the trace opt-in and report both outcomes.
+                bool traceEnabled = Environment.GetEnvironmentVariable("SWARM_H3_TRACE") == "1";
+                start.Environment["SWARM_H3_TRACE"] = traceEnabled ? "1" : "0";
+                Logs.Info($"[H3TRACE-BOOT] host=SwarmUI backend={nameSimple} traceEnabled={traceEnabled} childEnv={start.Environment["SWARM_H3_TRACE"]}. Check for a second [H3TRACE-BOOT] from the ComfyUI custom node package.");
+            }
             start.Environment["CUDA_VISIBLE_DEVICES"] = $"{gpuId}";
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
