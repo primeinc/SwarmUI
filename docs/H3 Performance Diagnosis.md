@@ -155,6 +155,43 @@ The comparison selects the **largest video latent** in the two-video run so
 its short first video cannot accidentally be compared against the final
 13.5-second main-model video.
 
+## VAE decoder progress and timing
+
+**H3 VAE decoding no longer has to disappear into a silent interval.**
+With `SWARM_H3_TRACE=1` on ComfyUI **before backend startup**, the
+`SwarmComfyCommon` plugin wraps the native ComfyUI
+`comfy.sd.VAE.decode` and `decode_tiled` methods **only for H3 VAEs**.
+It logs single-line `[H3VAE]` INFO events on ComfyUI's existing STDERR log:
+
+- `event=start`: prompt/node IDs, video/audio/image VAE model, method,
+  input latent shape and requested tiling options
+- `event=working`: elapsed seconds every 15 seconds while VAE decoding
+  is still in progress; a heartbeat, **not tile-by-tile percent complete**
+- `event=finish`: elapsed seconds, status, output shape and exception type
+  if the original decoder fails; exceptions are re-raised unchanged
+
+The wrapper preserves the existing VAE decode code path and changes no
+sampling, VAE precision, tile sizes, or model checkpoints. Normal SwarmUI
+launches with the variable unset are unaffected. Video encoding/muxing and
+SwarmUI output-file persistence **are not included in the VAE duration**,
+so the remaining gap between `[H3VAE] finish` and `Prompt executed in`
+must not automatically be classified as VAE time.
+
+`H3_Log_Analyzer.bat` **Quick Scan** presents video and audio decoder
+durations separately, while comparison views show matching per-prompt
+VAE totals. **Export H3 Trace** includes both `[H3PERF]` and
+`[H3VAE]` entries in JSONL without logging image/audio values.
+
+Upstream provenance: `Comfy-Org/ComfyUI` commit
+`c844cb672186f187bf9455e2808821417a10d296`,
+`comfy/sd.py::VAE.decode` (around line 1362) and
+`::VAE.decode_tiled` (around line 1483);
+`nodes.py::VAEDecodeTiled.decode` (around line 362);
+`comfy_extras/nodes_audio.py::VAEDecodeAudio.execute` (around line 132).
+Implementation:
+`src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmVaeTrace.py`,
+registered by the package `__init__.py`.
+
 ## What the trace proves
 
 Each `[H3PERF]` JSON line is tied to the ComfyUI `prompt_id` and `node_id`.
