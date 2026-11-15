@@ -47,19 +47,25 @@ There's a full step by step guide for video model usage here: <https://github.co
 
 ### Text-To-Video Models
 
-- Select the video model in the usual `Models` sub-tab, and configure parameters as usual, and hit Generate.
-- The `Text To Video` parameter group will be available to configure video-specific parameters.
+To make a video **from a text prompt alone**, select the video model in the `Models` sub-tab. Set the duration in `Text To Video > Text2Video Frames`, then generate. Leave the separate `Image To Video` group **off** unless you specifically want a second video-generation stage. Selecting H3 as both the main model and the `Image To Video > Video Model` currently runs it twice and may produce two video files.
 
 ### Image-To-Video Models
 
-- Select a normal model as the base in the `Models` sub-tab, not your video model. Eg SDXL or Flux.
-- Select the video model under the `Image To Video` parameter group.
-- Generate as normal - the image model will generate an image, then the video model will turn it into a video.
-- If you want a raw/external image as your input:
-    - Use the `Init Image` parameter group, upload your image there
-    - Set `Init Image Creativity` to 0
-    - The image model will be skipped entirely
-    - You can use the `Res` button next to your image to copy the resolution in (otherwise your image may be stretched or squished)
+To **animate a specific existing image**, use the following controls. They are not interchangeable:
+
+- **`Init Image` (source image / starting frame):** Upload the picture in the `Init Image` parameter group. This is the image the video stage will animate.
+- **`Init Image Creativity` (preliminary image-to-image *denoising strength*):** Set this to **`0`** to keep the uploaded source image unchanged and skip the preliminary *still-image generation* pass. It does **not** set video image-conditioning strength to zero, and it does **not** disable the video model's use of the starting frame.
+- **Images attached to the prompt box (`Prompt Images`, or *reference images*):** These supply visual references for supported models, such as `<Picture 1>` with MiniMax H3 Ref2AV. They are **not** the same as the `Init Image` starting frame. Attaching a picture to the prompt does not substitute for uploading it under `Init Image` when you want that exact picture animated.
+
+For an existing photo:
+
+1. Select a regular **image model** (such as SDXL or Flux) in `Models`. The current interface still requires a main model even when its image-generation pass will be skipped.
+2. Enable `Init Image`, upload the photo **there**, and set **`Init Image Creativity = 0`**.
+3. Enable `Image To Video` and choose your **video model** under `Video Model` (for example, H3 FL2VA).
+4. Set the length under **`Image To Video > Video Frames`**. Use the `Res` button next to the source image if you want to match its resolution; otherwise, the image may be stretched to fit.
+5. Generate. SwarmUI uses the uploaded still as the source frame for the video stage, without first generating a replacement still.
+
+If you **want SwarmUI to create the starting image** from a text prompt, leave `Init Image` off, choose an image model as the main model, and select a video model under `Image To Video`. In that case, the image-then-video two-stage pipeline is intentional.
 
 # Video Models
 
@@ -565,11 +571,15 @@ https://github.com/user-attachments/assets/f20a2d4c-a667-47e1-9da8-82b3e1d55792
 
 ### MiniMax H3 Image To Video
 
-The "FL2VA" model is used for basic image-to-video. Works like any other image2video model (see [Beginner's Guide - Generate Videos With SwarmUI](<https://github.com/mcmonkeyprojects/SwarmUI/discussions/716>)) and supports the "Video End Image" input as well. Remember that the model wants to add audio, so prompt accordingly.
+The "FL2VA" model is used for first-frame-conditioned image-to-video and supports an optional `Video End Image` as the last frame (see [the Image-To-Video instructions above](#image-to-video-models)). Remember that H3 also generates audio, so describe the desired sound in the prompt.
+
+To animate an uploaded photo, put it under **`Init Image`**, not in the prompt's reference-image attachments. Set **`Init Image Creativity = 0`** to skip the preliminary still-image sampler. This does **not** remove FL2VA's first-frame conditioning: the photo is still the video source.
+
+For text-only H3 generation, instead select H3 as the main model, control the duration with **`Text To Video > Text2Video Frames`**, and leave **`Image To Video`** off. Choosing H3 in both places currently creates an unnecessary second video-generation stage.
 
 ### MiniMax H3 Reference Model Usage
 
-When using the reference model, you can attach images freely (up to a max of 10) to the prompt box. In the prompt you can type something like `The person in <Picture 1>` to reference your first picture (and naturally, `<Picture 2>` for the next, etc.).
+When using the Ref2AV reference model, you can attach images freely (up to a max of 10) to the **prompt box**. These are **reference images / prompt attachments**, not an `Init Image` starting frame. In the prompt, you can write something like `The person in <Picture 1>` to refer to the first attached picture (or `<Picture 2>` for the next). **`Init Image Creativity` does not control the strength of these references.**
 
 You can also attach audio files freely (up to a max of 3). In the prompt you can type something like `She has the voice from <Audio 1>` to reference the audio.
 
