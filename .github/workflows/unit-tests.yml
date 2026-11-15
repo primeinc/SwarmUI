@@ -17,8 +17,10 @@ jobs:
             dotnet-version: '8.x'
         - name: Validate opt-in H3 sampler performance trace and A/B comparator (NO GPU)
           run: |
-            python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py tests/h3_perf_compare.py
+            python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmVaeTrace.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/__init__.py tests/h3_perf_compare.py tests/h3_log_console.py
             python3 -m unittest discover -s tests -p 'test_h3_*perf*.py' -v
+        - name: Verify H3 video/audio VAE timeline and failure/heartbeat behavior (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_vae_trace.py -v
         - name: Validate log analysis menu reports, legacy fallback and negative cases (NO GPU)
           run: python3 -m unittest discover -s tests -p test_h3_log_console.py -v
         - run: bash ./launchtools/run_tests.sh
