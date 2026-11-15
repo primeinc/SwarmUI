@@ -19,6 +19,8 @@ jobs:
           run: |
             python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py tests/h3_perf_compare.py
             python3 -m unittest discover -s tests -p 'test_h3_*perf*.py' -v
+        - name: Validate log analysis menu reports, legacy fallback and negative cases (NO GPU)
+          run: python3 -m unittest discover -s tests -p test_h3_log_console.py -v
         - run: bash ./launchtools/run_tests.sh
         # These checks are deliberately only syntax checks. They do not imply
         # that Qwen segment LoRA weights were matched or applied during inference.
@@ -57,9 +59,29 @@ jobs:
         runs-on: windows-latest
         steps:
         - uses: actions/checkout@v6
+        - uses: actions/setup-python@v6
+          with:
+            python-version: '3.12'
         - name: Verify H3 diagnostics inherited by child CMD without launching SwarmUI
           shell: cmd
           run: |
             call Windows_Update_SwarmUI_primeinc_test.bat --verify-h3-trace > h3-trace-smoke.txt
             if errorlevel 1 exit /b 1
             findstr /X /C:"H3_TRACE_CHILD_INHERITANCE_OK" h3-trace-smoke.txt
+        - name: Verify interactive H3 log-analysis menu and Python report dispatch
+          shell: cmd
+          run: |
+            call H3_Log_Analyzer.bat --self-test > h3-menu-smoke.txt 2>&1
+            if errorlevel 1 (
+              type h3-menu-smoke.txt
+              exit /b 1
+            )
+            findstr /X /C:"H3_LOG_MENU_SELFTEST_OK" h3-menu-smoke.txt
+            if errorlevel 1 exit /b 1
+            echo 9> h3-menu-choice.txt
+            call H3_Log_Analyzer.bat < h3-menu-choice.txt > h3-menu-render.txt 2>&1
+            if errorlevel 1 (
+              type h3-menu-render.txt
+              exit /b 1
+            )
+            findstr /C:"S W A R M  /  H 3   P E R F   S T U D I O" h3-menu-render.txt
