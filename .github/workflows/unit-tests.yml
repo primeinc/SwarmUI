@@ -52,3 +52,14 @@ jobs:
           env:
             PYTHONPATH: src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch
           run: python3 -m unittest discover -s src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/tests -p 'test_*.py' -v
+
+    h3-windows-launcher-smoke:
+        runs-on: windows-latest
+        steps:
+        - uses: actions/checkout@v6
+        - name: Verify H3 diagnostics inherited by child CMD without launching SwarmUI
+          shell: cmd
+          run: |
+            call Windows_Update_SwarmUI_primeinc_test.bat --verify-h3-trace > h3-trace-smoke.txt
+            if errorlevel 1 exit /b 1
+            findstr /X /C:"H3_TRACE_CHILD_INHERITANCE_OK" h3-trace-smoke.txt
