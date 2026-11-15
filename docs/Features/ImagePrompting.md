@@ -47,3 +47,5 @@
 ## Video/Audio Prompting
 
 Some video models, such as MiniMax H3, support adding video or audio to the prompt as well.
+
+**MiniMax H3 video reference images:** The **Smart Image Prompt Resizing** control applies to pictures attached directly to the prompt. With it **on** (recommended), H3 scales oversized references down to approximately the main video's pixel area while preserving aspect ratio. With it **off**, H3 retains more source detail, up to its 2048-pixel short-edge reference limit, which can substantially increase VRAM use and generation time. Small inputs may be rounded to H3's 32-pixel size increments. This setting does not resize **Init Image**, end-frame inputs, or reference videos; those paths have separate requirements. Other models and adapters may have their own resizing rules.
