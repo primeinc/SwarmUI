@@ -155,6 +155,65 @@ The comparison selects the **largest video latent** in the two-video run so
 its short first video cannot accidentally be compared against the final
 13.5-second main-model video.
 
+## November 15 refactor: remove shared request state
+
+The original fixes patched individual callbacks but left three shared-state
+defects in the request and preview execution paths:
+
+1. **Cross-request WebSocket pooling**: `ComfyUIAPIAbstractBackend`
+   recycled the same socket/client ID for another request. It now creates
+   one `ws?clientId=<unique-guid>` connection per `AwaitJobLive`
+   invocation, registers the active socket for shutdown, and disposes it
+   on both successful completion and startup failure. The old
+   `ReusableSockets` pool and stale reuse/expiry logic are removed.
+2. **Process-global preview conversion mode**:
+   `SwarmKSampler` previously changed ComfyUI's process-global
+   `latent_preview.preview_to_image` behavior whenever **any**
+   Swarm sampler was active. A `ContextVar` now confines asynchronous
+   uint8 conversion to the executing sampler's context, with token-based
+   restoration. Nested samplers and unrelated threads cannot toggle
+   one another's preview conversion behavior.
+3. **Process-global prompt identity fallback**:
+   `get_preview_metadata()` used ComfyUI's last-known prompt/node IDs
+   when its execution context was absent. Missing identity now disables
+   that custom preview rather than sending pixels labeled with another
+   prompt's ID. The background worker continues using a snapshot of
+   its originating client ID.
+4. **Duplicate sampler routing predicates**:
+   `WorkflowGenerator.CreateKSampler` separately predicted which
+   sampler it would use for tracing. It now evaluates
+   `useSwarmSampler` once, constructs the selected node, and logs
+   that **actual node ID and class**. Native `KSamplerAdvanced`
+   fallback remains available when custom nodes are missing or
+   explicitly restricted, but logs a warning that H3's custom
+   per-step preview and trace are unavailable.
+
+**Upstream evidence examined for these refactors:**
+
+- `Comfy-Org/ComfyUI@c844cb672186f187bf9455e2808821417a10d296`
+  `server.py::websocket_handler` (lines 337–393): connections are
+  registered under a caller-provided `clientId` and dropped at close
+- Same revision, `server.py::send_bytes` (lines 1482–1490):
+  an explicit `sid` targets only that WebSocket; `sid=None`
+  broadcasts to all
+- Same revision, `execution.py::PromptExecutor.execute_async`
+  (lines 738–750): ComfyUI sets the active server client from
+  the submitted job's `extra_data["client_id"]`
+- Same revision, `comfy_execution/utils.py::ExecutionContext`
+  (lines 4–19): the active `prompt_id` and `node_id` are
+  stored in a `ContextVar`
+- Same revision, `latent_preview.py::preview_to_image`
+  (lines 17–28): ComfyUI invokes the process-global function that
+  Swarm's preview monkeypatch intercepts
+
+**Verification scope:** regression tests enforce per-job socket
+ownership, the actual shared route predicate, per-context conversion
+(including cross-thread and nested negative controls), and rejection
+of unowned preview metadata. The `.github/workflows/unit-tests.yml`
+gate includes them. This does not establish success on the user's
+running GPU, nor does it prove a native sampler supports Swarm-specific
+preview behavior when the custom node is absent.
+
 ## Preventing stale step-2 previews from previous jobs
 
 **The preview boundary fix** is independent of the sampler's GPU preview
