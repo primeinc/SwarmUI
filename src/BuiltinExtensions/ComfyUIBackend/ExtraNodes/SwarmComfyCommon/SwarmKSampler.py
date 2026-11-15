@@ -134,7 +134,8 @@ def get_preview_metadata():
 def make_swarm_preview_state():
     # Capture Comfy's prompt/node context on the sampling thread. A background
     # preview sender has no executing ContextVar and must not use last_prompt_id.
-    return {"lock": threading.Lock(), "active": True, "last_step_sent": -1, "metadata": get_preview_metadata()}
+    return {"lock": threading.Lock(), "active": True, "last_step_sent": -1,
+            "metadata": get_preview_metadata(), "client_id": PromptServer.instance.client_id}
 
 
 def _swarm_h3_trace_shapes(tensor):
@@ -227,7 +228,7 @@ def _swarm_h3_trace_emit(event, identity, payload):
     print("[H3PERF] " + json.dumps(info, sort_keys=True), file=sys.stderr, flush=True)
 
 
-def swarm_send_extra_preview(id, image, preview_metadata):
+def swarm_send_extra_preview(id, image, preview_metadata, *, client_id=None):
     server = PromptServer.instance
     metadata = preview_metadata.copy()
     metadata["mime_type"] = "image/jpeg"
@@ -240,10 +241,10 @@ def swarm_send_extra_preview(id, image, preview_metadata):
     combined_data.extend(struct.pack(">I", len(metadata_json)))
     combined_data.extend(metadata_json)
     combined_data.extend(image_bytes)
-    server.send_sync(9999123, combined_data, sid=server.client_id)
+    server.send_sync(9999123, combined_data, sid=server.client_id if client_id is None else client_id)
 
 
-def swarm_send_animated_preview(id, images, preview_metadata):
+def swarm_send_animated_preview(id, images, preview_metadata, *, client_id=None):
     server = PromptServer.instance
     bytesIO = BytesIO()
     images[0].save(bytesIO, save_all=True, duration=int(1000.0/6), append_images=images[1 : len(images)], lossless=False, quality=60, method=0, format='WEBP')
@@ -257,7 +258,7 @@ def swarm_send_animated_preview(id, images, preview_metadata):
     combined_data.extend(struct.pack(">I", len(metadata_json)))
     combined_data.extend(metadata_json)
     combined_data.extend(image_bytes)
-    server.send_sync(9999123, combined_data, sid=server.client_id)
+    server.send_sync(9999123, combined_data, sid=server.client_id if client_id is None else client_id)
 
 
 def calculate_sigmas_scheduler(model, scheduler_name, steps, sigma_min, sigma_max, rho):
@@ -323,10 +324,12 @@ def make_swarm_sampler_callback(steps, device, model, previews, preview_state):
                     if not preview_state["active"] or step < preview_state["last_step_sent"]:
                         return
                     if animated:
-                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames], preview_state["metadata"])
+                        swarm_send_animated_preview(0, [_swarm_preview_frame_to_image(frame) for frame in frames], preview_state["metadata"],
+                                                    client_id=preview_state["client_id"])
                     else:
                         for id, frame in frames:
-                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame), preview_state["metadata"])
+                            swarm_send_extra_preview(id, _swarm_preview_frame_to_image(frame), preview_state["metadata"],
+                                                     client_id=preview_state["client_id"])
                     preview_state["last_step_sent"] = step
             threading.Thread(target=send_preview, daemon=True).start()
     return callback
