@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare opt-in [H3PERF] sampler traces from two SwarmUI/ComfyUI runs.
+"""Compare opt-in [H3PERF] sampler traces from two or three SwarmUI/ComfyUI runs.
 
 Only tagged JSON records are read. Image data, prompts, and untagged logs are
 neither needed nor echoed. Selects the largest H3 video latent in each log,
@@ -45,17 +45,17 @@ def select_longest_video(runs):
     return max(runs, key=lambda run: (latent_video_volume(run), len(run["steps"])))
 
 
-def split_sequential_prompts(runs):
-    """Two controlled generations in one warm ComfyUI process, in requested order."""
+def split_sequential_prompts(runs, count=2):
+    """Controlled generations in one warm ComfyUI process, in requested order."""
     groups = []
     for run in runs:
         pid = run["start"].get("prompt_id")
         if not groups or groups[-1][0] != pid:
             groups.append((pid, []))
         groups[-1][1].append(run)
-    if len(groups) != 2:
-        raise ValueError("Expected exactly two distinct sequential H3 prompts in one log; found %d" % len(groups))
-    return groups[0][1], groups[1][1]
+    if len(groups) != count:
+        raise ValueError("Expected exactly %d distinct sequential H3 prompts in one log; found %d" % (count, len(groups)))
+    return tuple(group[1] for group in groups)
 
 
 def describe(run):
@@ -92,17 +92,43 @@ def compare(first, second):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare real H3 sampler inputs and timings from two runs.")
+    parser = argparse.ArgumentParser(description="Compare real H3 sampler inputs and timings from two or three runs.")
     parser.add_argument("image_to_video_log", help="Log from two-output follow-up run")
-    parser.add_argument("main_video_log", nargs="?", help="Optional separate log from main-model run. Omit it if both runs are in one log, I2V first.")
+    parser.add_argument("main_video_log", nargs="?", help="Optional separate log from main-model run; omit for a shared log.")
+    parser.add_argument("--one-frame-followup-log", help="Optional third log where main H3 has 1 frame and I2V has 324 frames.")
+    parser.add_argument("--three-in-one-log", action="store_true",
+                        help="One log has three sequential requests: 124-frame I2V, 324-frame main, then 1-frame I2V.")
     args = parser.parse_args()
+    if args.three_in_one_log and (args.main_video_log or args.one_frame_followup_log):
+        parser.error("--three-in-one-log expects a single log path.")
     first_runs = parse_trace(args.image_to_video_log)
-    if args.main_video_log:
+    third_runs = None
+    if args.three_in_one_log:
+        first_runs, second_runs, third_runs = split_sequential_prompts(first_runs, count=3)
+    elif args.main_video_log:
         second_runs = parse_trace(args.main_video_log)
     else:
         first_runs, second_runs = split_sequential_prompts(first_runs)
-    report = compare(select_longest_video(first_runs), select_longest_video(second_runs))
+    if args.one_frame_followup_log:
+        third_runs = parse_trace(args.one_frame_followup_log)
+    first = select_longest_video(first_runs)
+    second = select_longest_video(second_runs)
+    report = compare(first, second)
     report["sampler_counts"] = {"image_to_video": len(first_runs), "main_video": len(second_runs)}
+    if third_runs is not None:
+        third = select_longest_video(third_runs)
+        report["one_frame_followup"] = describe(third)
+        report["sampler_counts"]["one_frame_followup"] = len(third_runs)
+        a, b = report["image_to_video"], report["one_frame_followup"]
+        keys = ("latent_shapes", "ref_blocks", "keyframes", "cfg", "sampler", "scheduler",
+                "previews", "disable_cfg1_optimization")
+        report["long_i2v_sampler_differences"] = {
+            key: {"124_frame_first_stage": a[key], "1_frame_first_stage": b[key]}
+            for key in keys if a[key] != b[key]
+        }
+        if a["sampler_seconds"] is not None and b["sampler_seconds"] is not None:
+            report["long_i2v_sampler_delta_seconds"] = round(
+                a["sampler_seconds"] - b["sampler_seconds"], 2)
     print(json.dumps(report, indent=2, sort_keys=True))
 
 
