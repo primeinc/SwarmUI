@@ -1459,6 +1459,19 @@ public partial class WorkflowGenerator
             inputs["control_after_generate"] = "fixed";
         }
         string created;
+        // The H3 sampler trace lives inside SwarmKSampler. If the graph uses
+        // native KSamplerAdvanced instead, a missing [H3PERF] is expected.
+        if (Environment.GetEnvironmentVariable("SWARM_H3_TRACE") == "1")
+        {
+            bool isH3TraceRoute = IsMiniMaxH3() ||
+                (IsImageToVideo && UserInput.TryGet(T2IParamTypes.VideoModel, out T2IModel videoModel) &&
+                 videoModel.ModelClass?.CompatClass?.ID == T2IModelClassSorter.CompatMiniMaxH3.ID);
+            if (isH3TraceRoute)
+            {
+                string samplerNodeClass = Features.Contains("variation_seed") && !RestrictCustomNodes ? "SwarmKSampler" : "KSamplerAdvanced";
+                Logs.Info($"[H3TRACE-ROUTE] stage={(IsImageToVideo ? "video-followup" : "main")} sampler={samplerNodeClass} node={firstId ?? "auto"} steps={steps} cfg={cfg} per_step_trace={(samplerNodeClass == "SwarmKSampler")}");
+            }
+        }
         if (Features.Contains("variation_seed") && !RestrictCustomNodes)
         {
             inputs["var_seed"] = UserInput.Get(T2IParamTypes.VariationSeed, 0, sectionId: sectionId);
