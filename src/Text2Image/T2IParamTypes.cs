@@ -1104,7 +1104,13 @@ public class T2IParamTypes
                         for (int i = 0; i < vals.Length; i++)
                         {
                             string search = vals[i];
-                            vals[i] = GetBestInList(search, possible);
+                            // LoRA selection must preserve exact Linux path
+                            // case, just like prompt-tag selection. The
+                            // general fuzzy matcher case-folds filenames and
+                            // can otherwise select a different installed LoRA.
+                            vals[i] = type.Subtype == "LoRA"
+                                ? T2IPromptHandling.MatchPromptLoraName(search, possible)
+                                : GetBestInList(search, possible);
                             if (vals[i] is null)
                             {
                                 vals[i] = GetBestModelInList(CleanModelName(search), possible);

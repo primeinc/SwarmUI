@@ -6,6 +6,7 @@ live ComfyUI loading, real GPU inference, or semantic subject replacement.
 from pathlib import Path
 import hashlib
 import json
+import re
 import unittest
 
 
@@ -103,19 +104,98 @@ class NativeQwenBundleTest(unittest.TestCase):
             nodes["TextEncodeQwenImage21"]["id"]
         )
 
-    def test_generation_uses_the_original_adapters_end_to_end(self):
+    def test_crop_and_stitch_native_required_inputs_are_supplied(self):
+        upstream = (CROP_PLUGIN / "inpaint_cropandstitch.py").read_text()
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        crop_schema = upstream[upstream.index("class InpaintCropImproved:"):
+                               upstream.index("class InpaintStitchImproved:")]
+        required = crop_schema.split('"required": {', 1)[1].split('"optional": {', 1)[0]
+        required_names = re.findall(r'^\s+"([a-z_]+)": \(', required, re.MULTILINE)
+        self.assertGreater(len(required_names), 20)
+        crop_inputs = steps.split('JObject cropInputs = new()', 1)[1].split('};', 1)[0]
+        for field in required_names:
+            self.assertIn('["' + field + '"] = ', crop_inputs, field)
+        # Stitch's two mandatory inputs must reach the native class unchanged.
+        self.assertIn('["stitcher"] = cropStitcher', steps)
+        self.assertIn('["inpainted_image"] = stitchInput', steps)
+
+    def test_detector_guard_preserves_authored_threshold_and_caps_broad_support(self):
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        masks = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmMasks.py").read_text()
+        self.assertIn('["minimum_confidence"] = 0.0', steps)
+        self.assertIn('["maximum_coverage"] = part.Strength < 0 ? 1.0 : 0.99', steps,
+                      "Negative-strength inverse edit has deliberate near-full-frame coverage")
+        self.assertIn('"maximum_coverage": ("FLOAT", {"default": 0.99', masks)
+        self.assertIn('string detectorGuard = g.CreateNode("SwarmRequireNonEmptyMask"', steps,
+                      "Inverse tag must validate the non-inverted detector support before InvertMask")
+        self.assertIn('string originalBinary = g.CreateNode("ThresholdMask"', steps,
+                      "Qwen inverse edits need a binary original before taking the complement")
+        self.assertIn('["mask"] = NodePath(detectorGuard, 0)', steps)
+        self.assertIn('invertInput = originalBinary', steps)
+        self.assertIn('["mask"] = NodePath(invertInput, 0)', steps)
+        self.assertIn('["maximum_coverage"] = 1.0', steps,
+                      "Inverted target can intentionally cover the whole canvas")
+        self.assertIn('string solidSubjectMask = g.CreateNode("ThresholdMask"', steps)
+        self.assertIn('["mask"] = NodePath(requiredMask, 0)', steps)
+        self.assertIn('["value"] = 0.0', steps)
+        self.assertIn('cropInputs["mask"] = NodePath(solidSubjectMask, 0)', steps)
+        # A second 0.5 detector threshold silently discards author-selected
+        # pixels; whole-frame edit prevention belongs in coverage validation.
+        self.assertNotIn('["minimum_confidence"] = cropInputs["mask_hipass_filter"]', steps)
+        self.assertIn('coverage = kept.float().mean(dim=(-2, -1))', masks)
+
+    def test_masked_sampler_required_native_inputs_are_supplied(self):
+        steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
+        nodes = (LANPAINT_PLUGIN / "src/LanPaint/nodes.py").read_text()
+        required = ("LanPaint_NumSteps", "LanPaint_PromptMode",
+                    "LanPaint_Info", "Inpainting_mode")
+        # These are declared under the upstream REQUIRED schema, not inferred
+        # from Python sample() default values.
+        sample_required = nodes[nodes.index("class LanPaint_KSampler():"):
+                                nodes.index("class LanPaint_KSamplerAdvanced:")]
+        for field in required:
+            self.assertIn('"' + field + '": (', sample_required)
+            self.assertIn('samplerInputs["' + field + '"] = ', steps)
+
+    def test_generated_segment_uses_swarm_tag_engine_and_native_edit_adapters(self):
+        """Source-contract check only; image semantics require runtime acceptance.
+
+        Keep this tied to the production C# generator, not the unrelated
+        unmodified upstream TextEncodeQwenImage21 example above.
+        """
         helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
         steps = (BACKEND / "WorkflowGeneratorSteps.cs").read_text()
         init = (BACKEND / "ExtraNodes/SwarmComfyCommon/__init__.py").read_text()
-        self.assertIn('CreateNode("TextEncodeQwenImage21"', helper)
-        self.assertIn('CreateNode("LanPaint_KSampler"', steps)
-        self.assertIn('CreateNode("LanPaint_ImageEncode"', helper)
-        self.assertIn('CreateNode("LanPaint_ImageDecode"', steps)
-        self.assertIn('CreateNode("InpaintCropImproved"', steps)
-        self.assertIn('CreateNode("InpaintStitchImproved"', steps)
-        self.assertIn('["stitcher"] = cropStitcher', steps)
-        self.assertIn('["inpainted_image"] = stitchInput', steps)
-        self.assertIn('["images.image_1"] = croppedImage', helper)
+        segment_body = helper.split("CreateQwen21SegmentConditioning(", 1)[1]
+
+        # Swarm's REAL prompt engine owns scheduled tags, token weights, and
+        # dynamic LoRA hooks. The old native node flattened/discarded those.
+        for expression in (
+            'CreateNode("SwarmTextEncodeAdvanced"',
+            '["lora_hooks"] = dynamicHooks',
+            '["prompt"] = text ?? ""',
+            '["images"] = textImages',
+            'CreateNode("GetImageSize"',
+            'CreateNode("ReferenceLatent"',
+            'CreateNode("VAEEncode"',
+            'CreateNode("LatentMultiply"',
+            'CreateNode("LanPaint_ImageEncode"',
+        ):
+            self.assertIn(expression, segment_body, expression)
+        self.assertNotIn('CreateNode("TextEncodeQwenImage21"', segment_body)
+        self.assertNotIn('FlattenQwen21SegmentPrompt(', segment_body,
+                         "Do not strip Swarm tags before the native Swarm parser")
+
+        # Native inference, crop, masks, and compositing are still required.
+        for expression in (
+            'CreateNode("LanPaint_KSampler"',
+            'CreateNode("LanPaint_ImageDecode"',
+            'CreateNode("InpaintCropImproved"',
+            'CreateNode("InpaintStitchImproved"',
+            '["stitcher"] = cropStitcher',
+            '["inpainted_image"] = stitchInput',
+        ):
+            self.assertIn(expression, steps, expression)
         for obsolete in (
             "SwarmQwenImage21SegmentEncode",
             "SwarmQwen21SegmentDiagnostics",
@@ -124,6 +204,28 @@ class NativeQwenBundleTest(unittest.TestCase):
             self.assertNotIn('CreateNode("' + obsolete + '"', helper + steps)
             self.assertNotIn(obsolete, init)
         self.assertFalse((BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmQwen.py").exists())
+
+
+    def test_qwen_independent_references_do_not_use_resizing_image_batch(self):
+        """Multi-image Qwen conditioning preserves independent input geometry."""
+        helper = (BACKEND / "WorkflowGeneratorQwenSegment.cs").read_text()
+        encoder = (BACKEND / "ExtraNodes/SwarmComfyCommon/SwarmText.py").read_text()
+        segment_body = helper.split("CreateQwen21SegmentConditioning(", 1)[1]
+        self.assertIn("referenceImages.Count == 1", segment_body)
+        self.assertIn('GetNativeQwen21PromptReference(i)', segment_body)
+        # Verify the new native helper still loads the requested user source
+        # through the production PromptImages lookup, not generated base output.
+        source_helper = helper.split('public JArray GetNativeQwen21PromptReference(int index)', 1)[1]
+        source_helper = source_helper.split('public (JArray Positive,', 1)[0]
+        self.assertIn('GetPromptImage(false, false, index)', source_helper)
+        self.assertIn('textInputs[$"image_{i + 1}"] = referenceImages[i]', segment_body)
+        self.assertNotIn('CreateNode("ImageBatch"', segment_body)
+        self.assertIn('for i in range(1, 17)', encoder)
+        self.assertIn('image_slots.get(f"image_{i}")', encoder)
+        self.assertIn('images.append(image)', encoder)
+        self.assertIn('if images is not None:', encoder)
+        # The existing single-reference/other-model vision API remains available.
+        self.assertIn('"images": ("IMAGE",', encoder)
 
 
 if __name__ == "__main__":

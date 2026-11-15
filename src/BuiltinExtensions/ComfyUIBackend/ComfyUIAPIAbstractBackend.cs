@@ -34,6 +34,224 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
 
     public HashSet<string> NodeTypes = [];
 
+    /// <summary>
+    /// Validate against this exact backend's /object_info node inventory before
+    /// submitting a native Qwen segmented-edit workflow. Globally advertised
+    /// extension features can come from a DIFFERENT backend, particularly an
+    /// external API-by-URL Comfy instance with no bundled nodes installed.
+    /// Ordinary/non-Qwen generation is not affected.
+    /// </summary>
+    /// <summary>All image_-prefixed sockets are Qwen reference candidates.
+    /// Reject unknown suffixes, zero, overflow and indices above 16 during
+    /// backend preflight rather than silently ignoring malformed raw inputs.</summary>
+    private static bool IsQwen21ReferenceSocketCandidate(string name)
+    {
+        return name.StartsWith("image_", StringComparison.Ordinal);
+    }
+
+    private static bool HasQwen21AdvancedEncoderInputs(JObject workflow)
+    {
+        // A saved/raw Qwen image-edit workflow can supply its own VAE latent
+        // and need neither a segment crop nor our T2I empty-latent node.
+        // The new Swarm encoder sockets themselves identify Qwen 2.1 here.
+        return workflow is not null && workflow.Properties().Any(property =>
+        {
+            if (property.Value?["class_type"]?.ToString() != "SwarmTextEncodeAdvanced"
+                || property.Value["inputs"] is not JObject inputs)
+            {
+                return false;
+            }
+            if (inputs.Property("qwen21_prevent_empty_text") is JProperty qwenOption
+                && qwenOption.Value.Type != JTokenType.Null)
+            {
+                return true;
+            }
+            return inputs.Properties().Any(input =>
+                input.Value.Type != JTokenType.Null
+                && IsQwen21ReferenceSocketCandidate(input.Name));
+        });
+    }
+
+    public static void ValidateNativeQwenSegmentNodes(JObject workflow, IReadOnlySet<string> availableNodeTypes)
+    {
+        string[] usedTypes = [.. workflow.Properties()
+            .Select(property => property.Value?["class_type"]?.ToString())
+            .Where(name => !string.IsNullOrWhiteSpace(name))];
+        // Native Qwen segmented editing and plain Qwen 2.1 text-to-image both
+        // depend on custom Comfy nodes. Validate either graph before external
+        // backend image uploads or workflow submission.
+        bool isSegmentEdit = usedTypes.Contains("InpaintCropImproved");
+        bool isQwen21ImageGeneration = usedTypes.Contains("SwarmEmptyQwenImage21Latent");
+        bool isQwen21NativeEdit = HasQwen21AdvancedEncoderInputs(workflow)
+            || usedTypes.Contains("TextEncodeQwenImage21");
+        if (!isSegmentEdit && !isQwen21ImageGeneration && !isQwen21NativeEdit)
+        {
+            return;
+        }
+        // A fixed list silently omitted the actual SwarmTextEncodeAdvanced,
+        // ReferenceLatent, VAEEncode, and dynamically emitted LoRA hook nodes.
+        // Comfy will reject ANY missing class_type, not just a familiar few.
+        // Compare the entire generated (or raw) Qwen graph with this precise
+        // backend's registered /object_info class names before any uploads.
+        string[] missing = [.. usedTypes
+            .Where(type => availableNodeTypes is null || !availableNodeTypes.Contains(type))
+            .Distinct()
+            .OrderBy(type => type)];
+        if (missing.Length > 0)
+        {
+            throw new SwarmUserErrorException(
+                "The selected ComfyUI backend does not have required " +
+                (isSegmentEdit ? "Qwen segmented-edit" :
+                    isQwen21ImageGeneration ? "Qwen Image 2.1 text-to-image" :
+                    "Qwen Image 2.1 image-edit") +
+                " nodes registered: " +
+                string.Join(", ", missing) +
+                ". Install/enable those node packages on THIS backend and refresh its /object_info. " +
+                "Other ComfyUI backends advertising the feature do not make these nodes available here.");
+        }
+    }
+
+    /// <summary>
+    /// Comfy validates the REQUIRED inputs of every node, not just its class
+    /// name and our newer optional Qwen sockets. Catch schema regressions such
+    /// as missing LanPaint_Info / Inpainting_mode before the workflow executes.
+    /// Use only the selected backend's live /object_info; absent schema entries
+    /// are handled by the independent node-registration validation.
+    /// </summary>
+    public static void ValidateQwen21NativeRequiredInputs(JObject workflow, JObject backendObjectInfo)
+    {
+        if (workflow is null || backendObjectInfo is null)
+        {
+            return;
+        }
+        // Native Comfy TextEncodeQwenImage21 is also a valid raw image edit
+        // with no Swarm crop/empty-latent sentinels. It still has required
+        // clip, prompt, and negative_prompt inputs that must be validated
+        // BEFORE raw-workflow placeholder image uploads.
+        bool isQwen = HasQwen21AdvancedEncoderInputs(workflow)
+            || workflow.Properties().Any(node => node.Value?["class_type"]?.ToString() is
+                "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent" or "TextEncodeQwenImage21");
+        if (!isQwen)
+        {
+            return;
+        }
+        foreach (JProperty node in workflow.Properties())
+        {
+            string nodeType = node.Value?["class_type"]?.ToString();
+            if (nodeType is null || backendObjectInfo[nodeType]?["input"]?["required"] is not JObject required)
+            {
+                continue;
+            }
+            JObject inputs = node.Value?["inputs"] as JObject;
+            string[] missing = [.. required.Properties()
+                .Where(property => inputs?[property.Name] is null
+                    || inputs[property.Name].Type == JTokenType.Null)
+                .Select(property => property.Name)];
+            if (missing.Length > 0)
+            {
+                throw new SwarmUserErrorException(
+                    $"The selected ComfyUI backend requires {string.Join(", ", missing)} " +
+                    $"on node {node.Name} ({nodeType}), but the Qwen workflow does not supply them. " +
+                    "Do not rely on Python function defaults: fix the generated node inputs " +
+                    "or use a matching native node version on THIS backend.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Qwen-specific SwarmTextEncodeAdvanced input sockets are newer than the
+    /// node's class name. NodeTypes alone cannot prove that an API-by-URL
+    /// backend has the independent image_N sockets or native Qwen empty-text
+    /// tokenizer option. Check the exact selected backend's /object_info.
+    /// </summary>
+    public static void ValidateQwen21IndependentVisionSockets(JObject workflow, JObject backendObjectInfo)
+    {
+        // The custom Swarm Qwen 2.1 empty latent marks plain T2I just as
+        // InpaintCropImproved marks segmented edits. Both workflows rely on
+        // qwen21_prevent_empty_text and optional independent image_N sockets.
+        // An older remote backend can register the encoder class name while
+        // silently omitting these newly required inputs.
+        if (workflow is null ||
+            (!HasQwen21AdvancedEncoderInputs(workflow)
+             && !workflow.Properties().Any(p =>
+                 p.Value?["class_type"]?.ToString() is
+                     "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent")))
+        {
+            return;
+        }
+        foreach (JProperty node in workflow.Properties())
+        {
+            if (node.Value?["class_type"]?.ToString() != "SwarmTextEncodeAdvanced"
+                || node.Value["inputs"] is not JObject inputs)
+            {
+                continue;
+            }
+            foreach (JProperty input in inputs.Properties())
+            {
+                if (input.Value.Type == JTokenType.Null)
+                {
+                    continue;
+                }
+                bool isImageSlot = IsQwen21ReferenceSocketCandidate(input.Name);
+                if (isImageSlot
+                    && (!int.TryParse(input.Name.AsSpan("image_".Length), out int index)
+                        || index < 1 || index > 16))
+                {
+                    throw new SwarmUserErrorException(
+                        $"The requested Qwen reference socket '{input.Name}' is outside the native " +
+                        "image_1 through image_16 range. Refusing to drop an unsupported image " +
+                        "reference before sending the workflow to ComfyUI.");
+                }
+                bool isNativeEmptyTextOption = input.Name == "qwen21_prevent_empty_text";
+                if (!isImageSlot && !isNativeEmptyTextOption)
+                {
+                    continue;
+                }
+                // A registered socket name is insufficient: Comfy also
+                // requires its image or boolean TYPE to match the graph input.
+                JToken advertised = backendObjectInfo?["SwarmTextEncodeAdvanced"]?["input"]?["optional"]?[input.Name];
+                string requiredType = isImageSlot ? "IMAGE" : "BOOLEAN";
+                string actualType = advertised is JArray socket && socket.Count > 0
+                    ? socket[0]?.ToString() : null;
+                if (actualType != requiredType)
+                {
+                    throw new SwarmUserErrorException(
+                        $"The selected ComfyUI backend has an incompatible SwarmTextEncodeAdvanced node: " +
+                        $"its /object_info must register '{input.Name}' as {requiredType}, but reports " +
+                        $"'{actualType ?? "missing"}'. Update SwarmComfyCommon/SwarmText.py on THIS backend " +
+                        "and refresh /object_info before Qwen 2.1 segmented editing. " +
+                        "Do not batch differently sized Qwen references as a workaround: ImageBatch resizes them.");
+                }
+            }
+        }
+        // A backend may register the guard CLASS without its new coverage
+        // socket. Then a near-full-frame CLIPSeg detection would be accepted
+        // even though the generated graph requests fail-closed validation.
+        // Check the selected backend's actual /object_info schema before image
+        // uploads, just as we do for independent Qwen vision sockets.
+        foreach (JProperty node in workflow.Properties())
+        {
+            if (node.Value?["class_type"]?.ToString() != "SwarmRequireNonEmptyMask"
+                || node.Value["inputs"] is not JObject maskInputs
+                || maskInputs["maximum_coverage"] is null)
+            {
+                continue;
+            }
+            JToken advertised = backendObjectInfo?["SwarmRequireNonEmptyMask"]?["input"]?["required"]?["maximum_coverage"];
+            string actualType = advertised is JArray socket && socket.Count > 0
+                ? socket[0]?.ToString() : null;
+            if (actualType != "FLOAT")
+            {
+                throw new SwarmUserErrorException(
+                    "The selected ComfyUI backend has an outdated SwarmRequireNonEmptyMask node: " +
+                    "its /object_info must register 'maximum_coverage' as FLOAT, but reports " +
+                    $"'{actualType ?? "missing"}'. Update SwarmComfyCommon/SwarmMasks.py " +
+                    "on THIS backend and refresh /object_info before Qwen segmented editing. " +
+                    "Otherwise near-full-canvas detections may overwrite the source image.");
+            }
+        }
+    }
+
     public string ModelFolderFormat = null;
 
     public class ReusableSocket
@@ -818,6 +1036,23 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
+    /// <summary>
+    /// A raw Comfy ${loras} macro must select the exact installed adapter.
+    /// Qwen's model-path verification preserves case and filename whitespace,
+    /// so do not reintroduce the generic case-folding/fuzzy matcher here.
+    /// </summary>
+    public static string ResolveRawWorkflowLoraNames(
+        IEnumerable<string> requested, IEnumerable<string> available)
+    {
+        string[] catalog = [.. available];
+        string[] matches = [.. requested.Select(name => T2IPromptHandling.MatchPromptLoraName(name, catalog))];
+        if (matches.Any(name => string.IsNullOrWhiteSpace(name)))
+        {
+            throw new SwarmUserErrorException("One or more LoRA models not found.");
+        }
+        return matches.JoinString(",");
+    }
+
     public static string CreateWorkflow(T2IParamInput user_input, Func<string, string> initImageFixer, string ModelFolderFormat = null, HashSet<string> features = null)
     {
         // note: gently break any standard embed with a space, *require* swarm format embeds, as comfy's raw syntax has unwanted behaviors
@@ -876,12 +1111,7 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
                 string getLoras()
                 {
                     string[] loraNames = [.. Program.T2IModelSets["LoRA"].ListModelNamesFor(user_input.SourceSession)];
-                    string[] matches = [.. user_input.Get(T2IParamTypes.Loras, []).Select(lora => T2IParamTypes.GetBestModelInList(lora, loraNames))];
-                    if (matches.Any(m => string.IsNullOrWhiteSpace(m)))
-                    {
-                        throw new SwarmUserErrorException("One or more LoRA models not found.");
-                    }
-                    return matches.JoinString(",");
+                    return ResolveRawWorkflowLoraNames(user_input.Get(T2IParamTypes.Loras, []), loraNames);
                 }
                 string filled = tagBasic switch
                 {
@@ -920,6 +1150,121 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
         return workflow;
     }
 
+    /// <summary>
+    /// An externally hosted Comfy backend normally resizes Init Image uploads to
+    /// the text-to-image canvas. Native Qwen segmentation instead crops the
+    /// supplied photograph on its own pixel canvas; keep that source unscaled.
+    /// The production-generated InpaintCropImproved node is specific to the
+    /// native Qwen segment path. Do not alter ordinary img2img or raw workflows.
+    /// </summary>
+    public static bool ShouldPreserveQwenOriginalInitUpload(JObject generatedGraph, T2IParamInput input)
+    {
+        return generatedGraph is not null
+            && input.TryGet(T2IParamTypes.InitImage, out Image original) && original is not null
+            && generatedGraph.Properties().Any(p => p.Value["class_type"]?.ToString() == "InpaintCropImproved");
+    }
+
+    /// <summary>
+    /// Resolve ONLY class_type placeholders before CreateWorkflow performs
+    /// image uploads. A dynamic selector can name Qwen even when no other
+    /// Qwen node is statically visible. No user prompt or workflow is changed.
+    /// </summary>
+    private static string ExpandRawClassTypesForPreflight(string rawWorkflow, T2IParamInput input)
+    {
+        const string selectorPattern = @"(?<prefix>""class_type""\s*:\s*"")(?<value>(?:\\.|[^""\\])*)(?<suffix>"")";
+        return System.Text.RegularExpressions.Regex.Replace(rawWorkflow, selectorPattern, match =>
+        {
+            string selector = match.Groups["value"].Value;
+            if (!selector.Contains("${", StringComparison.Ordinal))
+            {
+                return match.Value;
+            }
+            string resolved = StringConversionHelper.QuickSimpleTagFiller(selector, "${", "}", tag =>
+            {
+                string fixedTag = Utilities.UnescapeJsonString(tag);
+                string paramName = fixedTag.BeforeAndAfter(':', out string defaultValue);
+                string paramBasic = paramName.BeforeAndAfter('+', out _);
+                T2IParamType paramType = T2IParamTypes.GetType(paramBasic, input);
+                object selectedValue = null;
+                if (paramType is not null && input.TryGetRaw(paramType, out object configured))
+                {
+                    selectedValue = configured;
+                }
+                selectedValue ??= defaultValue;
+                if (selectedValue is null || (paramType is null && string.IsNullOrWhiteSpace(defaultValue)))
+                {
+                    throw new SwarmUserErrorException(
+                        $"Unknown raw workflow class_type parameter '{paramBasic}' before image upload.");
+                }
+                if (selectedValue is T2IModel model)
+                {
+                    selectedValue = model.ToString();
+                }
+                if (selectedValue is List<string> list)
+                {
+                    selectedValue = list.JoinString(",");
+                }
+                if (selectedValue is bool value)
+                {
+                    selectedValue = value ? "true" : "false";
+                }
+                return Utilities.EscapeJsonString(selectedValue.ToString());
+            }, false);
+            return match.Groups["prefix"].Value + resolved + match.Groups["suffix"].Value;
+        });
+    }
+
+    /// <summary>
+    /// Parse raw Comfy node types and statically check Qwen requirements
+    /// before any remote image upload. Other workflows keep existing macros.
+    /// </summary>
+    public static void PreflightRawQwenSegmentNodes(
+        string rawWorkflow, IReadOnlySet<string> availableNodeTypes,
+        JObject backendObjectInfo = null, T2IParamInput userInput = null)
+    {
+        // Use an unmistakable JSON-number sentinel for raw macros, including
+        // ones EMBEDDED inside a quoted class_type (eg "Inpaint${kind}").
+        // Replacing them with plain null only catches a class_type that is
+        // entirely a macro; "Inpaint${kind}" becomes "Inpaintnull" and can
+        // bypass preflight before an irreversible external image upload.
+        const string unresolvedClassMacro = "-9223372036854775000";
+        if (userInput is not null)
+        {
+            rawWorkflow = ExpandRawClassTypesForPreflight(rawWorkflow, userInput);
+        }
+        string structuralGraph = StringConversionHelper.QuickSimpleTagFiller(
+            rawWorkflow, "${", "}", _ => unresolvedClassMacro);
+        JObject inventory = JObject.Parse(structuralGraph);
+        // This early static-class restriction is only for Qwen 2.1 native
+        // graphs, whose missing backend nodes must be caught before uploads.
+        // Ordinary raw Comfy workflows historically support class_type macros
+        // expanded in CreateWorkflow; applying this restriction to them would
+        // reject unrelated user-authored workflows before expansion.
+        bool requiresQwenPreflight = HasQwen21AdvancedEncoderInputs(inventory)
+            || inventory.Properties().Any(node =>
+                node.Value?["class_type"]?.ToString() is
+                    "InpaintCropImproved" or "SwarmEmptyQwenImage21Latent"
+                    or "TextEncodeQwenImage21");
+        if (requiresQwenPreflight && inventory.Properties().Any(property =>
+            property.Value?["class_type"] is null
+            || property.Value["class_type"].Type != JTokenType.String
+            || property.Value["class_type"].ToString().Contains(
+                unresolvedClassMacro, StringComparison.Ordinal)
+            || property.Value["class_type"].ToString().Contains(
+                "${", StringComparison.Ordinal)))
+        {
+            throw new SwarmUserErrorException(
+                "Raw Comfy workflow class_type must be statically specified before image upload. " +
+                "Dynamic class_type placeholders cannot be safely preflighted.");
+        }
+        ValidateNativeQwenSegmentNodes(inventory, availableNodeTypes);
+        // A legacy backend may register SwarmTextEncodeAdvanced by class name
+        // yet lack Qwen's independent image_N sockets. Raw graphs must reject
+        // this BEFORE initImageFixer uploads image files, just like generated.
+        ValidateQwen21IndependentVisionSockets(inventory, backendObjectInfo);
+        ValidateQwen21NativeRequiredInputs(inventory, backendObjectInfo);
+    }
+
     public volatile int ImageIDDedup = 0;
 
     /// <summary>Returns true if the file will be deleted properly (and ID should not be reused as it may conflict), or false if it can't be deleted (and thus the ID should be reused to reduce amount of images getting stored).</summary>
@@ -932,12 +1277,19 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
     public override async Task GenerateLive(T2IParamInput user_input, string batchId, Action<object> takeOutput)
     {
         List<Action> completeSteps = [];
+        bool preserveQwenOriginalInitUpload = false;
         string initImageFixer(string workflow) // This is a hack, backup for if Swarm nodes are missing
         {
             void TryApply(string key, ImageFile img, bool resize)
             {
                 int width = user_input.GetImageWidth(-1), height = user_input.GetImageHeight(-1);
                 if (width <= 0 || height <= 0)
+                {
+                    resize = false;
+                }
+                // The native Qwen original-image crop must not inherit generic
+                // Init Image canvas resizing on remote API-by-URL backends.
+                if (preserveQwenOriginalInitUpload && key == T2IParamTypes.InitImage.Type.ID)
                 {
                     resize = false;
                 }
@@ -993,15 +1345,64 @@ public abstract class ComfyUIAPIAbstractBackend : AbstractT2IBackend
             }
             return workflow;
         }
-        string workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+        // CreateWorkflow may upload init/prompt images via initImageFixer.
+        // Include both construction and backend node validation in the same
+        // cleanup scope, otherwise any early error leaks those temporary files.
+        string workflow = null;
         try
         {
+            // Standard generated workflows can be validated BEFORE falling
+            // back to uploading init/prompt images. API-by-URL backends cannot
+            // delete remote input files (RemoveInputFile returns false), so
+            // merely enclosing the upload in a finally would NOT prevent
+            // missing-node failures from leaving an uploaded file behind.
+            bool hasRawWorkflow = GetRawWorkflowFrom(user_input) is not null
+                && !user_input.Get(T2IParamTypes.ControlNetPreviewOnly);
+            if (hasRawWorkflow)
+            {
+                // Raw workflow macros can be unquoted JSON placeholders.
+                // Validate the fixed class_type inventory before upload,
+                // replacing placeholders with inert JSON nulls for parsing.
+                // The expanded graph is validated again after generation.
+                string rawGraph = GetRawWorkflowFrom(user_input);
+                PreflightRawQwenSegmentNodes(rawGraph, NodeTypes, RawObjectInfo, user_input);
+                workflow = CreateWorkflow(user_input, initImageFixer, ModelFolderFormat, [.. SupportedFeatures]);
+                JObject expandedRawGraph = JObject.Parse(workflow);
+                ValidateNativeQwenSegmentNodes(expandedRawGraph, NodeTypes);
+                ValidateQwen21IndependentVisionSockets(expandedRawGraph, RawObjectInfo);
+                ValidateQwen21NativeRequiredInputs(expandedRawGraph, RawObjectInfo);
+            }
+            else
+            {
+                // Generated graphs are complete before the optional image file
+                // fallback. Reject unavailable Qwen nodes before upload.
+                workflow = CreateWorkflow(user_input, static graph => graph, ModelFolderFormat, [.. SupportedFeatures]);
+                JObject nativeGraph = JObject.Parse(workflow);
+                ValidateNativeQwenSegmentNodes(nativeGraph, NodeTypes);
+                ValidateQwen21IndependentVisionSockets(nativeGraph, RawObjectInfo);
+                ValidateQwen21NativeRequiredInputs(nativeGraph, RawObjectInfo);
+                preserveQwenOriginalInitUpload = ShouldPreserveQwenOriginalInitUpload(nativeGraph, user_input);
+                workflow = initImageFixer(workflow);
+            }
             await AwaitJobLive(workflow, batchId, takeOutput, user_input, user_input.InterruptToken);
         }
         catch (Exception ex)
         {
             Logs.Verbose($"Error: {ex.ReadableString()}");
-            Logs.Debug($"Failed to process comfy workflow for inputs {user_input} with raw workflow {JObject.Parse(workflow).ToDenseDebugString(noSpacing: true)}");
+            string diagnosticGraph = workflow ?? "(workflow generation incomplete)";
+            if (workflow is not null)
+            {
+                try
+                {
+                    diagnosticGraph = JObject.Parse(workflow).ToDenseDebugString(noSpacing: true);
+                }
+                catch (JsonException)
+                {
+                    // Invalid workflow JSON is itself a possible cause of
+                    // failure. Logging must not replace the original exception.
+                }
+            }
+            Logs.Debug($"Failed to process comfy workflow for inputs {user_input} with raw workflow {diagnosticGraph}");
             throw;
         }
         finally

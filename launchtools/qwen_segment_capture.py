@@ -20,8 +20,8 @@ from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 import zipfile
 
-SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced"}
-COMPOSITES = {"SwarmImageCompositeMaskedColorCorrecting", "ImageCompositeMasked"}
+SAMPLERS = {"SwarmKSampler", "KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced", "LanPaint_KSampler"}
+COMPOSITES = {"SwarmImageCompositeMaskedColorCorrecting", "ImageCompositeMasked", "InpaintStitchImproved"}
 LORAS = {"LoraLoader", "LoraLoaderModelOnly", "NunchakuFluxLoraLoader"}
 ENCODERS = {"SwarmTextEncodeAdvanced", "CLIPTextEncode", "TextEncodeQwenImage21"}
 MAX_BYTES = 32 * 1024 * 1024
@@ -153,7 +153,10 @@ def analyze(graph: dict[str, Any]) -> dict[str, Any]:
     by_composite: dict[str, list[str]] = {}
     for node_id, node in graph.items():
         if node["class_type"] in COMPOSITES:
-            candidates = upstream(graph, roots(node.get("inputs", {}).get("source"), graph), SAMPLERS)
+            # Native CropAndStitch composites its sampled result through
+            # inpainted_image, while legacy composites use source.
+            key = "inpainted_image" if node["class_type"] == "InpaintStitchImproved" else "source"
+            candidates = upstream(graph, roots(node.get("inputs", {}).get(key), graph), SAMPLERS)
             by_composite[node_id] = sorted(candidates & samplers)
     segment_ids = {s for values in by_composite.values() for s in values}
     other_model_nodes: set[str] = set()
@@ -175,7 +178,11 @@ def analyze(graph: dict[str, Any]) -> dict[str, Any]:
         warnings = []
         if not loaders:
             warnings.append("NO_LORA_NODE_ON_MODEL_PATH: graph evidence only; merged checkpoint adapters cannot be inferred")
-        if references and encoders and all(not any(graph[e].get("inputs", {}).get(k) is not None for k in ("images", "image", "image1")) for e in encoders):
+        if references and encoders and all(not any(
+                value is not None and (key in ("images", "image", "image1")
+                                       or key.startswith("image_"))
+                for key, value in graph[e].get("inputs", {}).items())
+                for e in encoders):
             warnings.append("REFERENCE_WITHOUT_ENCODER_IMAGE: compare with the installed Qwen 2.1 conditioning contract; not proof of visual failure")
         if settings.get("effective_step_count") == 0:
             warnings.append("ZERO_EFFECTIVE_STEPS")
@@ -188,7 +195,7 @@ def analyze(graph: dict[str, Any]) -> dict[str, Any]:
             "lora_nodes_not_shared_with_base": [n for n in loaders if n not in other_model_nodes],
             "conditioning_encoders": [describe_node(graph, n) for n in encoders],
             "reference_latents": [describe_node(graph, n) for n in references],
-            "latent_mask_nodes": [describe_node(graph, n) for n in sorted(latent_nodes) if graph[n]["class_type"] == "SetLatentNoiseMask"],
+            "latent_mask_nodes": [describe_node(graph, n) for n in sorted(latent_nodes) if graph[n]["class_type"] in {"SetLatentNoiseMask", "LanPaint_ImageEncode"}],
             "compositors": [describe_node(graph, c) for c, ss in by_composite.items() if sampler_id in ss],
             "warnings": warnings,
         })

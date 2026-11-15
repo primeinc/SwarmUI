@@ -4,6 +4,12 @@ on:
     push:
     pull_request:
 
+# Only the newest validation of a pushed repair head is authoritative.
+# Keep historical completed results but replace superseded pending runs without cancelling the active proof.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
 jobs:
     test:
         runs-on: ubuntu-latest
@@ -15,15 +21,34 @@ jobs:
         - uses: actions/setup-dotnet@v5
           with:
             dotnet-version: '8.x'
-        - run: bash ./launchtools/run_tests.sh
+        - name: Run C# graph tests and export actual Qwen segment reproduction graph
+          env:
+            SWARM_QWEN_EXPORT_GRAPH: /tmp/swarm-qwen-production-graph.json
+          run: bash ./launchtools/run_tests.sh
+        - name: Exercise native Qwen empty-negative tokenizer flags (CPU, NOT inference)
+          run: python3 -m unittest discover -s tests -p test_qwen21_empty_token_cpu.py -v
+        - name: Validate actual generated Qwen graph with no-model Python acceptance preflight
+          run: |
+            test -s /tmp/swarm-qwen-production-graph.json
+            python3 tests/integration/qwen_segment_text_replacement.py --workflow /tmp/swarm-qwen-production-graph.json --preflight-only
         # These checks are deliberately only syntax checks. They do not imply
         # that Qwen segment LoRA weights were matched or applied during inference.
         - name: Validate vendored upstream Qwen node and production routing (NOT inference)
           run: python3 -m unittest discover -s tests -p test_qwen_native_bundle.py -v
+        - name: Verify native Qwen graph capture detects real LanPaint sampler and compositor (NO inference)
+          run: python3 -m unittest discover -s tests -p test_qwen_segment_capture_cpu.py -v
         - name: Validate live acceptance test syntax (NOT inference)
           run: python3 -m py_compile tests/live/test_qwen_segment_lora.py tests/live/test_segment_lora_browser.py tests/integration/qwen_segment_text_replacement.py
         - name: Validate production and byte-identical bundled Comfy plugins (NOT inference)
-          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py
+          run: python3 -m py_compile src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyQwenNodes_Upstream.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch/inpaint_cropandstitch.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/__init__.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/LanPaintUpstream/src/LanPaint/nodes.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmText.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmKSampler.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmMasks.py src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyCommon/SwarmLatents.py tests/test_qwen_segment_mask_guard.py
+        - name: Verify Qwen native CFG defaults on browser model changes (Node, NOT inference)
+          run: |
+            node --check src/wwwroot/js/genpage/gentab/models.js
+            node tests/test_qwen_cfg_defaults_cpu.js
+        - name: Verify LoRA confinement uses the last authored prompt after dropdown focus (Node)
+          run: |
+            node --check src/wwwroot/js/genpage/gentab/loras.js
+            node tests/test_qwen_lora_ui_focus_cpu.js
         - name: Validate browser JS syntax (NOT browser execution)
           run: node --check src/wwwroot/js/genpage/gentab/loras.js
 
@@ -36,10 +61,38 @@ jobs:
             python-version: '3.12'
         # Exercise upstream real-tensor crop/stitch behavior, not mocks or
         # handrolled imitations. This does not imply a Qwen GPU acceptance pass.
+        - name: Verify LoRA live-manifest identities independently of case names (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_lora_manifest_cpu.py -v
+        - name: Execute live Qwen mask-chain verifier with inverse and invalid CPU controls
+          run: python3 -m unittest discover -s tests -p test_qwen_live_mask_chain_cpu.py -v
+        - name: Verify scheduled Qwen LoRA hook acceptance with native graph controls (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_live_dynamic_hook_cpu.py -v
         - name: Install CPU tensor dependencies for upstream CropAndStitch tests
           run: |
-            python3 -m pip install 'numpy<3' pillow scipy
+            python3 -m pip install 'numpy<3' pillow scipy safetensors requests
             python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        - name: Run native Qwen Image 2.1 64-channel empty-latent tensor controls (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen21_empty_latent_cpu.py -v
+        - name: Run shipped Swarm prompt tag parser CPU controls
+          run: python3 -m unittest discover -s tests -p test_qwen_swarm_prompt_parser_cpu.py -v
+        - name: Verify Qwen native empty-text tokenizer dispatch on CPU
+          run: python3 -m unittest discover -s tests -p test_qwen_swarm_encoder_cpu.py -v
+        - name: Verify pinned upstream Comfy hook reaches Qwen model patcher (CPU, NOT inference)
+          run: python3 -m unittest discover -s tests -p test_qwen_upstream_model_hook_cpu.py -v
+        - name: Run offline exported-Qwen-graph preflight negative controls
+          run: python3 -m unittest discover -s tests -p test_qwen_segment_preflight_offline.py -v
+        - name: Prove LoRA inside-mask effect metric rejects outside leaks (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_segment_lora_confinement_cpu.py -v
+        - name: Verify CLIPSeg cache repairs and interrupted downloads atomically (CPU)
+          run: python3 -m unittest discover -s tests -p test_qwen_clipseg_download_cpu.py -v
+        - name: Execute shipped CLIPSeg with two distinct batched images (CPU, no model)
+          run: python3 -m unittest discover -s tests -p test_qwen_clipseg_batch_cpu.py -v
+        - name: Run CPU-tensor segment detection guard controls
+          run: python3 -m unittest discover -s tests -p test_qwen_segment_mask_guard.py -v
+        - name: Test real-tensor replacement without old-subject ghosting
+          env:
+            PYTHONPATH: src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch
+          run: python3 -m unittest discover -s tests -p test_qwen_crop_replacement_cpu.py -v
         - name: Run unmodified upstream CropAndStitch round-trip and mask tests
           env:
             PYTHONPATH: src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/ComfyInpaintCropAndStitch
