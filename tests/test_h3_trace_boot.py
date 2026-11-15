@@ -42,6 +42,16 @@ class StartupTraceContract(unittest.TestCase):
         self.assertIn('"KSamplerAdvanced"', generator)
         self.assertIn('"SwarmKSampler"', generator)
 
+    def test_comfy_stderr_trace_tags_are_forwarded_at_info_level(self):
+        code = BACKEND.read_text(encoding="utf-8")
+        monitor = code.split("async void MonitorErrLoop()", 1)[1]
+        promotion = monitor.split("else if (keepShowing)", 1)[0]
+        for marker in ("[H3TRACE-BOOT]", "[H3TRACE-ROUTE]", "[H3PERF]", "[H3VAE]"):
+            self.assertIn(marker, promotion)
+        self.assertIn('Logs.Info($"[{nameSimple}/STDERR] {line}")', promotion)
+        self.assertIn('Logs.Debug($"[{nameSimple}/STDERR] {line}")', monitor)
+        self.assertIn('Logs.Warning($"[{nameSimple}/STDERR] {line}")', monitor)
+
     def test_no_tracing_on_unrelated_model_without_opt_in(self):
         code = SAMPLER.read_text(encoding="utf-8")
         self.assertIn('os.environ.get("SWARM_H3_TRACE") == "1"', code)
