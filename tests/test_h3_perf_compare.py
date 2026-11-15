@@ -54,9 +54,9 @@ class H3PerfCompareTests(unittest.TestCase):
 
     def test_two_prompt_ids_can_be_compared_from_one_warm_process_log(self):
         sequences = [
-            {"start": {"prompt_id": "i2v", "latent_shapes": [[1, 16, 37, 60, 60]]}},
-            {"start": {"prompt_id": "i2v", "latent_shapes": [[1, 16, 97, 60, 60]]}},
-            {"start": {"prompt_id": "main", "latent_shapes": [[1, 16, 97, 60, 60]]}},
+            {"start": {"prompt_id": "i2v", "latent_shapes": [[1, 16, 37, 60, 60]]}, "steps": []},
+            {"start": {"prompt_id": "i2v", "latent_shapes": [[1, 16, 97, 60, 60]]}, "steps": []},
+            {"start": {"prompt_id": "main", "latent_shapes": [[1, 16, 97, 60, 60]]}, "steps": []},
         ]
         first, second = compare_tool.split_sequential_prompts(sequences)
         self.assertEqual(len(first), 2)
