@@ -169,6 +169,36 @@ class H3LogConsoleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Malformed \\[H3VAE\\]'):
             h3.build_report('scan', [log])
 
+    def test_trace_health_locates_which_startup_and_dispatch_gate_failed(self):
+        path = self.base / "health.log"
+        path.write_text("Comfy model loading old log only\n", encoding="utf-8")
+        first = h3.trace_health(path)
+        self.assertFalse(first["host_boot_seen"])
+        self.assertIn("may omit startup", first["verdict"])
+
+        host = "[H3TRACE-BOOT] host=SwarmUI backend=ComfyUI-0 traceEnabled=True childEnv=1\n"
+        path.write_text(host, encoding="utf-8")
+        self.assertIn("custom-node import was not observed", h3.trace_health(path)["verdict"])
+
+        plugin = ("[H3TRACE-BOOT] source=SwarmComfyCommon import_start env=1 file=x\n"
+                  "[H3TRACE-BOOT] source=SwarmComfyCommon status=enabled vae_hook=True\n")
+        native = "[H3TRACE-ROUTE] stage=main sampler=KSamplerAdvanced per_step_trace=False\n"
+        path.write_text(host + plugin + native, encoding="utf-8")
+        self.assertIn("Native KSamplerAdvanced", h3.trace_health(path)["verdict"])
+
+        custom = ("[H3TRACE-ROUTE] stage=main sampler=SwarmKSampler per_step_trace=True\n"
+                  "[H3TRACE-ROUTE] source=SwarmKSampler model=MiniMaxH3 active=True\n")
+        path.write_text(host + plugin + custom, encoding="utf-8")
+        self.assertIn("did not arrive", h3.trace_health(path)["verdict"])
+
+        path.write_text(host + plugin + custom + '[H3PERF] {"event":"start"}\n'
+                        + '[H3VAE] {"event":"finish"}\n', encoding="utf-8")
+        complete = h3.trace_health(path)
+        self.assertEqual((complete["sampler_event_count"], complete["vae_event_count"]), (1, 1))
+        self.assertIn("all observable", complete["verdict"])
+        scan = h3.build_report("scan", [path])
+        self.assertIn("TRACE DELIVERY HEALTH", h3.render(scan))
+
     def test_missing_trace_errors_without_creating_false_comparison(self):
         old = self.base / 'old.log'
         old.write_text('Prompt executed in 384.81 seconds', encoding='utf-8')
