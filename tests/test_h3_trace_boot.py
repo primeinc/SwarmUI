@@ -45,6 +45,9 @@ class StartupTraceContract(unittest.TestCase):
     def test_no_tracing_on_unrelated_model_without_opt_in(self):
         code = SAMPLER.read_text(encoding="utf-8")
         self.assertIn('os.environ.get("SWARM_H3_TRACE") == "1"', code)
+        self.assertIn("[H3TRACE-ROUTE] source=SwarmKSampler", code)
+        self.assertIn("active={trace_enabled}", code)
+        self.assertIn("file=sys.stderr, flush=True", code)
 
 
 if __name__ == "__main__":
