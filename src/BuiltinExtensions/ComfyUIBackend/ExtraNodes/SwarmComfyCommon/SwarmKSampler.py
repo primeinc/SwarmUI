@@ -116,24 +116,27 @@ def swarm_fixed_noise(seed, latent_image, var_seed, var_seed_strength):
 
 
 def get_preview_metadata():
+    # Only the current execution context can identify the preview's owner.
+    # ComfyUI's last_prompt_id/last_node_id are process-global and may belong
+    # to an entirely different generation by the time a worker emits pixels.
     executing_context = get_executing_context()
-    prompt_id = None
-    node_id = None
-    if executing_context is not None:
-        prompt_id = executing_context.prompt_id
-        node_id = executing_context.node_id
-    if prompt_id is None:
-        prompt_id = PromptServer.instance.last_prompt_id
-    if node_id is None:
-        node_id = PromptServer.instance.last_node_id
-    return {"node_id": node_id, "prompt_id": prompt_id, "display_node_id": node_id, "parent_node_id": node_id, "real_node_id": node_id} # display_node_id, parent_node_id, real_node_id? comfy_execution/progress.py has this.
+    prompt_id = executing_context.prompt_id if executing_context is not None else None
+    node_id = executing_context.node_id if executing_context is not None else None
+    return {"node_id": node_id, "prompt_id": prompt_id, "display_node_id": node_id,
+            "parent_node_id": node_id, "real_node_id": node_id}
 
 
 def make_swarm_preview_state():
-    # Capture Comfy's prompt/node context on the sampling thread. A background
-    # preview sender has no executing ContextVar and must not use last_prompt_id.
-    return {"lock": threading.Lock(), "active": True, "last_step_sent": -1,
-            "metadata": get_preview_metadata(), "client_id": PromptServer.instance.client_id}
+    metadata = get_preview_metadata()
+    client_id = PromptServer.instance.client_id
+    # Never send an unowned preview. A missing execution context is not
+    # permission to guess from a process-global most-recent job.
+    owned = bool(metadata["prompt_id"] and metadata["node_id"] and client_id)
+    if not owned:
+        print("[H3TRACE-ROUTE] source=SwarmKSampler preview_disabled=no_execution_identity_or_client",
+              file=sys.stderr, flush=True)
+    return {"lock": threading.Lock(), "active": owned, "last_step_sent": -1,
+            "metadata": metadata, "client_id": client_id}
 
 
 def _swarm_h3_trace_shapes(tensor):
@@ -285,7 +288,7 @@ def make_swarm_sampler_callback(steps, device, model, previews, preview_state):
     pbar = comfy.utils.ProgressBar(steps)
     def callback(step, x0, x, total_steps):
         pbar.update_absolute(step + 1, total_steps, None)
-        if previewer:
+        if previewer and preview_state["active"]:
             if getattr(x0, "is_nested", False) and hasattr(x0, "tensors"):
                 x0 = x0.tensors[0]
             if x0.ndim == 5:
