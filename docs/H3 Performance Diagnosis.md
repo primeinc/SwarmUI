@@ -131,6 +131,25 @@ reserved CUDA memory. `step` events record sampler-side wall time (`elapsed_s`) 
 preview/progress callback overhead (`callback_s`), without forcing GPU
 synchronization. `finish` reports sampler duration.
 
+The trace also records **actual model-weight residency** from ComfyUI
+`ModelPatcher.loaded_size()` and `model_size()` at sampler start, every step,
+and finish. `weights_resident_mb` includes dynamic VBAR-resident GPU weights;
+`weights_offloaded_mb` is the remaining model size, **not a count of bytes
+transferred per step**. This is deliberately different from
+`torch.cuda.memory_allocated`: that counter misses dynamically managed
+weights. `0 models unloaded` only reports full model-registry unloading
+decisions, and `N MB Staged` is dynamically staged model weight storage,
+not `N MB` of permanently resident GPU weights.
+
+**Implementation provenance (source consulted):**
+`Comfy-Org/ComfyUI@c844cb672186f187bf9455e2808821417a10d296`,
+`comfy/model_patcher.py::DynamicVramModelPatcher.loaded_size` (around line
+1901), `comfy/model_patcher.py::DynamicVramModelPatcher.load` (around 2128),
+and `comfy/model_management.py::load_models_gpu` (around 1000–1033).
+`SwarmKSampler.py::_swarm_h3_trace_residency` adapts these APIs. This
+proves reported **residency snapshots**, not how much PCIe traffic or
+GPU compute time each step consumed; a GPU profiler is needed for that.
+
 Compare `latent_shapes` first. If equal, compare `refs` versus `keyframes`
 and `text_tokens`; H3's Ref2VA `ref_img` and FL2VA `cond` tokens are
 **different execution modes**, not equivalent inputs even for identical images.
