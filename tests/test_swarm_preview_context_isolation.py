@@ -71,6 +71,48 @@ class SamplerPreviewContextTests(unittest.TestCase):
         finally:
             scope["_swarm_preview_end"](token)
 
+    def test_preview_identity_never_falls_back_to_last_global_prompt(self):
+        import ast
+        module = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+        names = {"get_preview_metadata", "make_swarm_preview_state"}
+        functions = [node for node in module.body if
+                     isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual({n.name for n in functions}, names)
+        stale_server = types.SimpleNamespace(
+            last_prompt_id="OLD", last_node_id="OLD_NODE", client_id="live-client")
+        env = {
+            "get_executing_context": lambda: None,
+            "PromptServer": types.SimpleNamespace(instance=stale_server),
+            "threading": threading, "sys": __import__("sys"),
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), "exec"), env)
+        meta = env["get_preview_metadata"]()
+        self.assertIsNone(meta["prompt_id"])
+        self.assertIsNone(meta["node_id"])
+        preview = env["make_swarm_preview_state"]()
+        self.assertFalse(preview["active"])
+        self.assertNotIn("OLD", str(preview["metadata"]))
+
+    def test_owned_context_allows_preview_and_preserves_client_snapshot(self):
+        import ast
+        module = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        selected = [node for node in module.body if
+                    isinstance(node, ast.FunctionDef) and node.name in
+                    {"get_preview_metadata", "make_swarm_preview_state"}]
+        server = types.SimpleNamespace(client_id="client-a")
+        ctx = types.SimpleNamespace(prompt_id="prompt-a", node_id="sampler-a")
+        env = {
+            "get_executing_context": lambda: ctx,
+            "PromptServer": types.SimpleNamespace(instance=server),
+            "threading": threading, "sys": __import__("sys"),
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), env)
+        state = env["make_swarm_preview_state"]()
+        server.client_id = "client-b"
+        self.assertTrue(state["active"])
+        self.assertEqual(state["metadata"]["prompt_id"], "prompt-a")
+        self.assertEqual(state["client_id"], "client-a")
+
     def test_negative_global_state_cannot_return(self):
         source = SOURCE.read_text(encoding="utf-8")
         self.assertNotIn('["active_count"]', source)
