@@ -177,8 +177,24 @@ def _swarm_h3_trace_snapshot(model, positive, latent_samples):
     }
 
 
-def _swarm_h3_trace_timed_callback(callback, emit, clock=None):
-    """Time actual sampling callbacks, not an estimated step count."""
+def _swarm_h3_trace_residency(model):
+    """Comfy ModelPatcher GPU weight residency, not just PyTorch tensor allocations.
+
+    Mirrors ComfyUI DynamicVramModelPatcher.loaded_size() semantics (revision
+    c844cb672186f187bf9455e2808821417a10d296); no weight copies or sync.
+    """
+    resident = model.loaded_size()
+    total = model.model_size()
+    return {
+        "weights_resident_mb": round(resident / (1024 * 1024), 1),
+        "weights_offloaded_mb": round(max(0, total - resident) / (1024 * 1024), 1),
+        "weights_total_mb": round(total / (1024 * 1024), 1),
+        "dynamic_model": bool(model.is_dynamic()),
+    }
+
+
+def _swarm_h3_trace_timed_callback(callback, emit, clock=None, residency=None):
+    """Time actual sampling callbacks, excluding preview and trace overhead."""
     if clock is None:
         clock = time.perf_counter
     last = clock()
@@ -188,11 +204,15 @@ def _swarm_h3_trace_timed_callback(callback, emit, clock=None):
         arrived = clock()
         result = callback(step, x0, x, total_steps)
         departed = clock()
-        # Distinguish model/sampler time from Swarm's preview/progress callback.
-        emit({"event": "step", "step": step + 1, "total_steps": total_steps,
-              "elapsed_s": round(arrived - last, 3),
-              "callback_s": round(departed - arrived, 3)})
-        last = departed
+        info = {"event": "step", "step": step + 1, "total_steps": total_steps,
+                "elapsed_s": round(arrived - last, 3),
+                "callback_s": round(departed - arrived, 3)}
+        if residency is not None:
+            info.update(residency())
+        emit(info)
+        # Neither preview generation nor telemetry belongs in the next step's
+        # model-runtime interval.
+        last = clock()
         return result
 
     return traced
@@ -654,6 +674,7 @@ class SwarmKSampler:
                 if getattr(device, "type", None) == "cuda":
                     details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
                     details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                details.update(_swarm_h3_trace_residency(model))
                 _swarm_h3_trace_emit("start", trace_identity, details)
             preview_state = make_swarm_preview_state()
             _swarm_preview_begin()
@@ -661,7 +682,8 @@ class SwarmKSampler:
                 callback = make_swarm_sampler_callback(steps, device, model, previews, preview_state)
                 if trace_enabled:
                     callback = _swarm_h3_trace_timed_callback(
-                        callback, lambda event: _swarm_h3_trace_emit(event["event"], trace_identity, event))
+                        callback, lambda event: _swarm_h3_trace_emit(event["event"], trace_identity, event),
+                        residency=lambda: _swarm_h3_trace_residency(model))
 
                 samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
                                         denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
@@ -674,6 +696,7 @@ class SwarmKSampler:
                     if getattr(device, "type", None) == "cuda":
                         details["cuda_allocated_mb"] = round(torch.cuda.memory_allocated(device) / (1024 * 1024), 1)
                         details["cuda_reserved_mb"] = round(torch.cuda.memory_reserved(device) / (1024 * 1024), 1)
+                    details.update(_swarm_h3_trace_residency(model))
                     _swarm_h3_trace_emit("finish", trace_identity, details)
                 with preview_state["lock"]:
                     preview_state["active"] = False
