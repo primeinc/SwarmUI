@@ -57,8 +57,9 @@ Each `[H3PERF]` JSON line is tied to the ComfyUI `prompt_id` and `node_id`.
 The sampler `start` event records actual video/audio latent shapes,
 number/shape of reference blocks, keyframe blocks, conditioning text token
 lengths, CFG, sampler, scheduler, preview type, patch count, and allocated/
-reserved CUDA memory. `step` events record callback-to-callback wall time
-without forcing GPU synchronization. `finish` reports sampler duration.
+reserved CUDA memory. `step` events record sampler-side wall time (`elapsed_s`) separately from
+preview/progress callback overhead (`callback_s`), without forcing GPU
+synchronization. `finish` reports sampler duration.
 
 Compare `latent_shapes` first. If equal, compare `refs` versus `keyframes`
 and `text_tokens`; H3's Ref2VA `ref_img` and FL2VA `cond` tokens are
