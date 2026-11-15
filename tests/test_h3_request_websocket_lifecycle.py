@@ -50,7 +50,9 @@ class H3RequestSessionTests(unittest.TestCase):
 
     def test_negative_control_missing_failure_dispose_fails(self):
         content = SOURCE.read_text(encoding="utf-8")
-        mutant = content.replace("socket.Dispose();", "/* lost dispose */", 1)
+        prefix, session = content.split("public async Task AwaitJobLive(", 1)
+        mutant = prefix + "public async Task AwaitJobLive(" + session.replace(
+            "socket.Dispose();", "/* lost dispose */", 1)
         with self.assertRaises(AssertionError):
             verify_session_isolation(mutant)
 
